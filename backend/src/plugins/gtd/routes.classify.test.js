@@ -38,17 +38,40 @@ const ACCT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 // state 'todo' → folder 'Todo' under the defaults. An INBOX-resident message is the common
 // case: its folder differs from the label folder, so classify COPIES into 'Todo' and unclassify
 // resolves the label copy through the shared RFC Message-ID.
-const inboxMsg = { id: MSG_ID, account_id: ACCT_ID, uid: 10, folder: 'INBOX', message_id: '<m@x>', is_read: false };
+const inboxMsg = {
+  id: MSG_ID,
+  account_id: ACCT_ID,
+  uid: 10,
+  folder: 'INBOX',
+  message_id: '<m@x>',
+  is_read: false,
+  read_revision: 2,
+  star_revision: 0,
+  folder_uid_validity: 123,
+  folder_observation_generation: 4,
+};
+const labelCopy = {
+  id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  account_id: ACCT_ID,
+  uid: 42,
+  folder: 'Todo',
+  read_revision: 2,
+  star_revision: 0,
+  folder_uid_validity: 456,
+  folder_observation_generation: 8,
+};
 const account = { id: ACCT_ID, user_id: 'u1', folder_mappings: {} };
 
 // Route every query classify issues: the ownership-scoped message load, the account fetch
 // (POST copy path), and resolveCopyUid's sibling lookup (DELETE). Each is individually swappable
 // so a test can drive the not-owned (msg:null) / no-sibling (sibling:null) branches.
-function stubQueries({ msg = inboxMsg, acct = account, sibling = { uid: 42 } } = {}) {
+function stubQueries({ msg = inboxMsg, acct = account, sibling = labelCopy } = {}) {
   query.mockImplementation(async (sql) => {
     if (sql.includes('FROM messages m') && sql.includes('JOIN email_accounts')) return { rows: msg ? [msg] : [] };
     if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: acct ? [acct] : [] };
-    if (sql.startsWith('SELECT uid FROM messages')) return { rows: sibling ? [sibling] : [] };
+    if (sql.includes('WHERE m.account_id = $1 AND m.folder = $2 AND m.message_id = $3')) {
+      return { rows: sibling ? [sibling] : [] };
+    }
     return { rows: [] };
   });
 }
@@ -61,7 +84,9 @@ function buildApp() {
 }
 
 const classify = (body) => fetch(`${base}/api/gtd/classify`, {
-  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'X-Idempotency-Key': 'classify-1' },
+  body: JSON.stringify(body),
 });
 const unclassify = (body) => fetch(`${base}/api/gtd/classify`, {
   method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -110,7 +135,22 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     expect(await res.json()).toEqual({ ok: true, folder: 'Todo' });
     // Callers own folder existence, so classify ensures then copies — the message stays in INBOX.
     expect(imapManager.ensureFolder).toHaveBeenCalledWith(account, 'Todo');
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Todo');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(
+      ACCT_ID, 10, 'INBOX', 'Todo',
+      {
+        operationKey: 'gtd-classify:u1:classify-1',
+        snapshot: {
+          id: MSG_ID,
+          accountId: ACCT_ID,
+          uid: 10,
+          folder: 'INBOX',
+          uidValidity: '123',
+          folderGeneration: '4',
+          readRevision: 2,
+          starRevision: 0,
+        },
+      },
+    );
   });
 
   it('short-circuits when the message already lives in the state folder (no IMAP work)', async () => {
@@ -127,6 +167,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     const res = await classify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(404);
     expect((await res.json()).error).toMatch(/not found/i);
+    expect(query.mock.calls[0][0]).toMatch(/m\.is_deleted = false/);
+    expect(query.mock.calls[0][0]).toMatch(/m\.metadata_complete = true/);
     expect(imapManager.copyMessage).not.toHaveBeenCalled();
   });
 
@@ -144,7 +186,20 @@ describe('DELETE /api/gtd/classify — remove a GTD label', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo' });
     // resolveCopyUid found the state-folder copy (uid 42) via the shared Message-ID join.
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 42, 'Todo');
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 42, 'Todo', {
+      expectedId: labelCopy.id,
+      expectedUidValidity: labelCopy.folder_uid_validity,
+      snapshot: {
+        id: labelCopy.id,
+        accountId: ACCT_ID,
+        uid: 42,
+        folder: 'Todo',
+        uidValidity: '456',
+        folderGeneration: '8',
+        readRevision: 2,
+        starRevision: 0,
+      },
+    });
   });
 
   it('returns removed:false when no copy exists in the state folder (nothing to delete)', async () => {
@@ -171,13 +226,28 @@ describe('DELETE /api/gtd/classify — remove a GTD label', () => {
     const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo' });
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 10, 'Todo');
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 10, 'Todo', {
+      expectedId: MSG_ID,
+      expectedUidValidity: inboxMsg.folder_uid_validity,
+      snapshot: {
+        id: MSG_ID,
+        accountId: ACCT_ID,
+        uid: 10,
+        folder: 'Todo',
+        uidValidity: '123',
+        folderGeneration: '4',
+        readRevision: 2,
+        starRevision: 0,
+      },
+    });
   });
 
   it("404s a message the caller doesn't own", async () => {
     stubQueries({ msg: null });
     const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(404);
+    expect(query.mock.calls[0][0]).toMatch(/m\.is_deleted = false/);
+    expect(query.mock.calls[0][0]).toMatch(/m\.metadata_complete = true/);
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
   });
 
