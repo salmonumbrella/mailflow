@@ -101,5 +101,6 @@ export {
   getMessageCopyFolders,
   getMessageFields,
   getMessageAnnotations,
+  getLabelMetadata,
   setMessageAnnotation,
 } from '../services/mailAccess.js';
