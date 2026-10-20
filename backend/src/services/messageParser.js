@@ -167,13 +167,14 @@ export function snippetFromBody(text, html) {
 const SNIPPET_SKIP_TAGS = new Set(['script', 'style', 'head', 'title', 'noscript']);
 const SNIPPET_VISIBLE_CAP = 260; // stop after this many visible chars — comfortably over the 200-char snippet
 
-function extractHtmlSnippetText(html) {
+export function extractHtmlSnippetText(html, visibleCap = SNIPPET_VISIBLE_CAP, { yieldBetweenChunks = false, signal } = {}) {
   let out = '';
   let skipDepth = 0;
   let visible = 0;
   let done = false;
   const invisible = new RegExp(INVISIBLE_CHARS_RE.source, 'g');
-  const addSeparator = () => { if (out && !/\s$/.test(out)) out += ' '; };
+  let needsSeparator = false;
+  const addSeparator = () => { if (needsSeparator) { out += ' '; needsSeparator = false; } };
 
   const parser = new Parser({
     onopentag(name) { if (SNIPPET_SKIP_TAGS.has(name)) { skipDepth++; return; } if (!skipDepth) addSeparator(); },
@@ -184,16 +185,32 @@ function extractHtmlSnippetText(html) {
       if (!clean) return;
       if (/^\s*$/.test(clean)) { addSeparator(); return; } // collapse whitespace-only runs (incl. de-filler'd text)
       out += clean;
+      needsSeparator = !/\s/.test(clean[clean.length - 1]);
       visible += clean.replace(/\s+/g, '').length;
-      if (visible >= SNIPPET_VISIBLE_CAP) done = true;
+      if (visible >= visibleCap) done = true;
     },
   }, { decodeEntities: true, lowerCaseTags: true });
 
+  const CHUNK = 65536;
+  if (yieldBetweenChunks) return (async () => {
+    for (let i = 0; i < html.length && !done; i += CHUNK) {
+      if (signal?.aborted) throw new Error('HTML extraction cancelled');
+      parser.write(html.slice(i, i + CHUNK));
+      if (i + CHUNK < html.length && !done) {
+        await new Promise(resolve => setImmediate(resolve));
+        if (signal?.aborted) throw new Error('HTML extraction cancelled');
+      }
+    }
+    parser.end();
+    return out;
+  })();
   try {
-    const CHUNK = 65536;
     for (let i = 0; i < html.length && !done; i += CHUNK) parser.write(html.slice(i, i + CHUNK));
     parser.end();
-  } catch { /* be robust: return whatever was extracted before any parser error */ }
+  } catch (err) {
+    if (visibleCap === Infinity) throw err; // search cannot publish partial extraction
+    // Snippets retain their best-effort display behavior.
+  }
   return out;
 }
 
