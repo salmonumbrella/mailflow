@@ -24,6 +24,7 @@ export const SETUP_TABLES = [
   'address_books',
   'ai_codex_credentials',
   'auth_events',
+  'background_download_debits',
   'block_list',
   'category_list_sources',
   'contacts',
@@ -47,7 +48,7 @@ export const SETUP_TABLES = [
   'users',
 ];
 // The local copy of the mail on the IMAP servers. Synced again after a restore that leaves it out.
-export const MAIL_CACHE_TABLES = ['folders', 'messages', 'unfetchable_uids'];
+export const MAIL_CACHE_TABLES = ['archive_coverage', 'folders', 'messages', 'unfetchable_uids'];
 // Short-lived tokens that are worthless minutes later.
 export const TRANSIENT_TABLES = ['ai_codex_device_flows', 'email_otp_tokens', 'password_reset_tokens'];
 // The record of which migrations shaped the schema the rows are written back into.
@@ -411,6 +412,7 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
   const manifestTables = new Set(manifest.tables);
   const restoreSet = [...SETUP_TABLES, ...MAIL_CACHE_TABLES].filter(t => present.has(t));
   const inserted = Object.fromEntries(manifest.tables.map(t => [t, 0]));
+  let skippedDebits = 0;
 
   if (beforeWrite) await beforeWrite();
   await client.query('BEGIN');
@@ -419,6 +421,12 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
     // that stays busy for long is a real conflict, and reported instead of waited out.
     await client.query('SET LOCAL statement_timeout = 0');
     await client.query("SET LOCAL lock_timeout = '30s'");
+    let debits = [];
+    if (present.has('background_download_debits')) {
+      // Account truncation cascades into debits. Hold writers until their snapshot is merged.
+      await client.query('LOCK TABLE background_download_debits IN EXCLUSIVE MODE');
+      ({ rows: debits } = await client.query('SELECT account_id, day::text, bytes::text FROM background_download_debits'));
+    }
     await client.query(`TRUNCATE ${restoreSet.map(ident).join(', ')} RESTART IDENTITY CASCADE`);
 
     let footer = null;
@@ -449,25 +457,35 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
       // as JSON null. json_populate_recordset hands such a column the JSON string itself, and
       // #>> '{}' unwraps the text inside, which the cast then reads exactly as it was written.
       const values = cols.map(c => (JSON_TYPES.has(c.type) ? `(${ident(c.name)} #>> '{}')::${c.type}` : ident(c.name)));
+      const debit = entry.table === 'background_download_debits';
+      const survivingAccount = debit ? ' AS debit WHERE EXISTS (SELECT 1 FROM email_accounts a WHERE a.id=debit.account_id)' : '';
       // The rows keep their ids, so an identity column takes the file's value rather than a new one.
       const result = await client.query(
         `INSERT INTO ${ident(entry.table)} (${cols.map(c => ident(c.name)).join(', ')}) OVERRIDING SYSTEM VALUE
-         SELECT ${values.join(', ')} FROM json_populate_recordset(NULL::${ident(entry.table)}, $1::json)`,
+         SELECT ${values.join(', ')} FROM json_populate_recordset(NULL::${ident(entry.table)}, $1::json)${survivingAccount}`,
         [JSON.stringify(entry.rows)],
       );
       inserted[entry.table] += result.rowCount;
+      if (debit) skippedDebits += entry.rows.length - result.rowCount;
       if (onProgress) onProgress({ table: entry.table, rows: Object.values(inserted).reduce((a, b) => a + b, 0) });
     }
     if (!footer) throw new BackupFileError('The backup file ends early. Its download was probably interrupted.');
     if (!footer.rowCounts || typeof footer.rowCounts !== 'object') throw new BackupFileError('This is not a MailFlow backup file.');
     for (const [table, count] of Object.entries(footer.rowCounts)) {
-      if (!manifestTables.has(table) || inserted[table] !== count) {
-        throw new BackupFileError(`The backup file is inconsistent: ${table} should have ${count} rows, the file holds ${inserted[table] ?? 0}.`);
+      const readCount = inserted[table] + (table === 'background_download_debits' ? skippedDebits : 0);
+      if (!manifestTables.has(table) || readCount !== count) {
+        throw new BackupFileError(`The backup file is inconsistent: ${table} should have ${count} rows, the file holds ${readCount || 0}.`);
       }
     }
     for (const table of manifest.tables) {
       if (!(table in footer.rowCounts)) throw new BackupFileError(`The backup file has no row count for ${table}.`);
     }
+    if (present.has('background_download_debits')) await client.query(`
+      INSERT INTO background_download_debits(account_id,day,bytes)
+      SELECT saved.account_id,saved.day,saved.bytes FROM unnest($1::uuid[],$2::date[],$3::bigint[]) AS saved(account_id,day,bytes)
+      WHERE EXISTS (SELECT 1 FROM email_accounts a WHERE a.id=saved.account_id)
+      ON CONFLICT(account_id,day) DO UPDATE SET bytes=GREATEST(background_download_debits.bytes,EXCLUDED.bytes)`,
+    [debits.map(row => row.account_id), debits.map(row => row.day), debits.map(row => row.bytes)]);
     // ALTER SEQUENCE is undone by a rollback; setval would not be, and could leave a sequence
     // behind rows the rollback kept.
     for (const { table, column, sequence } of sequences) {

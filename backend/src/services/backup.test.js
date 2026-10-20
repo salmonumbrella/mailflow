@@ -24,7 +24,7 @@ const VERSION = '0061_message_bcc_addresses';
 const KEY_CHECK = 'enc:mailflow-backup-key-check';
 
 // The type OIDs PostgreSQL reports for the column types these tests use.
-const OIDS = { text: 25, int8: 20, json: 114, jsonb: 3802, _jsonb: 3807 };
+const OIDS = { text: 25, int8: 20, date: 1082, bool: 16, json: 114, jsonb: 3802, _jsonb: 3807 };
 
 // Answers the catalog queries the service makes and serves cursor reads from `data`, which holds
 // PostgreSQL's text for each value; like pg, a read hands it to the query's type parsers. Every
@@ -72,6 +72,7 @@ function fakeClient({ tables, columns = {}, foreignKeys = [], version = VERSION,
         return { rows: rows.map(row => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, parse(k, v)]))) };
       }
       if (text === 'CLOSE backup_rows') { cursor = null; return { rows: [] }; }
+      if (text.includes('FROM unnest(')) return { rows: [], rowCount: params[0].length };
       if (text.startsWith('INSERT INTO')) return { rows: [], rowCount: JSON.parse(params[0]).length };
       return { rows: [], rowCount: 0 };
     },
@@ -127,6 +128,38 @@ describe('table classification', () => {
     const classified = [...SETUP_TABLES, ...MAIL_CACHE_TABLES, ...TRANSIENT_TABLES, ...SCHEMA_TABLES];
     expect(new Set(classified).size).toBe(classified.length);
     expect([...live].sort()).toEqual([...classified].sort());
+  });
+});
+
+describe('archive identity backup durability', () => {
+  for (const scope of ['setup', 'full']) it(`${scope} preserves quota debits and restores only matching cache checkpoints`, async () => {
+    const catalog = {
+      tables: ['email_accounts', 'archive_coverage', 'background_download_debits'],
+      columns: {
+        email_accounts: ['id'],
+        archive_coverage: ['account_id', 'folder', { name: 'uid_validity', type: 'int8' }, { name: 'bootstrap_complete', type: 'bool' }],
+        background_download_debits: ['account_id', { name: 'day', type: 'date' }, { name: 'bytes', type: 'int8' }],
+      },
+      foreignKeys: [fk('archive_coverage', 'email_accounts'), fk('background_download_debits', 'email_accounts')],
+    };
+    const { gz, lines } = await backupLines(fakeClient({ ...catalog, data: {
+      email_accounts: [{ id: 'account-a' }],
+      archive_coverage: [{ account_id: 'account-a', folder: 'INBOX', uid_validity: '9', bootstrap_complete: 't' }],
+      background_download_debits: [{ account_id: 'account-a', day: '2026-10-20', bytes: '1073741824' }],
+    } }), scope);
+    expect(lines[0].tables).toEqual(scope === 'setup'
+      ? ['email_accounts', 'background_download_debits']
+      : ['email_accounts', 'archive_coverage', 'background_download_debits']);
+    const target = fakeClient(catalog);
+    await restoreBackup(target, Readable.from([gz]));
+    const debit = inserts(target).find(row => row.text.startsWith('INSERT INTO "background_download_debits"'));
+    expect(JSON.parse(debit.params[0])).toEqual([{ account_id: 'account-a', day: '2026-10-20', bytes: '1073741824' }]);
+    const coverage = inserts(target).find(row => row.text.startsWith('INSERT INTO "archive_coverage"'));
+    if (scope === 'setup') expect(coverage).toBeUndefined();
+    else expect(JSON.parse(coverage.params[0])).toEqual([{ account_id: 'account-a', folder: 'INBOX', uid_validity: '9', bootstrap_complete: true }]);
+    const truncate = target.statements().find(sql => sql.startsWith('TRUNCATE'));
+    expect(truncate).toContain('"archive_coverage"');
+    expect(truncate).toContain('"background_download_debits"');
   });
 });
 

@@ -3215,6 +3215,19 @@ describe('Gmail label memberships (#418)', () => {
       });
     }
   }
+  for (const mode of ['sync', 'backfill']) {
+    for (const [host, expected] of [['imap.gmail.com', '9007199254740993'], ['imap.example.test', null]]) {
+      it(`${mode} scopes provider identity to Gmail on ${host}`, async () => {
+        acct.imap_host = host;
+        parseMessage.mockImplementation(async m => ({ ...parsed(m.uid), providerMsgid: '9007199254740993' }));
+        await (mode === 'sync' ? sync : backfill)(manager(), 'INBOX');
+        const [sql, values] = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO messages'));
+        const columns = sql.match(/INSERT INTO messages\s*\(([^)]*)\)/)[1].split(',').map(c => c.trim());
+        expect(columns).toContain('provider_msgid');
+        expect(values[columns.indexOf('provider_msgid')]).toBe(expected);
+      });
+    }
+  }
   it('repairs an older INBOX hole even when cached counts and maximum UID look complete', async () => {
     serverUids = [1, 2];
     rows = [{ folder: 'INBOX', uid: 2 }, { folder: 'INBOX', uid: 3 },
