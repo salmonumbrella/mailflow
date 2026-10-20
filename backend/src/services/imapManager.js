@@ -1,4 +1,6 @@
 import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
+import { bootstrapGmailIdentity, isBackfillFolder } from './archiveCoverage.js';
+import { recordBackgroundRefusal } from './backgroundDownloadBudget.js';
 import { extractImapError } from './imapError.js';
 import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
 import { ImapFlow } from 'imapflow';
@@ -2063,7 +2065,7 @@ export function registerPoolSecondaryGate(gate) { Object.assign(poolSecondaryGat
 export async function acquirePooledClient(account) {
   const id = account.id;
   if (!connectionPools.has(id)) {
-    connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], pending: 0 });
+    connectionPools.set(id, { host: (account.imap_host || '').toLowerCase(), clients: [], inUse: new Set(), waiters: [], pending: 0 });
   }
   const pool = connectionPools.get(id);
 
@@ -5051,6 +5053,8 @@ export class ImapManager {
         return { insertedCount, broadcastedNewMessages };
       } finally {
         lock.release();
+        await ImapManager.prototype.bootstrapProviderIdentity.call(this, account, client, folder).catch(err =>
+          console.warn(`Identity bootstrap incomplete for ${logAccount(account)}/${folder}:`, extractImapError(err)));
       }
     } catch (err) {
       console.error(`Message sync error for ${logAccount(account)}/${folder}:`, extractImapError(err));
@@ -5529,6 +5533,8 @@ export class ImapManager {
       // for this run instead of paying one refused login per remaining folder.
       if (isConnectionRefusal(detail) || isAuthFailure(detail)) this._noteSecondaryRefusal(account);
     } finally {
+      if (bfClient) await ImapManager.prototype.bootstrapProviderIdentity.call(this, account, bfClient, folder).catch(err =>
+        console.warn(`Identity bootstrap incomplete for ${logAccount(account)}/${folder}:`, extractImapError(err)));
       if (bfClient) { try { bfClient.close(); } catch { /* already disconnected */ } }
       this.backfillRunning.delete(backfillKey);
     }
@@ -5667,7 +5673,7 @@ export class ImapManager {
       // catch-up — live sync (IDLE + the periodic interval) is unaffected and keeps flowing.
       await this._bgConnSem.acquire(host);
       slotHeld = true;
-      const { skipFolderPatterns, skipFolderNames } = providerProfile(account);
+      const profile = providerProfile(account);
 
       // INBOX first — highest priority, existing behaviour
       await this.backfillMessages(account, 'INBOX');
@@ -5679,9 +5685,7 @@ export class ImapManager {
       );
 
       for (const { path } of folderResult.rows) {
-        const pathLower = path.toLowerCase();
-        if (skipFolderPatterns.some(pat => pathLower.includes(pat))) continue;
-        if (skipFolderNames.includes(pathLower)) continue;
+        if (!isBackfillFolder(path, profile)) continue;
         await this.backfillMessages(account, path).catch(err =>
           console.warn(`Backfill skipped ${logAccount(account)}/${path}: ${err.message}`)
         );
@@ -6212,6 +6216,24 @@ export class ImapManager {
       in_reply_to: parsed.inReplyTo, thread_references: parsed.references, thread_id: rows[0].thread_id,
       date: parsed.date, has_attachments: parsed.hasAttachments, attachments: structure.attachments,
       attachments_complete: true, uid_validity: uidValidity };
+  }
+
+  async bootstrapProviderIdentity(account, client, folder) {
+    if (!providerProfile(account).labelStore || this._secondaryConnectBlocked?.(account.id)) return;
+    return bootstrapGmailIdentity(account, client, folder, {
+      ...providerProfile(account),
+      foregroundPending: () => [...connectionPools.values()].some(pool =>
+        pool.host === (account.imap_host || '').toLowerCase() && pool.waiters.length > 0),
+      onReadError: err => {
+        const detail = extractImapError(err);
+        if (isConnectionRefusal(detail) || isAuthFailure(detail)) {
+          if (/\[LIMIT\]|rate.?limit|too many|maximum.*connections|connection limit|over quota|throttl/i.test(detail)) {
+            recordBackgroundRefusal(account.imap_host);
+          }
+          this._noteSecondaryRefusal?.(account);
+        }
+      },
+    });
   }
 
   // Whether the account's folders are label memberships (Gmail): removing a message from one
