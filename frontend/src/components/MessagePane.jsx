@@ -33,6 +33,7 @@ import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/pri
 import AiResultBox from './AiResultBox.jsx';
 import { useAiActions } from '../hooks/useAiActions.js';
 import AttachmentStrip from './AttachmentStrip.jsx';
+import { PluginSlot } from '../plugins/PluginSlot.jsx';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailflow:message-opening';
 
@@ -1912,7 +1913,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
             fontFamily: 'var(--font-display)',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-              <span>
+              <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
                 {(() => {
                   const paneSubject = resolvedSubject || message.subject;
                   return (paneSubject && paneSubject !== '(no subject)')
@@ -1921,6 +1922,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                 })()}
               </span>
               <SpamBadge message={message} onClick={(m) => setSpamExplainMessageId(m.id)} />
+              <PluginSlot name="message-header-meta" ctx={{ message, account }} />
             </div>
           </div>
 
