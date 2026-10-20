@@ -345,6 +345,12 @@
     }
   },
   "messageList": {
+    "expandConversation_one": "Expandir conversación ({{count}} mensaje)",
+    "expandConversation_many": "Expandir conversación ({{count}} mensajes)",
+    "expandConversation_other": "Expandir conversación ({{count}} mensajes)",
+    "collapseConversation_one": "Contraer conversación ({{count}} mensaje)",
+    "collapseConversation_many": "Contraer conversación ({{count}} mensajes)",
+    "collapseConversation_other": "Contraer conversación ({{count}} mensajes)",
     "replyDraftChanged": "El borrador de respuesta ha cambiado. Intenta abrirlo de nuevo.",
     "replyDraftKeepCurrent": "Guarda el mensaje actual y resuelve sus adjuntos antes de abrir este borrador.",
     "replyDraftUnavailable": "Este borrador de respuesta ya no está disponible.",

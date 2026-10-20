@@ -345,6 +345,10 @@
     }
   },
   "messageList": {
+    "expandConversation_one": "Expand conversation ({{count}} message)",
+    "expandConversation_other": "Expand conversation ({{count}} messages)",
+    "collapseConversation_one": "Collapse conversation ({{count}} message)",
+    "collapseConversation_other": "Collapse conversation ({{count}} messages)",
     "replyDraftChanged": "The reply draft changed. Try opening it again.",
     "replyDraftKeepCurrent": "Save the current message and resolve its attachments before opening this draft.",
     "replyDraftUnavailable": "This reply draft is no longer available.",

@@ -165,6 +165,14 @@
     "snoozed": "Odložené"
   },
   "messageList": {
+    "expandConversation_one": "Rozbalit konverzaci ({{count}} zpráva)",
+    "expandConversation_few": "Rozbalit konverzaci ({{count}} zprávy)",
+    "expandConversation_many": "Rozbalit konverzaci ({{count}} zprávy)",
+    "expandConversation_other": "Rozbalit konverzaci ({{count}} zpráv)",
+    "collapseConversation_one": "Sbalit konverzaci ({{count}} zpráva)",
+    "collapseConversation_few": "Sbalit konverzaci ({{count}} zprávy)",
+    "collapseConversation_many": "Sbalit konverzaci ({{count}} zprávy)",
+    "collapseConversation_other": "Sbalit konverzaci ({{count}} zpráv)",
     "replyDraftChanged": "Koncept odpovědi se změnil. Zkuste jej znovu otevřít.",
     "replyDraftKeepCurrent": "Před otevřením tohoto konceptu uložte aktuální zprávu a vyřešte její přílohy.",
     "replyDraftUnavailable": "Tento koncept odpovědi již není dostupný.",

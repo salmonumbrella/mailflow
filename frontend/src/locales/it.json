@@ -345,6 +345,12 @@
     }
   },
   "messageList": {
+    "expandConversation_one": "Espandi conversazione ({{count}} messaggio)",
+    "expandConversation_many": "Espandi conversazione ({{count}} messaggi)",
+    "expandConversation_other": "Espandi conversazione ({{count}} messaggi)",
+    "collapseConversation_one": "Comprimi conversazione ({{count}} messaggio)",
+    "collapseConversation_many": "Comprimi conversazione ({{count}} messaggi)",
+    "collapseConversation_other": "Comprimi conversazione ({{count}} messaggi)",
     "replyDraftChanged": "La bozza di risposta è cambiata. Prova ad aprirla di nuovo.",
     "replyDraftKeepCurrent": "Salva il messaggio attuale e gestisci i suoi allegati prima di aprire questa bozza.",
     "replyDraftUnavailable": "Questa bozza di risposta non è più disponibile.",

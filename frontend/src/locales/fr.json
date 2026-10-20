@@ -345,6 +345,12 @@
     }
   },
   "messageList": {
+    "expandConversation_one": "Développer la conversation ({{count}} message)",
+    "expandConversation_many": "Développer la conversation ({{count}} messages)",
+    "expandConversation_other": "Développer la conversation ({{count}} messages)",
+    "collapseConversation_one": "Réduire la conversation ({{count}} message)",
+    "collapseConversation_many": "Réduire la conversation ({{count}} messages)",
+    "collapseConversation_other": "Réduire la conversation ({{count}} messages)",
     "replyDraftChanged": "Le brouillon de réponse a changé. Essayez de le rouvrir.",
     "replyDraftKeepCurrent": "Enregistrez le message actuel et gérez ses pièces jointes avant d’ouvrir ce brouillon.",
     "replyDraftUnavailable": "Ce brouillon de réponse n’est plus disponible.",

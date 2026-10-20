@@ -345,6 +345,12 @@
     }
   },
   "messageList": {
+    "expandConversation_one": "Expandir conversa ({{count}} mensagem)",
+    "expandConversation_many": "Expandir conversa ({{count}} mensagens)",
+    "expandConversation_other": "Expandir conversa ({{count}} mensagens)",
+    "collapseConversation_one": "Recolher conversa ({{count}} mensagem)",
+    "collapseConversation_many": "Recolher conversa ({{count}} mensagens)",
+    "collapseConversation_other": "Recolher conversa ({{count}} mensagens)",
     "replyDraftChanged": "O rascunho de resposta mudou. Tente abri-lo novamente.",
     "replyDraftKeepCurrent": "Salve a mensagem atual e resolva seus anexos antes de abrir este rascunho.",
     "replyDraftUnavailable": "Este rascunho de resposta não está mais disponível.",
