@@ -1,5 +1,6 @@
 import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
 import { extractImapError } from './imapError.js';
+import { fetchSearchText } from './searchText.js';
 import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
@@ -592,8 +593,8 @@ export function extractBodyFromMsg(msg) {
 // Key invariant: we work with Buffers of raw bytes until the very last step so
 // that multi-byte sequences (e.g. =E2=80=94 → em-dash in UTF-8) are reassembled
 // correctly before being interpreted as any character set.
-function decodeQuotedPrintableToBuffer(input) {
-  const qpStr = Buffer.isBuffer(input) ? input.toString('ascii') : String(input || '');
+function decodeQuotedPrintableToBuffer(input, { strict = false, diagnostics } = {}) {
+  const qpStr = Buffer.isBuffer(input) ? input.toString(strict ? 'latin1' : 'ascii') : String(input || '');
   const cleaned = qpStr.replace(/=\r\n/g, '').replace(/=\n/g, '');
   const bytes = [];
   let i = 0;
@@ -606,18 +607,26 @@ function decodeQuotedPrintableToBuffer(input) {
         continue;
       }
     }
+    if (cleaned[i] === '=') {
+      if (strict) throw new Error('Invalid quoted-printable body');
+      if (diagnostics) diagnostics.lossyDecode = true;
+    }
     bytes.push(cleaned.charCodeAt(i) & 0xFF);
     i++;
   }
   return Buffer.from(bytes);
 }
 
-function decodeBytes(rawBytes, charset) {
+function decodeBytes(rawBytes, charset, { strict = false, diagnostics } = {}) {
   let cs = (charset || 'utf-8').toLowerCase().trim().replace(/^['"]|['"]$/g, '');
   if (!cs || cs === 'us-ascii' || cs === 'ascii') cs = 'utf-8'; // ASCII ⊂ UTF-8
   try {
-    return new TextDecoder(cs, { fatal: false }).decode(rawBytes);
-  } catch {
+    const decoded = new TextDecoder(cs, { fatal: strict }).decode(rawBytes);
+    if (diagnostics && decoded.includes('\ufffd')) diagnostics.lossyDecode = true;
+    return decoded;
+  } catch (err) {
+    if (strict) throw err;
+    if (diagnostics) diagnostics.lossyDecode = true;
     return rawBytes.toString('utf8'); // unknown charset — best effort
   }
 }
@@ -647,10 +656,13 @@ function parseMimeHeaders(headerBlock) {
 // part is requested: the payload starts with a MIME boundary and embedded
 // Content-Type/Content-Transfer-Encoding headers. If passed to the sanitizer as
 // HTML, users see boundary lines and quoted-printable garbage (=D0=..., =3D).
-function unwrapEmbeddedMimeText(decoded, depth = 0) {
+function unwrapEmbeddedMimeText(decoded, depth = 0, diagnostics) {
   if (depth >= 5) return decoded;
   const start = String(decoded || '').trimStart();
   if (!/^--[^\r\n]+\r?\nContent-/i.test(start)) return decoded;
+  if (diagnostics) {
+    throw Object.assign(new Error('Embedded MIME recovery cannot account for all decoder input'), { code: 'decoder-discarded-input' });
+  }
 
   const firstLineEnd = start.search(/\r?\n/);
   if (firstLineEnd < 0) return decoded;
@@ -693,19 +705,42 @@ function unwrapEmbeddedMimeText(decoded, depth = 0) {
 // Key invariant: we work with Buffers of raw bytes until the very last step so
 // that multi-byte sequences (e.g. =E2=80=94 → em-dash in UTF-8) are reassembled
 // correctly before being interpreted as any character set.
-function decodeBody(buf, encoding, charset) {
+function decodeBody(buf, encoding, charset, { strict = false, diagnostics } = {}) {
   const enc = (encoding || '').toLowerCase();
   let rawBytes;
   if (enc === 'base64') {
-    const b64 = (Buffer.isBuffer(buf) ? buf : Buffer.from(buf)).toString('ascii').replace(/\s/g, '');
+    const b64 = (Buffer.isBuffer(buf) ? buf : Buffer.from(buf)).toString(strict ? 'latin1' : 'ascii')
+      .replace(strict ? /[ \t\r\n]/g : /\s/g, '');
+    if (strict || diagnostics) {
+      const padding = b64.indexOf('=');
+      const tail = padding < 0 ? '' : b64.slice(padding);
+      if (b64.length % 4 || /[^A-Za-z0-9+/=_-]/.test(b64) || (tail && tail !== '=' && tail !== '==')) {
+        if (strict) throw new Error('Invalid base64 body');
+        if (diagnostics) diagnostics.lossyDecode = true;
+      }
+    }
     try { rawBytes = Buffer.from(b64, 'base64'); } catch { rawBytes = buf; }
+    if (diagnostics) {
+      if (/[\u0080-\u00ff]/.test(Buffer.from(buf).toString('latin1'))) diagnostics.lossyDecode = true;
+      const segments = b64.replace(/[^A-Za-z0-9+/=_-]/g, '').split(/(?<==)(?=[^=])/);
+      const decoded = segments.map(segment => {
+        const letters = segment.replace(/=/g, '').length;
+        const bytes = Buffer.from(segment, 'base64');
+        if (letters % 4 === 1 || bytes.length !== Math.floor(letters * 3 / 4)) {
+          throw Object.assign(new Error('Base64 decoder discarded input'), { code: 'decoder-discarded-input' });
+        }
+        return bytes;
+      });
+      if (segments.length > 1) diagnostics.decodeRepair = 'interior-base64-padding';
+      rawBytes = Buffer.concat(decoded);
+    }
   } else if (enc === 'quoted-printable') {
-    rawBytes = decodeQuotedPrintableToBuffer(buf);
+    rawBytes = decodeQuotedPrintableToBuffer(buf, { strict, diagnostics });
   } else {
     rawBytes = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
   }
 
-  return unwrapEmbeddedMimeText(decodeBytes(rawBytes, charset));
+  return unwrapEmbeddedMimeText(decodeBytes(rawBytes, charset, { strict, diagnostics }), 0, diagnostics);
 }
 
 function looksLikeTextPayload(buf) {
@@ -6465,7 +6500,15 @@ export class ImapManager {
   // Uses a fresh connection to avoid lock contention with sync connection.
   // Auto-retries once on transient connection errors (stale pool connection, NAT
   // timeout, half-open TCP, etc.) so a single click is enough in all common cases.
-  async fetchMessageBody(account, uid, folder) {
+  async fetchMessageBody(account, uid, folder, options = {}) {
+    if (options.purpose === 'search') {
+      const blocked = this._secondaryConnectBlocked(account.id);
+      if (!options.client && !options.signal?.aborted && blocked && !hasIdlePooledClient(connectionPools, account.id)) {
+        return { status: 'backoff', reason: 'provider-refused', detail: 'Mail server is limiting connections for this account',
+          retryAfterMs: Math.max(0, blocked.until - Date.now()), complete: false, textParts: [], requiredParts: [], downloadBytes: 0, identity: null };
+      }
+      return fetchSearchText(account, uid, folder, options, { acquire: withFreshClient, walkStructure, decodeBody, isConnectionRefusal, isAuthFailure });
+    }
     // While the provider is refusing secondary logins, a body click can only succeed over a
     // session that already exists. If the pool holds an idle client, use it (no new LOGIN);
     // otherwise fail fast with a typed error the route turns into a clear 503, instead of
