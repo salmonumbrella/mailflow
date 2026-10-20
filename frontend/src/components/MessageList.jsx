@@ -4564,6 +4564,9 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
   const [hovered, setHovered] = useState(false);
   const messageCount = message.message_count || 1;
   const unreadCount  = parseInt(message.unread_count) || 0;
+  const toggleLabel = isExpanded
+    ? t('messageList.collapseConversation', { count: Number(messageCount) })
+    : t('messageList.expandConversation', { count: Number(messageCount) });
 
   const { contentRef, swipeBgLeftRef, swipeBgRightRef, tappedRef } = useSwipeRow({
     isMobile, message, onSwipeLeft, onSwipeRight, onLongPress,
@@ -4731,13 +4734,15 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
               {messageCount > 1 && (
                 <button
                   type="button"
+                  className="thread-count-toggle"
                   aria-expanded={isExpanded}
-                  aria-label={`${isExpanded ? t('message.aiCollapse') : t('messageList.showAll')} (${messageCount})`}
+                  aria-label={toggleLabel}
+                  title={toggleLabel}
                   onClick={(e) => { e.stopPropagation(); onThreadToggle(); }}
                   style={{
                   display: 'inline-flex', alignItems: 'center', gap: isMobile ? 4 : 3,
                   fontSize: isMobile ? 12 : 10, fontWeight: 600, color: 'var(--accent)',
-                  background: 'var(--bg-tertiary)', border: '1px solid var(--accent)',
+                  border: '1px solid var(--accent)',
                   borderRadius: 10, padding: isMobile ? '3px 9px' : '1px 6px', flexShrink: 0, cursor: 'pointer',
                 }}
                 >

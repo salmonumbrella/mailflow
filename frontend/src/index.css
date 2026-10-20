@@ -107,6 +107,15 @@ body, #root {
   outline-offset: 2px;
 }
 
+/* Thread expansion control */
+.thread-count-toggle {
+  background: var(--bg-tertiary);
+}
+.thread-count-toggle:hover,
+.thread-count-toggle:focus-visible {
+  background: var(--accent-dim);
+}
+
 /* Selection */
 ::selection { background: var(--selection-bg, var(--accent-dim)); color: var(--text-primary); }
 

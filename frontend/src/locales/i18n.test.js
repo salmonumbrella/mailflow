@@ -570,7 +570,14 @@ const SAME_VALUE_ALLOWED = {
 // required by its Intl.PluralRules categories without forcing every other locale
 // to carry unused keys. Existing locale files may also define their own forms.
 const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
+  es: new Set(['messageList.expandConversation_many', 'messageList.collapseConversation_many']),
+  fr: new Set(['messageList.expandConversation_many', 'messageList.collapseConversation_many']),
+  it: new Set(['messageList.expandConversation_many', 'messageList.collapseConversation_many']),
+  ptBR: new Set(['messageList.expandConversation_many', 'messageList.collapseConversation_many']),
+  ru: new Set(['messageList.expandConversation_few', 'messageList.expandConversation_many', 'messageList.collapseConversation_few', 'messageList.collapseConversation_many']),
   cs: new Set([
+    'messageList.expandConversation_few', 'messageList.expandConversation_many',
+    'messageList.collapseConversation_few', 'messageList.collapseConversation_many',
     'message.attachment_few', 'message.attachment_many',
     'messageList.bulkDeleted.title_few', 'messageList.bulkDeleted.title_many',
     'messageList.bulkDeleted.failBody_few', 'messageList.bulkDeleted.failBody_many',
@@ -584,6 +591,8 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'admin.messageList.markReadDelaySeconds_many',
   ]),
   pl: new Set([
+    'messageList.expandConversation_few', 'messageList.expandConversation_many',
+    'messageList.collapseConversation_few', 'messageList.collapseConversation_many',
     'message.attachment_few', 'message.attachment_many',
     'messageList.bulkDeleted.title_few', 'messageList.bulkDeleted.title_many',
     'messageList.bulkDeleted.failBody_few', 'messageList.bulkDeleted.failBody_many',
