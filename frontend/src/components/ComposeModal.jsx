@@ -351,6 +351,8 @@ export default function ComposeModal() {
   const replyTypeRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
+  const attachmentReadsRef = useRef(0);
+  const attachmentGenerationRef = useRef(0);
   const imageInputRef = useRef(null);
   const signatureRef = useRef(null);
   const quotedHtmlRef = useRef(null);
@@ -773,8 +775,16 @@ export default function ComposeModal() {
   const handleFileSelect = (e) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
+    attachmentGenerationRef.current++;
     files.forEach(file => {
       const reader = new FileReader();
+      attachmentReadsRef.current++;
+      let finished = false;
+      const finish = () => {
+        if (!finished) attachmentReadsRef.current--;
+        finished = true;
+      };
+      reader.onloadend = finish;
       reader.onload = (ev) => {
         const base64 = ev.target.result.split(',')[1];
         setAttachments(prev => {
@@ -782,7 +792,8 @@ export default function ComposeModal() {
           return [...prev, { name: file.name, size: file.size, type: file.type, data: base64 }];
         });
       };
-      reader.readAsDataURL(file);
+      try { reader.readAsDataURL(file); }
+      catch (err) { finish(); setError(err.message); }
     });
     e.target.value = '';
   };
@@ -1178,25 +1189,46 @@ export default function ComposeModal() {
     // initial null editor cannot make an untouched draft look dirty.
     initialSavedSnapshotRef.current = { ...snapshotRef.current(), body: composeData?.body || '' };
     composeSwitchRef.current.markSaved(initialSavedSnapshotRef.current);
+    let preparedAttachmentGeneration = null;
+    let registrationOpen = true;
+    const saveListeners = draftSaveListenersRef.current;
     const prepare = async ({ onDraftSaved } = {}) => {
       if (sendingRef.current || sendWaitingRef.current) return false;
       // Uploaded files and ordinary forwarded files live only in this composer, even
       // after a text-only draft save. An external saved draft can be left untouched.
-      if (switchBlockRef.current()) {
+      if (switchBlockRef.current() || attachmentReadsRef.current > 0) {
         setError(t('compose.draftHasAttachments'));
         return false;
       }
-      if (onDraftSaved) draftSaveListenersRef.current.add(onDraftSaved);
+      if (onDraftSaved) saveListeners.add(onDraftSaved);
+      const attachmentGeneration = attachmentGenerationRef.current;
       try {
         const ok = await composeSwitchRef.current.prepare();
-        if (sendingRef.current || sendWaitingRef.current) return false;
+        if (sendingRef.current || sendWaitingRef.current || attachmentReadsRef.current > 0
+          || attachmentGenerationRef.current !== attachmentGeneration) return false;
         if (!ok && unsupportedRef.current() && !sendingRef.current)
           setError(t('compose.draftHasAttachments'));
+        if (ok) preparedAttachmentGeneration = attachmentGeneration;
         return ok;
-      } finally { draftSaveListenersRef.current.delete(onDraftSaved); }
+      } finally { saveListeners.delete(onDraftSaved); }
     };
+    // A handoff also needs save provenance while its final target lookup waits.
+    prepare.subscribeDraftSaved = listener => {
+      if (!registrationOpen) return () => {};
+      const ownedListener = event => listener(event);
+      saveListeners.add(ownedListener);
+      return () => { saveListeners.delete(ownedListener); };
+    };
+    // Preparation precedes a live target lookup. Recheck without yielding at replacement,
+    // including files selected since preparation whose bytes are still being read.
+    prepare.canReplace = () => !sendingRef.current && !sendWaitingRef.current
+      && !switchBlockRef.current() && attachmentReadsRef.current === 0
+      && preparedAttachmentGeneration === attachmentGenerationRef.current
+      && !composeSwitchRef.current.isSaving() && !composeSwitchRef.current.isDirty();
     setPrepareComposeSwitch(prepare);
     return () => {
+      registrationOpen = false;
+      saveListeners.clear();
       if (useStore.getState().prepareComposeSwitch === prepare) setPrepareComposeSwitch(null);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps -- one controller per mounted composer

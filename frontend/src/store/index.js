@@ -529,8 +529,13 @@ export const useStore = create((set, get) => ({
       return true;
     };
     if (preparedSession !== undefined && preparedSession !== initial.composeSession) return false;
-    // Reply-draft opening already saved this exact editor and revalidated its target.
-    if (!initial.composing || preparedSession === initial.composeSession) return replace();
+    if (!initial.composing) return replace();
+    // The live target lookup can outlast preparation while the user keeps editing.
+    if (preparedSession === initial.composeSession) {
+      if (typeof initial.prepareComposeSwitch?.canReplace !== 'function'
+        || initial.prepareComposeSwitch.canReplace() !== true) return false;
+      return replace();
+    }
     // Every ordinary Compose/Reply/draft-list entry point shares this guard. A
     // composer still mounting cannot yet prove that its content is safe to replace.
     if (!initial.prepareComposeSwitch) return false;

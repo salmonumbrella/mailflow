@@ -5,6 +5,7 @@ import { openReplyDraft, replyDraftScope } from '../utils/openReplyDraft.js';
 
 export default function InboxReplyDraftObserver({ lookupDelayMs = 350 }) {
   const openingRef = useRef(null);
+  const retriedRevisionRef = useRef(null);
   const [retry, setRetry] = useState(0);
   const { messages, searchResults, searchQuery, selectedFolder, selectedAccountId,
     selectedMessageId, threadMessages, conversationMode, replyDraftRevision, replyDrafts, autoOpenReplyDrafts, messagesRefreshToken, user } = useStore();
@@ -24,6 +25,8 @@ export default function InboxReplyDraftObserver({ lookupDelayMs = 350 }) {
     conversationMode, searchQuery, autoOpenReplyDrafts, messagesRefreshToken, user?.id]);
   const latestRequestKey = useRef(requestKey);
   latestRequestKey.current = requestKey;
+  const latestContext = useRef(null);
+  latestContext.current = { selectedMessageId, selectedFolder, selectedAccountId, conversationMode, searchQuery, autoOpenReplyDrafts };
   useEffect(() => {
     if (selectedFolder?.toUpperCase() !== 'INBOX') return;
     let active = true;
@@ -50,10 +53,7 @@ export default function InboxReplyDraftObserver({ lookupDelayMs = 350 }) {
 
   useEffect(() => {
     const initial = useStore.getState();
-    if (openingRef.current) {
-      if (openingRef.current.requestKey !== requestKey) openingRef.current.retry = true;
-      return;
-    }
+    if (openingRef.current) return;
     if (!autoOpenReplyDrafts || selectedFolder?.toUpperCase() !== 'INBOX' || !selectedEligible || !selectedHasDraft
       || (initial.composing && initial.composeData?.source !== 'automaticReplyDraft')) return;
     let active = true;
@@ -78,14 +78,49 @@ export default function InboxReplyDraftObserver({ lookupDelayMs = 350 }) {
         if (draft) {
           // A handoff save invalidates synced indicators. Its owning opener rechecks
           // identity itself; that invalidation must not start a competing opener.
-          const handoff = { requestKey, retry: false };
+          const handoff = { startRevision: replyDraftRevision, savedRevisions: new Set() };
           openingRef.current = handoff;
+          let ownerLost = false;
+          let contextChanged = false;
+          const stopWatching = useStore.subscribe((state, previous) => {
+            if (state.user?.id !== user?.id || state.composing !== initial.composing
+              || state.composeSession !== initial.composeSession
+              || (state.composing && state.composeData?.source !== 'automaticReplyDraft')) ownerLost = true;
+            if (state.selectedMessageId !== previous.selectedMessageId || state.selectedAccountId !== previous.selectedAccountId
+              || state.selectedFolder !== previous.selectedFolder || state.searchQuery !== previous.searchQuery
+              || state.conversationMode !== previous.conversationMode || state.autoOpenReplyDrafts !== previous.autoOpenReplyDrafts)
+              contextChanged = true;
+          });
           let opened = false;
           try { opened = await openReplyDraft(selectedMessageId, { automatic: true,
-            liveResult: result, liveScope: scope, liveRevision: replyDraftRevision }); }
+            liveResult: result, liveScope: scope, liveRevision: replyDraftRevision,
+            onSavedRevision: revision => handoff.savedRevisions.add(revision) }); }
           finally {
+            stopWatching();
             openingRef.current = null;
-            if (handoff.retry && (!opened || latestRequestKey.current !== requestKey)) setRetry(value => value + 1);
+            const state = useStore.getState();
+            const revision = state.replyDraftRevision;
+            const ownsComposer = !ownerLost && state.user?.id === user?.id
+              && state.composeSession === initial.composeSession && state.composing === initial.composing
+              && (!state.composing || state.composeData?.source === 'automaticReplyDraft');
+            const sameRequest = latestRequestKey.current === requestKey
+              && state.user?.id === user?.id && state.selectedMessageId === selectedMessageId
+              && state.selectedFolder === selectedFolder && state.selectedAccountId === selectedAccountId
+              && state.conversationMode === conversationMode && state.searchQuery === searchQuery
+              && state.autoOpenReplyDrafts && state.composeSession === initial.composeSession
+              && state.composing === initial.composing;
+            // A notification from another client can cancel the opener while its save is
+            // pending. Its own saves must not start a competing lookup or a retry loop.
+            const externalChange = !opened && ownsComposer && sameRequest && revision !== handoff.startRevision
+              && !handoff.savedRevisions.has(revision)
+              && (retriedRevisionRef.current?.requestKey !== requestKey || retriedRevisionRef.current?.revision !== revision);
+            if (externalChange) retriedRevisionRef.current = { requestKey, revision };
+            // Store transitions can be batched away before React runs an effect.
+            // Only a captured context change can revive this cancelled handoff.
+            const contextRetry = !opened && contextChanged && ownsComposer && state.autoOpenReplyDrafts
+              && Object.entries(latestContext.current).every(([field, value]) => state[field] === value);
+            if (externalChange || contextRetry)
+              setRetry(value => value + 1);
           }
         }
       } catch (error) {
