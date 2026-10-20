@@ -69,7 +69,9 @@ export async function archiveInboxCopy(imapManager, account, inboxCopy, fromFold
       adjustFolderCounts(accountId, fromFolder, -1, 0);
       if (!allMail) adjustFolderCounts(accountId, archiveFolder, 1, 0);
     }
-    return { archived: applied, noArchiveFolder: false };
+    if (applied) imapManager.scheduleCountRefresh?.(accountId, [fromFolder, ...(!allMail ? [archiveFolder] : [])]);
+    return { archived: applied, noArchiveFolder: false,
+      countTargets: applied ? [{ id: inboxCopy.id, account_id: accountId, folder: fromFolder, is_read: true }] : [] };
   } finally {
     imapManager._unguardMoveUid(accountId, fromFolder, inboxCopy.uid);
     // Release the destination guard when its DB write throws before normal handoff.

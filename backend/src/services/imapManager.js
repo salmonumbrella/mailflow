@@ -3977,14 +3977,12 @@ export class ImapManager {
     this.userFolderSyncIntervalMs.set(userId, newMs);
   }
 
-  scheduleCountRefresh(accountId) {
-    if (!accountId || this._statusAccountTimers.has(accountId)) return;
-    this._statusAccountTimers.set(accountId, setTimeout(() => {
-      this._statusAccountTimers.delete(accountId);
-      query("SELECT * FROM email_accounts WHERE id=$1 AND enabled AND protocol='imap'", [accountId])
-        .then(({ rows }) => { if (rows[0]) return this.folderStatusMonitor.refresh(rows[0], { force: true }); })
-        .catch(err => console.warn('Post-mutation count refresh:', err.message));
-    }, 5000));
+  scheduleCountRefresh(accountId, paths = ['INBOX']) {
+    if (!accountId) return;
+    this.folderStatusMonitor.scheduleTrailingStatus({ id: accountId }, paths, async () => {
+      const { rows } = await query("SELECT * FROM email_accounts WHERE id=$1 AND enabled AND protocol='imap'", [accountId]);
+      return rows[0];
+    });
   }
 
   async _withCountClient(account, fn) {

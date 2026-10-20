@@ -1,4 +1,4 @@
-import { STATUS_STALE_MS } from '../services/folderStatus.js';
+import { STATUS_STALE_MS, allocateCountRevision } from '../services/folderStatus.js';
 import { Router } from 'express';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -1973,6 +1973,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
     // All Mail is excluded from sync/backfill and the relocate guard (imapManager.js),
     // so messages archived there get their DB row deleted below instead of re-homed.
     const allMailDestFolders = new Set();
+    const destinationKey = (accountId, folder) => JSON.stringify([accountId, folder]);
 
     for (const [accountId, msgs] of Object.entries(byAccount)) {
       const archiveFolder = await resolveArchiveFolder(accountId, msgs[0].folder_mappings);
@@ -1981,7 +1982,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
         continue;
       }
       if (await isAllMailFolder(accountId, archiveFolder)) {
-        allMailDestFolders.add(archiveFolder);
+        allMailDestFolders.add(destinationKey(accountId, archiveFolder));
       }
 
       const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
@@ -2006,12 +2007,14 @@ router.post('/messages/bulk-archive', async (req, res) => {
     // destination is Gmail's All Mail, where the message just vanishes from our view
     // (see allMailDestFolders above), so a plain DELETE with no reinsert is correct.
     const byFolder = {};
-    for (const { id, folder, newUid } of archivedIds) {
-      (byFolder[folder] = byFolder[folder] || []).push({ id, newUid });
+    for (const entry of archivedIds) {
+      const key = destinationKey(entry.accountId, entry.folder);
+      (byFolder[key] = byFolder[key] || []).push(entry);
     }
-    for (const [archiveFolder, entries] of Object.entries(byFolder)) {
+    for (const [key, entries] of Object.entries(byFolder)) {
+      const archiveFolder = entries[0].folder;
       const allIds  = entries.map(e => e.id);
-      if (allMailDestFolders.has(archiveFolder)) {
+      if (allMailDestFolders.has(key)) {
         await query('DELETE FROM messages WHERE id = ANY($1::uuid[])', [allIds]);
         continue;
       }
@@ -2036,7 +2039,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
     const needResync = new Map(); // accountId -> Set<archiveFolder>
     for (const e of archivedIds) {
       if (e.newUid) continue;
-      if (allMailDestFolders.has(e.folder)) continue; // no DB row there to keep fresh
+      if (allMailDestFolders.has(destinationKey(e.accountId, e.folder))) continue; // no DB row there to keep fresh
       if (!needResync.has(e.accountId)) needResync.set(e.accountId, new Set());
       needResync.get(e.accountId).add(e.folder);
     }
@@ -2061,7 +2064,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
         if (!folderDeltas[srcKey]) folderDeltas[srcKey] = { accountId: msg.account_id, path: msg.folder, totalDelta: 0, unreadDelta: 0 };
         folderDeltas[srcKey].totalDelta--;
         folderDeltas[srcKey].unreadDelta -= wasUnread;
-        if (allMailDestFolders.has(dest)) continue; // All Mail counts aren't tracked
+        if (allMailDestFolders.has(destinationKey(msg.account_id, dest))) continue; // All Mail counts aren't tracked
         const dstKey = `${msg.account_id}:${dest}`;
         if (!folderDeltas[dstKey]) folderDeltas[dstKey] = { accountId: msg.account_id, path: dest, totalDelta: 0, unreadDelta: 0 };
         folderDeltas[dstKey].totalDelta++;
@@ -2071,9 +2074,9 @@ router.post('/messages/bulk-archive', async (req, res) => {
         adjustFolderCounts(accountId, path, totalDelta, unreadDelta);
       }
       // Notify clients viewing each destination folder to refresh silently.
-      const destFolders = [...new Set(archivedIds.map(a => a.folder))].filter(f => !allMailDestFolders.has(f));
+      const destFolders = [...new Set(archivedIds.filter(a => !allMailDestFolders.has(destinationKey(a.accountId, a.folder))).map(a => a.folder))];
       for (const dest of destFolders) {
-        const accountIds = [...new Set(archivedIds.filter(a => a.folder === dest).map(a => {
+        const accountIds = [...new Set(archivedIds.filter(a => a.folder === dest && !allMailDestFolders.has(destinationKey(a.accountId, a.folder))).map(a => {
           const msg = owned.find(m => m.id === a.id);
           return msg?.account_id;
         }).filter(Boolean))];
@@ -2086,7 +2089,18 @@ router.post('/messages/bulk-archive', async (req, res) => {
     // Refresh GTD section data for any archived thread that still carries a GTD label sibling.
     notifyMailMutation(owned, req.session.userId);
 
-    res.json({ ok: true, archived: archivedIds.map(a => a.id), noArchiveFolder });
+    const countTargets = owned.filter(m => archivedIds.some(a => a.id === m.id))
+      .map(({ id, account_id, folder, category, is_read }) => {
+        const destination = archivedIds.find(a => a.id === id);
+        return { id, account_id, folder, category, is_read,
+          ...(!allMailDestFolders.has(destinationKey(account_id, destination.folder)) ? { destinationFolder: destination.folder } : {}) };
+      });
+    for (const accountId of new Set(countTargets.map(m => m.account_id))) {
+      const paths = [...new Set(['INBOX', ...countTargets.filter(m => m.account_id === accountId).map(m => m.folder),
+        ...archivedIds.filter(m => m.accountId === accountId && !allMailDestFolders.has(destinationKey(m.accountId, m.folder))).map(m => m.folder)])];
+      imapManager.scheduleCountRefresh?.(accountId, paths);
+    }
+    res.json({ ok: true, archived: archivedIds.map(a => a.id), noArchiveFolder, countTargets });
   } catch (err) {
     console.error('bulk-archive error:', err);
     res.status(500).json({ error: 'Failed to archive messages' });
@@ -2704,22 +2718,27 @@ router.get('/category-counts', async (req, res) => {
   const { accountIds: scopedIds } = resolveAccountScope(accountsResult.rows, accountId);
   if (!scopedIds.length) return res.json({ counts: {} });
 
+  const countRevision = await allocateCountRevision();
   const result = await query(`
-    SELECT COALESCE(m.category, 'primary') AS category,
-           COUNT(*) FILTER (WHERE m.is_read = false)::int AS unread_count
+    SELECT m.account_id, COALESCE(m.category, 'primary') AS category,
+           COUNT(*) FILTER (WHERE m.is_read = false)::int AS unread_count, COUNT(*)::int AS total_count
     FROM messages m
     WHERE m.account_id = ANY($1)
       AND m.folder = 'INBOX'
       AND m.is_deleted = false
-    GROUP BY COALESCE(m.category, 'primary')
+    GROUP BY m.account_id, COALESCE(m.category, 'primary')
   `, [scopedIds]);
 
-  const counts = {};
+  const counts = {}, totals = {};
+  const byAccount = Object.fromEntries(scopedIds.map(id => [id, { counts: {}, totals: {} }]));
   for (const row of result.rows) {
-    counts[row.category] = row.unread_count;
+    counts[row.category] = (counts[row.category] || 0) + row.unread_count;
+    totals[row.category] = (totals[row.category] || 0) + row.total_count;
+    byAccount[row.account_id].counts[row.category] = row.unread_count;
+    byAccount[row.account_id].totals[row.category] = row.total_count;
   }
   res.set('Cache-Control', 'no-store');
-  res.json({ counts });
+  res.json({ counts, totals, byAccount, countRevision });
 });
 
 // PATCH /api/mail/messages/:id/category
