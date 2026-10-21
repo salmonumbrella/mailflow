@@ -1,0 +1,20 @@
+{
+  "status": "ROOT_RELEASED_ONE_CODE_ONLY_CORRECTED_ARM_ATTEMPT_NOT_EXECUTED",
+  "observationRun": 39628280169,
+  "observationHarnessCommit": "8889bc27ea10c807da3389740ed1fa4d9578ff8a",
+  "observedPublicImages": 3,
+  "allOtherExistingImageChecksMatch": true,
+  "actualMismatch": "Docker RepoDigests uses node/postgres/redis@sha256 while requested spelling is docker.io/library/name@sha256",
+  "fix": "Accept exactly three Docker Hub public-library spellings of the same exact image name and immutable digest; reject other hosts/owners/names/digests",
+  "positiveNegativeControls": 27,
+  "allFivePublishedObservationPayloadBlobsVerified": true,
+  "sourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+  "sourceTree": "726385949110b2d1eef6168fa5765942136b955e",
+  "orchestratorManifestSha256": "eb22a5b0f3e6996a82c161e9b57445800a0edf86d282668cd371742bbfa6639a",
+  "bundleSha256": "2b46894a8a49be67b36dbe828b620b1eb3ae9e3a9b3e7994582733d40143a8b6",
+  "dependencyArchiveChunksAndSourceV5DriverWireBytesUnchanged": true,
+  "extraDiagnostics": "Retain actual safe image facts/check booleans; distinguish orchestrator not started from an actual exit",
+  "PythonAstAndActionlint": "PASS",
+  "runtimeExecuted": false,
+  "MiniProductionProviderBrowser108kPerformanceAccepted": false
+}

@@ -1,0 +1,25 @@
+{
+  "task": "vault#5a6k",
+  "runtimeReleased": true,
+  "mode": "small",
+  "sourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+  "sourceTree": "726385949110b2d1eef6168fa5765942136b955e",
+  "orchestratorManifestSha256": "eb22a5b0f3e6996a82c161e9b57445800a0edf86d282668cd371742bbfa6639a",
+  "driverSourceVerificationSha256": "1120a40957c99f02b81eefb2f0d559fe98f7237d6a8c62458d883cb72ea513ba",
+  "leaseSeconds": 1800,
+  "deadlineMs": 1200000,
+  "limits": {
+    "nodeCpus": 2,
+    "pgCpus": 1,
+    "redisCpus": 0.25,
+    "maxTotalCpus": 3.25,
+    "nodeMemoryMiB": 6144,
+    "pgMemoryMiB": 2048,
+    "redisMemoryMiB": 256,
+    "fixtureHeapMiB": 512,
+    "tmpMiB": 512,
+    "minimumFreeDiskBytes": 4294967296
+  },
+  "acceptance": "Supplemental Linux ARM development-mode same-app component proof only. Mini108k, production, provider, browser and performance remain open.",
+  "rootReview": "Root verified actual image-observation39628280169: all IDs/platform/layers/version checks match; only standard Docker Hub public-library name aliases differed. One code-only corrected hosted attempt, samev5bundle/limits/deadlines/source."
+}
