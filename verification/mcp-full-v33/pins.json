@@ -2,7 +2,7 @@
   "external": {
     "baseCommit": "96c5c7c6410c703672aeef7499ecc15050611a35",
     "baseTree": "0f47a79a64ef79d2930b7f77ba73af785a571c83",
-    "tree": "5f442218aae7a660c6fdb4be60c96ff62dbd4d06",
+    "tree": "0e12321da7d5a110d04918c1d4c640e66d960008",
     "files": {
       ".dockerignore": {
         "mode": "100644",
@@ -184,23 +184,11 @@
         "sha256": "f5ee78e083a566b5664e22250f0128627d35479af85a505efdc5acef77884e9e",
         "bytes": 253
       },
-      "test-support/fakeMailflow.js": {
-        "mode": "100644",
-        "oid": "685e024505aabfb5f2dad5d8db5f0afce89b420f",
-        "sha256": "1d27c43fe05b47dab59c7d8396353de321fb1ac2e136c961e1badfb1a61af575",
-        "bytes": 31671
-      },
-      "test-support/harness.js": {
-        "mode": "100644",
-        "oid": "56b572f85840668724b50c79d12f367ddc9e7ffe",
-        "sha256": "57e515d261068a90ae101efa3309878e1fd710abb2f1f0761c0d4112ddc51933",
-        "bytes": 2724
-      },
       "test/client.test.js": {
         "mode": "100644",
-        "oid": "71c9bfe19b3d529dda690125c2c81dd8d1e1d3cd",
-        "sha256": "562f60e1ec5e0ad1e30b98b21bd9ae3839431ec060ccb73be361a7fc18a27a65",
-        "bytes": 17419
+        "oid": "bf3b088200e882466df0cbc3ce637ccd3f09b1fe",
+        "sha256": "7a173e336c17d8480ebc096110088505a3724d5dfb787d1583c10f62c51b6d4f",
+        "bytes": 17616
       },
       "test/config.test.js": {
         "mode": "100644",
@@ -261,14 +249,25 @@
         "oid": "c6ec3ce1c218d5ad2a277725df9d799466b3844d",
         "sha256": "64e9f78420e47d5b7e4f3a2b0fbe9b89543ffde084f6b846b92957ea6c9a1420",
         "bytes": 33043
+      },
+      "test-support/fakeMailflow.js": {
+        "mode": "100644",
+        "oid": "685e024505aabfb5f2dad5d8db5f0afce89b420f",
+        "sha256": "1d27c43fe05b47dab59c7d8396353de321fb1ac2e136c961e1badfb1a61af575",
+        "bytes": 31671
+      },
+      "test-support/harness.js": {
+        "mode": "100644",
+        "oid": "56b572f85840668724b50c79d12f367ddc9e7ffe",
+        "sha256": "57e515d261068a90ae101efa3309878e1fd710abb2f1f0761c0d4112ddc51933",
+        "bytes": 2724
       }
     }
   },
-  "acceptedExportManifestSHA256": "856cfbb21b865a4cc163ca3d664dea6f23524eb9a5f2c03dada099e8cc56281d",
   "harness": {
-    "cases.json": "aac89fa532e692920ce8bfc0bf60cd8549d77f76d930d4ab52bddb2a81bbb75b",
+    "cases.json": "b3ba3b93aae9afe8c9676cc6f9d6cd125635ed7d8547de8329c6d2a0a4762331",
     "run-isolated.sh": "b12f167f06bf2995e3428df899679f156944b24575a265e837ee14009e05af2b",
-    "verify-source.py": "1e98a3a0b68fe599a1d441b43e57b9c9541f21a859396654ef27de7475755aa8"
+    "verify-source.py": "b14ee7f62a80d90f06fbadb8a3d2179f699cb151a7bee012e7edf7e384758d54"
   },
   "workflowSHA256": "1d42a0181c59f47e00638d0df1a206f7ff5294111c2cd30866915e850eb442ba",
   "coreLinkage": {
@@ -296,5 +295,15 @@
     "C20",
     "F2 LOWs"
   ],
-  "status": "PROPOSED_NOT_RELEASED_UNRUN"
+  "status": "PROPOSED_TEST_FIXTURE_SUCCESSOR_UNREVIEWED_UNRUN",
+  "previousAcceptedExportManifestSHA256": "856cfbb21b865a4cc163ca3d664dea6f23524eb9a5f2c03dada099e8cc56281d",
+  "exportManifestSHA256": "effc8b5213f1246d786fe45f38d3d5979ac4e2194e2f5882b1e86c7c76a633bb",
+  "fixtureSuccessor": {
+    "previousExternalTree": "5f442218aae7a660c6fdb4be60c96ff62dbd4d06",
+    "changedPath": "test/client.test.js",
+    "nativeRedRun": 39640432855,
+    "nativeRed": "185passed/11cancelled, no deadline; baseline native unrun",
+    "guard": "Per-test referenced2000ms timer, cleared in finally; caller30ms and client1000ms unchanged; no product change",
+    "proof": "Successor UNRUN; no retry/execution lease inferred"
+  }
 }

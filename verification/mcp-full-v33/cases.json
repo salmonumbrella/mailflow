@@ -6,7 +6,7 @@
   "files": [
     {
       "file": "test/client.test.js",
-      "sha256": "562f60e1ec5e0ad1e30b98b21bd9ae3839431ec060ccb73be361a7fc18a27a65",
+      "sha256": "7a173e336c17d8480ebc096110088505a3724d5dfb787d1583c10f62c51b6d4f",
       "count": 24,
       "titles": [
         "every request carries the bearer token, JSON accept and the user agent, and never a cookie",

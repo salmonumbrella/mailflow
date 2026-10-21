@@ -205,11 +205,17 @@ test('a request stopped at a deadline while it waited for a turn was never sent'
   });
   const mailflow = client(fetch, { timeoutMs: 1000 });
   const busy = Array.from({ length: 4 }, () => mailflow.listAccounts().catch(() => {}));
-  const err = await failure(mailflow.request('POST', '/api/mail/draft', { body: {}, signal: AbortSignal.timeout(30) }));
-  assert.equal(err.code, 'deadline');
-  assert.equal(err.mayHaveCompleted, false);
-  assert.ok(!err.message.includes(MAY_HAVE_COMPLETED));
-  await Promise.all(busy);
+  // AbortSignal deadlines do not keep Node alive, and this fake fetch owns no I/O.
+  const keepAlive = setTimeout(() => {}, 2000);
+  try {
+    const err = await failure(mailflow.request('POST', '/api/mail/draft', { body: {}, signal: AbortSignal.timeout(30) }));
+    assert.equal(err.code, 'deadline');
+    assert.equal(err.mayHaveCompleted, false);
+    assert.ok(!err.message.includes(MAY_HAVE_COMPLETED));
+    await Promise.all(busy);
+  } finally {
+    clearTimeout(keepAlive);
+  }
 });
 
 test('429 gives the wait from Retry-After, or says to retry shortly', async () => {

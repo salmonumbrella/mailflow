@@ -45,7 +45,7 @@ def verify(payload, mode):
         assert digest(data) == row['sha256'], name
         assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == row['oid'], name
         assert bool(file.stat().st_mode & 0o111) == (row['mode'] == '100755'), name
-    assert tree_id(descriptor['files']) == descriptor['tree'] == '5f442218aae7a660c6fdb4be60c96ff62dbd4d06'
+    assert tree_id(descriptor['files']) == descriptor['tree'] == '0e12321da7d5a110d04918c1d4c640e66d960008'
     assert read(external/'package.json')['scripts']['test'] == 'node --test'
     for name, pin in pins['harness'].items():
         file = payload/name
@@ -123,7 +123,7 @@ def enforce(payload, logs):
         before = read(logs/'pre-source.json'); after = read(logs/'post-source.json')
         observed['source'] = {'before':before,'after':after}
         for row in [before,after]:
-            require(row['status'] == 'exact' and row['externalTree'] == '5f442218aae7a660c6fdb4be60c96ff62dbd4d06' and row['files'] == 43 and row['caseInventory'] == 196 and row['caseFiles'] == 11 and row['harness'] == 'exact', 'source/harness binding incomplete')
+            require(row['status'] == 'exact' and row['externalTree'] == '0e12321da7d5a110d04918c1d4c640e66d960008' and row['files'] == 43 and row['caseInventory'] == 196 and row['caseFiles'] == 11 and row['harness'] == 'exact', 'source/harness binding incomplete')
         require(before['mode'] == 'before' and after['mode'] == 'after' and before['workflowSHA256'] == after['workflowSHA256'], 'source phases/workflow differ')
     except Exception as exc: errors.append('source receipts missing/invalid: '+str(exc))
     try:
@@ -142,7 +142,7 @@ def enforce(payload, logs):
         require(bool(re.fullmatch(r'[0-9a-f]{40}', os.environ['WORKFLOW_SHA'])), 'publication SHA missing')
     except Exception as exc: errors.append('workflow binding missing/invalid: '+str(exc))
     result = {'status':'passed' if not errors else 'failed_or_incomplete','errors':errors,'observed':observed,
-        'workflowSHA':os.environ.get('WORKFLOW_SHA'),'externalTree':'5f442218aae7a660c6fdb4be60c96ff62dbd4d06',
+        'workflowSHA':os.environ.get('WORKFLOW_SHA'),'externalTree':'0e12321da7d5a110d04918c1d4c640e66d960008',
         'limits':'Full external package suite only. Synthetic loopback/in-memory fixtures; no new core/SQL/live-provider/UI/deployment proof. Prior SDK8+joined19 run39635340741 remains separate.'}
     (logs/'result.json').write_text(json.dumps(result,indent=2)+'\n'); print(json.dumps(result,indent=2))
     raise SystemExit(0 if not errors else 1)
