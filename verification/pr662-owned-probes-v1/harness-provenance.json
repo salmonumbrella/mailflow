@@ -1,0 +1,34 @@
+{
+  "parent_packet": "2026-10-21-pg-remaining22",
+  "original_files": {
+    "runner.py": "a08f8f3a1a025fcf7c61ce8bbbc21260702e2f4c26c8c683b836520e47505194",
+    "pg-admin.mjs": "1db8613c9f9ed9de3ac9244337cfba8a1ec0d1a3911961b566f08be6844a0680",
+    "workflow.yml": "9e53e969b613b54371e877b7642ba2a281803a62422e471a30ec22b421b2d5ec",
+    "postgres-image.json": "c72e0fb788e9decc45dd3d8f0d73cfd668fd717809ac32806ac258253fba2ed7",
+    "action-metadata.json": "763efb3360db3a12a70ed0876534ab9789bd9750671bfc5ed1e967a5099697df"
+  },
+  "hosted_pipeline_history": {
+    "default7933": 39595624254,
+    "SQL385": [
+      39610904393,
+      39608799988,
+      39613141990
+    ]
+  },
+  "prior_runs_are_not_new_source_evidence": true,
+  "adapters": [
+    "exact base plus sealed source overlay",
+    "seven changed-closure commands and pending-case identities",
+    "continue independent failed files after cleanup/source audit",
+    "separate disposable backup fixture DB and exact known residue audit",
+    "remove bail so all pending assertions execute"
+  ],
+  "unchanged_controls": [
+    "managed owned PG container creation/lease/removal",
+    "allowlisted environment and ephemeral secrets/redaction",
+    "subreaper/process-group deadlines and cleanup",
+    "locked npm ci",
+    "pinned Node/PG/action commits",
+    "no retries/no skipped assertions"
+  ]
+}

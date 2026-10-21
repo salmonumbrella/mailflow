@@ -1,0 +1,2966 @@
+import { STATUS_STALE_MS } from '../services/folderStatus.js';
+import { Router } from 'express';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const archiver = require('archiver');
+import { query } from '../services/db.js';
+import { requireAuth } from '../middleware/auth.js';
+import { imapManager } from '../index.js';
+import { extractImapError } from '../services/imapError.js';
+import { isConnectionRefusal } from '../services/imapManager.js';
+import { stripEmailHead, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs, splitDarkScheme, proxyRemoteImages, remoteImageRefs } from '../services/emailSanitizer.js';
+import { imageProxyPath, proxyWidth, fetchProxiedImage, createUserLimiter } from '../services/imageProxy.js';
+import { imageCache, imageCacheKey } from '../services/imageCache.js';
+import { shrinkImage } from '../services/imageShrink.js';
+import { fitInlineImages } from '../services/inlineImageFit.js';
+import { needsCidRefetch, withoutCidMarker } from '../utils/cidRefs.js';
+import { sanitizeDbText, storeFetchedBody } from '../services/messageBodyStore.js';
+import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, buildHeadersFromMessage } from '../services/messageParser.js';
+import { draftMessageSql, resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings, readCopyTargets, pushSeen, pushFlag, admitFlagChanges, releaseFlagChanges } from '../utils/mailUtils.js';
+import { pluginRegistry } from '../plugins/registry.js';
+import { listMessages } from '../services/messageService.js';
+import { recordSyncSignal } from '../services/diagnosticsRing.js';
+import { resolveAccountScope } from '../services/unifiedInbox.js';
+import { validateHost } from '../services/hostValidation.js';
+import { safeFetch } from '../services/safeFetch.js';
+import { safeFilename, attachmentDisposition, truncateFilename } from '../utils/contentDisposition.js';
+import { tokenize, extractFlagFeatures } from '../services/spamTokenizer.js';
+import { updateIncrementalForUser } from '../services/spamModelStore.js';
+
+const router = Router();
+router.use(requireAuth);
+
+// Whether an account-scoped plugin that maintains label sibling rows (currently GTD) is active for
+// this account — the modern replacement for the former email_accounts.gtd_enabled gate on the
+// read/star sibling fan-out. Core stays plugin-agnostic: it asks the registry, never GTD directly.
+// Folds plugin activation in (strictly safer than the old raw column — a deactivated plugin no
+// longer triggers fan-out). The fan-out itself is still additionally gated on the message actually
+// having siblings, so a non-plugin account stays byte-identical to pre-GTD.
+const accountMaintainsLabelSiblings = (accountId) =>
+  pluginRegistry.hasActiveAsync('inboxIngest', { account: { id: accountId } });
+
+// Validate a folder name / path component: no control chars, max 255 chars.
+function isValidFolderName(name) {
+  // eslint-disable-next-line no-control-regex -- intentionally rejecting control characters
+  return typeof name === 'string' && name.length > 0 && name.length <= 255 && !/[\x00-\x1f\x7f]/.test(name);
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function areValidUUIDs(ids) {
+  return ids.every(id => typeof id === 'string' && UUID_RE.test(id));
+}
+
+// Process IMAP operations in bounded batches so a 500-message bulk action
+// does not spawn hundreds of parallel temporary IMAP connections.
+async function runInBatches(items, concurrency, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const batch = items.slice(i, i + concurrency);
+    const batchResults = await Promise.allSettled(batch.map(fn));
+    results.push(...batchResults);
+  }
+  return results;
+}
+
+// Columns copied verbatim when a message row is relocated to a new folder/UID via the
+// DELETE + reinsert CTE used by the bulk trash / move / archive paths on UIDPLUS servers.
+// The destination uid comes from the UIDPLUS map (u.new_uid) and the destination folder is
+// always bound as $4; everything else is carried over from the deleted row (d.*).
+//
+// Excluded on purpose:
+//   - id, synced_at        -> use their column defaults (a fresh UUID and timestamp), which
+//                             preserves the historical "row gets a new id on move" behavior.
+//   - normalized_subject,
+//     search_vector,
+//     thread_key           -> GENERATED ALWAYS columns; Postgres computes them, and inserting
+//                             an explicit value (even NULL) errors.
+//   - is_deleted,
+//     snippet_attempted_at -> never carried; left at their defaults. The reasons are with the
+//                             exclusion list in mail.relocate.test.js.
+//
+// IMPORTANT: when a migration adds a data column to `messages`, add it to RELOCATE_COPY_COLS
+// or a relocate will silently reset it to its default. This list has gone stale twice, dropping
+// delivery_addresses (0037), plugin_annotations (0044) and sender_name/sender_email (0050), and
+// then forwarded_from_name/forwarded_from_email/forwarded_via (0059). mail.relocate.test.js now
+// reads every migration and fails on any messages column that is neither here nor excluded.
+const RELOCATE_COPY_COLS = [
+  'message_id', 'subject', 'from_name', 'from_email', 'to_addresses', 'cc_addresses',
+  'reply_to', 'in_reply_to', 'date', 'snippet', 'is_read', 'is_starred', 'has_attachments',
+  'flags', 'body_html', 'body_text', 'attachments', 'thread_references', 'thread_id', 'is_bulk',
+  'read_changed_at', 'star_changed_at', 'spam_score_sa', 'spam_score_ml', 'spam_verdict',
+  'spam_analyzed_at', 'spam_details', 'spam_user_override', 'category', 'list_unsubscribe',
+  'list_unsubscribe_post', 'unsubscribed_at', 'delivery_addresses', 'plugin_annotations',
+  'sender_name', 'sender_email', 'forwarded_from_name', 'forwarded_from_email', 'forwarded_via',
+  'bcc_addresses',
+];
+// INSERT target list and the matching SELECT projection. account_id + the carried columns come
+// from the deleted row; uid is the UIDPLUS-mapped new uid; folder is the destination ($4).
+export const RELOCATE_INSERT_COLS = ['account_id', 'uid', 'folder', ...RELOCATE_COPY_COLS].join(', ');
+export const RELOCATE_SELECT_COLS = ['d.account_id', 'u.new_uid', '$4', ...RELOCATE_COPY_COLS.map(c => `d.${c}`)].join(', ');
+
+
+// Returns true if a snippet contains content that should never appear in plain-text
+// preview, indicating it was generated from unclean HTML and needs regeneration:
+//   - &entity; — undecoded HTML entities from before the entity-stripping fix
+//   - ##marker## — unexpanded template placeholders (UPS, Epsilon marketing mail)
+//   - --> — dangling HTML comment end leaked by comment-stripping gap
+function snippetIsGarbled(s) {
+  return s && (
+    /&[a-z][a-z0-9]*;/i.test(s) ||   // undecoded HTML entity
+    /##[^#]*##/.test(s) ||             // unexpanded template placeholder
+    /-->/.test(s) ||                   // dangling HTML comment fragment
+    /\{[^}]*[:;][^}]*\}/.test(s) ||   // stored CSS rule block
+    /<[a-z][^>]*>/i.test(s) ||         // raw HTML tag
+    /<\/[a-z][a-z0-9:-]*\s*>/i.test(s) || // stray closing HTML tag
+    /([=_*#~-])\1{3,}/.test(s) ||      // decorative divider run
+    /\[[^\]]+\]\(https?:\/\//.test(s)  // Markdown link syntax from ESP text/plain generators
+  );
+}
+
+// Fire-and-forget notification to label plugins after an ordinary mail mutation. Groups the
+// acted rows by account and dispatches the generic `onMailMutation` hook per account; a label
+// plugin (GTD) decides whether the mutation touched one of its labelled threads and broadcasts
+// its own scoped refresh — either a live sibling post-mutation, or one of the acted rows sitting
+// in a label folder pre-mutation (covers removing the last label copy of a thread, which leaves
+// no post-mutation sibling to find). Rows are the pre-mutation message rows so their message_id
+// and folder are captured before a move/delete can drop them; the hook swallows per-plugin
+// errors, so a completed mutation is never turned into a 500.
+function notifyMailMutation(rows, userId) {
+  for (const accountId of new Set(rows.map(m => m.account_id).filter(Boolean))) {
+    imapManager.scheduleCountRefresh?.(accountId);
+  }
+  const byAccount = new Map();
+  for (const m of rows) {
+    if (!m.message_id) continue;
+    if (!byAccount.has(m.account_id)) byAccount.set(m.account_id, { mids: new Set(), folders: new Set() });
+    const entry = byAccount.get(m.account_id);
+    entry.mids.add(m.message_id);
+    if (m.folder) entry.folders.add(m.folder);
+  }
+  for (const [accountId, { mids, folders }] of byAccount) {
+    pluginRegistry.runHook('onMailMutation', {
+      imapManager: imapManager.pluginFacade, accountId, userId, messageIds: [...mids], actedFolders: [...folders],
+    }).catch(err => console.warn('onMailMutation hook failed:', err.message));
+  }
+}
+
+// Get messages (unified or per-account/folder)
+router.get('/messages', async (req, res) => {
+  const { accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category } = req.query;
+
+  if (!isValidFolderName(folder)) return res.status(400).json({ error: 'Invalid folder name' });
+
+  // Validate category param — only allow known values to prevent SQL injection via the
+  // WHERE clause in listMessages (even though it uses parameterised queries, belt-and-suspenders).
+  const VALID_CATEGORIES = new Set(['primary', 'newsletter', 'promotion', 'automated', 'social']);
+  const safeCategory = VALID_CATEGORIES.has(category) ? category : undefined;
+
+  const { messages, total, threaded: isThreaded, resolvedAccountId } = await listMessages({
+    userId: req.session.userId,
+    accountId,
+    folder,
+    limit,
+    offset,
+    unreadOnly,
+    threaded,
+    category: safeCategory,
+  });
+
+  if (resolvedAccountId && messages.length) {
+    imapManager.prefetchFolderBodies(resolvedAccountId, messages.map(r => r.id))
+      .catch(err => console.warn('Folder body prefetch error:', err.message));
+  }
+
+  // Phase 1 reliability instrumentation: count "ghost" rows served — a UID is known but
+  // its envelope hasn't been fetched, so the row renders as Unknown / (no subject). This is
+  // the visible #407 symptom; measuring it turns "sometimes there are ghost rows" into a rate.
+  if (resolvedAccountId && messages.length) {
+    const ghosts = messages.filter(m =>
+      !m.message_id && (!m.subject || m.subject === '(no subject)') && !m.snippet).length;
+    if (ghosts > 0) recordSyncSignal('ghost_rows_served', { accountId: resolvedAccountId, magnitude: ghosts });
+  }
+
+  res.json({ messages, total, ...(isThreaded ? { threaded: true } : {}) });
+});
+
+router.get('/messages/:id', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message ID' });
+  try {
+    const result = await query(`
+      SELECT m.id, m.uid, m.folder, m.message_id, m.subject,
+             m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
+             m.reply_to, m.in_reply_to, m.thread_references,
+             m.date, m.snippet, m.is_read, m.is_starred,
+             m.has_attachments, m.account_id, m.category,
+             m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
+             m.spam_verdict, m.spam_user_override, m.spam_score_ml,
+             a.name AS account_name, a.email_address AS account_email,
+             a.color AS account_color
+      FROM messages m
+      JOIN email_accounts a ON m.account_id = a.id
+      WHERE m.id = $1
+        AND a.user_id = $2
+        AND m.is_deleted = false
+    `, [id, req.session.userId]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('GET /messages/:id error:', err.message);
+    res.status(500).json({ error: 'Failed to load message' });
+  }
+});
+
+// Resolve a message by a DURABLE reference, for deep links (#270). The row's UUID PK is
+// regenerated when an email is moved/resynced (rows are purged + re-inserted), so a deep
+// link keyed on the UUID dies once the email changes folder. We instead match the stable
+// RFC Message-ID header first, then fall back to the UUID for legacy links and push
+// notifications (which still embed the UUID and are short-lived anyway). Columns and the
+// user-scoping (a.user_id, is_deleted) mirror GET /messages/:id. Distinct path so it never
+// collides with the greedy /messages/:id route.
+router.get('/resolve-message', async (req, res) => {
+  const ref = typeof req.query.ref === 'string' ? req.query.ref : '';
+  if (!ref) return res.status(400).json({ error: 'Missing ref' });
+  const rawAccountId = typeof req.query.accountId === 'string' ? req.query.accountId : '';
+  if (rawAccountId && !UUID_RE.test(rawAccountId)) {
+    return res.status(400).json({ error: 'Invalid accountId' });
+  }
+  const accountId = rawAccountId || null;
+  const COLS = `m.id, m.uid, m.folder, m.message_id, m.subject,
+             m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
+             m.reply_to, m.in_reply_to, m.thread_references, m.thread_id,
+             m.date, m.snippet, m.is_read, m.is_starred,
+             m.has_attachments, m.account_id, m.category,
+             m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
+             m.spam_verdict, m.spam_user_override, m.spam_score_ml,
+             a.name AS account_name, a.email_address AS account_email,
+             a.color AS account_color`;
+  try {
+    // Durable match on the stable Message-ID header. When the same email exists in more
+    // than one folder (e.g. INBOX + Archive), prefer the INBOX copy, then the most recent.
+    let result = await query(`
+      SELECT ${COLS}
+      FROM messages m
+      JOIN email_accounts a ON m.account_id = a.id
+      WHERE m.message_id = $1
+        AND a.user_id = $2
+        AND m.is_deleted = false
+        AND ($3::uuid IS NULL OR m.account_id = $3)
+      ORDER BY (m.folder = 'INBOX') DESC, m.date DESC NULLS LAST
+      LIMIT 1
+    `, [ref, req.session.userId, accountId]);
+    // Legacy links / push notifications carry the UUID primary key.
+    if (result.rows.length === 0 && UUID_RE.test(ref)) {
+      result = await query(`
+        SELECT ${COLS}
+        FROM messages m
+        JOIN email_accounts a ON m.account_id = a.id
+        WHERE m.id = $1
+          AND a.user_id = $2
+          AND m.is_deleted = false
+          AND ($3::uuid IS NULL OR m.account_id = $3)
+      `, [ref, req.session.userId, accountId]);
+    }
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Message not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('GET /resolve-message error:', err.message);
+    res.status(500).json({ error: 'Failed to resolve message' });
+  }
+});
+
+// Returns true if remote images should be blocked for this message given the user's preferences.
+// Default behaviour (no preference set) is to block.
+function shouldBlockImages(prefs, message) {
+  if (prefs?.blockRemoteImages === false) return false;
+  const senderEmail = (message.from_email || '').toLowerCase();
+  const atIdx = senderEmail.indexOf('@');
+  const senderDomain = atIdx >= 0 ? senderEmail.slice(atIdx + 1) : '';
+  const whitelist = prefs?.imageWhitelist || {};
+  const allowedAddresses = Array.isArray(whitelist.addresses) ? whitelist.addresses.filter(a => typeof a === 'string').map(a => a.toLowerCase()) : [];
+  const allowedDomains   = Array.isArray(whitelist.domains)   ? whitelist.domains.filter(d => typeof d === 'string').map(d => d.toLowerCase())   : [];
+  if (senderEmail && allowedAddresses.includes(senderEmail)) return false;
+  if (senderDomain && allowedDomains.some(d => senderDomain === d || senderDomain.endsWith('.' + d))) return false;
+  return true;
+}
+
+// Get all messages belonging to a thread (for threaded view expansion). The id goes in the query
+// string: a thread id is a Message-ID, and GitHub's contain slashes, which some reverse proxies
+// reject or decode when they appear encoded in a path (#509). The path form stays for clients
+// that still use it.
+async function getThread(req, res, threadId) {
+  if (typeof threadId !== 'string' || !threadId) return res.status(400).json({ error: 'threadId required' });
+
+  try {
+    const accountsResult = await query(
+      'SELECT id, include_in_unified_inbox FROM email_accounts WHERE user_id = $1 AND enabled = true',
+      [req.session.userId]
+    );
+    const accountIds = req.query.unified === 'true'
+      ? resolveAccountScope(accountsResult.rows).accountIds
+      : accountsResult.rows.map(row => row.id);
+    if (!accountIds.length) return res.json({ messages: [] });
+
+    // Show all non-deleted messages in the thread regardless of folder. This includes
+    // Sent replies (which have distinct message_ids) alongside received messages.
+    // DISTINCT ON deduplicates the same message appearing in multiple folders (e.g. Gmail's
+    // All Mail), preferring the INBOX copy.
+    //
+    // The key is scoped to the account. One email delivered to two connected accounts is two
+    // separate mailbox items sharing a Message-ID, and a bare message_id key dropped one of
+    // them: the copy vanished from the conversation as well as from the grouped list, so in
+    // conversation mode it was not reachable anywhere in the UI (#476). Thunderbird puts both
+    // copies in the one thread here, keyed by Message-ID and explicitly folder- and
+    // account-agnostic for THREADING while still listing each copy, which is the behavior this
+    // matches. Same-account duplicates (All Mail, the Sent twin) still collapse.
+    const result = await query(`
+      WITH deduped AS (
+        SELECT DISTINCT ON (m.account_id, m.message_id)
+               m.id, m.uid, m.folder, m.message_id, m.thread_id, m.subject,
+               m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
+               m.reply_to, m.in_reply_to, m.thread_references,
+               m.date, m.snippet, m.is_read, m.is_starred,
+               m.has_attachments, m.account_id, m.category,
+               m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
+               a.name AS account_name, a.email_address AS account_email, a.color AS account_color,
+               -- Deleting or moving the conversation leaves its drafts alone (utils/conversationActions.js).
+               ${draftMessageSql('m')} AS is_draft
+        FROM messages m
+        JOIN email_accounts a ON m.account_id = a.id
+        WHERE m.is_deleted = false
+          AND m.account_id = ANY($1)
+          AND m.thread_key = $2
+        ORDER BY m.account_id,
+                 m.message_id,
+                 CASE WHEN m.folder = 'INBOX' THEN 0 ELSE 1 END,
+                 m.date ASC
+      )
+      -- account_id, id break the tie: two accounts' copies of one email carry the same Date,
+      -- so date alone would order them arbitrarily between requests.
+      SELECT * FROM deduped ORDER BY date ASC, account_id, id
+    `, [accountIds, threadId]);
+
+    res.json({ messages: result.rows });
+  } catch (err) {
+    console.error('Thread fetch error:', err);
+    res.status(500).json({ error: 'Failed to load thread' });
+  }
+}
+router.get('/thread', (req, res) => getThread(req, res, req.query.id));
+router.get('/thread/:threadId', (req, res) => getThread(req, res, req.params.threadId));
+
+// Counts are snapshots independently measured on the IMAP server, never cache tallies.
+router.get('/unread-counts', async (req, res) => {
+  const result = await query(`SELECT a.id AS account_id, a.include_in_unified_inbox,
+      f.server_unread_count AS count, f.server_total_count, f.server_counts_at, f.server_count_revision, f.status_attempt_revision, f.status_error
+    FROM email_accounts a LEFT JOIN folders f ON f.account_id=a.id AND f.path='INBOX'
+    WHERE a.user_id=$1 AND a.enabled`, [req.session.userId]);
+  const byAccount = {}, snapshots = {};
+  let total = 0, complete = true;
+  for (const row of result.rows) {
+    const known = row.count != null && row.server_counts_at != null;
+    const count = known ? Number(row.count) : null;
+    byAccount[row.account_id] = count;
+    const stale = !known || !!row.status_error || Date.now() - new Date(row.server_counts_at).getTime() > STATUS_STALE_MS;
+    snapshots[row.account_id] = { totalCount: known && row.server_total_count != null ? Number(row.server_total_count) : null, revision: row.server_count_revision || '0', attemptRevision: row.status_attempt_revision || row.server_count_revision || '0', observedAt: row.server_counts_at || null, stale, known };
+    if (row.include_in_unified_inbox !== false) {
+      if (known) total += count;
+      if (stale) complete = false;
+    }
+  }
+  // How many messages are snoozed (#269): the sidebar shows its Snoozed view only while some are.
+  // Secondary to the counts, so a failure here reports none rather than failing them.
+  let snoozed = 0;
+  try {
+    const r = await query(
+      `SELECT COUNT(*)::int AS n FROM snoozed_messages sm
+       JOIN email_accounts a ON a.id = sm.account_id AND a.user_id = $1 AND a.enabled
+       WHERE sm.user_id = $1 AND ${LIVE_SNOOZE_SQL}`,
+      [req.session.userId]
+    );
+    snoozed = r?.rows?.[0]?.n ?? 0;
+  } catch (err) {
+    console.warn('Snoozed count failed:', err.message);
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json({ total, byAccount, snapshots, complete, snoozed });
+});
+
+// Hard cap on a live IMAP body fetch. Connection acquisition is already bounded at 30s
+// inside imapManager, but the FETCH itself is not — on a half-open/stalled connection
+// (e.g. an account mid-reconnect, as happens on large flaky mailboxes) it can hang
+// indefinitely, and with no response the client's body spinner spins forever. 40s sits
+// above the 30s connect bound so a legitimately slow connect still completes.
+const BODY_FETCH_TIMEOUT_MS = 40000;
+
+// Reject with a tagged error if `promise` doesn't settle within `ms`. The underlying
+// fetch keeps running and releases its pooled client via withFreshClient's own cleanup;
+// we just stop making the HTTP request wait on it. clearTimeout avoids keeping the
+// event loop alive after the race settles.
+function fetchWithTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('BODY_FETCH_TIMEOUT')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// The Bcc MailFlow recorded for a message you sent or a draft you saved (#585). Received mail has
+// none stored, so it shows none.
+const bccOf = (message) => (Array.isArray(message.bcc_addresses) ? message.bcc_addresses : []);
+
+// Get full message body + attachments list
+router.get('/messages/:id/body', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const result = await query(`
+    SELECT m.*, a.user_id, u.preferences FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    JOIN users u ON u.id = a.user_id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const message = result.rows[0];
+
+  // Return cached body if available — but re-fetch when the cached HTML still
+  // contains unresolved cid: references, or http:// image URLs that were cached
+  // before the http→https upgrade was added (would be blocked as mixed content).
+  // A body fetched completely is marked settled and not fetched again for references
+  // that can never resolve (utils/cidRefs.js, #595).
+  const hasCidRefs  = needsCidRefetch(message.body_html);
+  const hasHttpImgs = message.body_html && (
+    // <img src="http://"> cached before the http→https upgrade
+    /<img[^>]+src=["']http:\/\//i.test(message.body_html) ||
+    // background="http://" on table/td/tr elements (marketing email table layouts)
+    /background=["']http:\/\//i.test(message.body_html) ||
+    // CSS url(http://) in inline style attributes or <style> blocks
+    /url\(\s*['"]?http:\/\//i.test(message.body_html)
+  );
+  if ((message.body_html || message.body_text) && !hasCidRefs && !hasHttpImgs) {
+    const attachments = message.attachments
+      ? (typeof message.attachments === 'string' ? JSON.parse(message.attachments) : message.attachments)
+      : [];
+    // Apply head-stripping to already-cached HTML so emails stored before this
+    // fix was deployed are cleaned up immediately on first view.
+    let html = message.body_html ? stripEmailHead(message.body_html) : null;
+    if (html !== message.body_html) {
+      // Update cache so subsequent views don't need to re-strip
+      query('UPDATE messages SET body_html = $1 WHERE id = $2', [sanitizeDbText(html), id]).catch(() => {});
+    }
+    // Rewrite eBay imageser URLs to direct image URLs for emails cached before this fix.
+    // imageser requires eBay session cookies (never sent cross-site) and returns 1 byte
+    // without them; the real image is always in the `imageUrl` query parameter.
+    if (html && html.includes('svcs.ebay.com/imageser')) {
+      const rewritten = rewriteEbayImageserUrls(html);
+      if (rewritten !== html) {
+        html = rewritten;
+        query('UPDATE messages SET body_html = $1 WHERE id = $2', [sanitizeDbText(html), id]).catch(() => {});
+      }
+    }
+    // Normalise bare-domain hrefs (e.g. href="benchmade.com") cached before href
+    // normalisation was added to sanitizeEmail().  Without this, clicking such links
+    // in the sandboxed iframe resolves them against the mailflow origin and opens a
+    // new mailflow tab instead of the sender's website.
+    if (html && /<a\b[^>]*\shref=["'](?!https?:\/\/|mailto:|cid:|tel:|\/\/|[#/.])/i.test(html)) {
+      const rewritten = rewriteAnchorHrefs(html);
+      if (rewritten !== html) {
+        html = rewritten;
+        query('UPDATE messages SET body_html = $1 WHERE id = $2', [sanitizeDbText(html), id]).catch(() => {});
+      }
+    }
+    // Backfill snippet when absent, or regenerate if garbled (undecoded HTML entities
+    // from before the entity-stripping fix — e.g. "&zwnj;" in preview text).
+    if (!message.snippet || snippetIsGarbled(message.snippet)) {
+      const snip = snippetFromBody(message.body_text, html);
+      if (snip) {
+        query('UPDATE messages SET snippet = $1 WHERE id = $2', [sanitizeDbText(snip), id]).catch(() => {});
+      }
+    }
+
+    // Apply remote-image blocking at response time — never write the blocked variant
+    // back to the DB so the canonical cached HTML always has images intact.
+    const skipBlocking = req.query.remoteImages === '1';
+    // The settled marker stays in the cache (html, written back above); it never leaves MailFlow.
+    const shown = withoutCidMarker(html);
+    let responseHtml = shown;
+    let hasBlockedRemoteImages = false;
+    // Whether remote images are blocked for this message at all, whatever was found: the email
+    // frame then forbids remote loads outright, behind blockRemoteImages.
+    const remoteImagesBlocked = !skipBlocking && shouldBlockImages(message.preferences, message);
+    if (remoteImagesBlocked && shown) {
+      const blocked = blockRemoteImages(shown); // once: hasRemoteImages is this same pass
+      if (blocked !== shown) {
+        responseHtml = blocked;
+        hasBlockedRemoteImages = true;
+      }
+    }
+    // Remote images allowed for this message load through the image proxy (services/imageProxy.js),
+    // and the email frame then allows images from MailFlow alone.
+    const remoteImagesProxied = !remoteImagesBlocked;
+    const imageStats = {};
+    if (remoteImagesProxied && shown) responseHtml = proxyRemoteImages(shown, (raw, width) => imageProxyPath(id, raw, width), imageStats);
+    const inline = req.query.original === '1' ? { html: responseHtml, count: 0 } : await fitInlineImages(responseHtml, req.session.userId);
+    return res.json({ ...splitDarkScheme(inline.html), inlineImagesFitted: inline.count > 0, text: message.body_text, attachments, hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied, trackersBlocked: imageStats.trackers ?? 0, senderEmail: message.sender_email, senderName: message.sender_name, forwardedFromEmail: message.forwarded_from_email, forwardedFromName: message.forwarded_from_name, forwardedVia: message.forwarded_via, bccAddresses: bccOf(message) });
+  }
+
+  // Fetch from IMAP — signal user activity so background jobs back off during this request.
+  try {
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    const account = accountResult.rows[0];
+    imapManager.noteUserActivity(account.id);
+
+    const { html, text, attachments, cidsComplete } = await fetchWithTimeout(
+      imapManager.fetchMessageBody(account, message.uid, message.folder),
+      BODY_FETCH_TIMEOUT_MS
+    );
+
+    const { sanitized, safeText } = await storeFetchedBody(id, { html, text, attachments, cidsComplete });
+
+    // Apply remote-image blocking at response time — safeHtml (unblocked) is what
+    // was written to the DB cache above, preserving the canonical body; the response is it
+    // without the settled marker.
+    const skipBlocking = req.query.remoteImages === '1';
+    let responseHtml = sanitized;
+    let hasBlockedRemoteImages = false;
+    const remoteImagesBlocked = !skipBlocking && shouldBlockImages(message.preferences, message);
+    if (remoteImagesBlocked && sanitized) {
+      const blocked = blockRemoteImages(sanitized);
+      if (blocked !== sanitized) {
+        responseHtml = blocked;
+        hasBlockedRemoteImages = true;
+      }
+    }
+    const remoteImagesProxied = !remoteImagesBlocked;
+    const imageStats = {};
+    if (remoteImagesProxied && sanitized) responseHtml = proxyRemoteImages(sanitized, (raw, width) => imageProxyPath(id, raw, width), imageStats);
+    const inline = req.query.original === '1' ? { html: responseHtml, count: 0 } : await fitInlineImages(responseHtml, req.session.userId);
+    res.json({ ...splitDarkScheme(inline.html), inlineImagesFitted: inline.count > 0, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied, trackersBlocked: imageStats.trackers ?? 0, senderEmail: message.sender_email, senderName: message.sender_name, forwardedFromEmail: message.forwarded_from_email, forwardedFromName: message.forwarded_from_name, forwardedVia: message.forwarded_via, bccAddresses: bccOf(message) });
+  } catch (err) {
+    const msg = err.message || 'Unknown error';
+    console.error('Body fetch error:', msg);
+    // Detect Gmail/IMAP throttling and surface a helpful message
+    const isThrottle = /THROTTL/i.test(msg);
+    if (isThrottle) {
+      return res.status(503).json({
+        error: 'The mail server is temporarily throttling access. Please wait a few minutes and try again.',
+        throttled: true,
+      });
+    }
+    if (msg === 'BODY_FETCH_TIMEOUT') {
+      return res.status(504).json({
+        error: 'This message is taking too long to load — the mail server may be temporarily unreachable. Please try again.',
+        timeout: true,
+      });
+    }
+    // Our own connection budget, not the provider's. Saying so beats a generic 500:
+    // the account is busy, the request is worth retrying, and nothing is broken.
+    // The provider itself is refusing additional connections (Yahoo's per-account session
+    // ceiling, #474). Distinct from poolExhausted below, which is OUR budget: here nothing
+    // MailFlow does right now will make the request succeed, so say what is happening and
+    // that MailFlow is already backing off, instead of the raw server string.
+    if (err.providerRefusing || isConnectionRefusal(msg)) {
+      return res.status(503).json({
+        error: 'The mail server is limiting connections for this account. MailFlow is backing off and will retry automatically; please try again shortly.',
+        providerLimited: true,
+      });
+    }
+    if (err.poolExhausted) {
+      return res.status(503).json({
+        error: 'This account is busy with other mail operations. Please try again in a moment.',
+        busy: true,
+      });
+    }
+    res.status(500).json({ error: msg });
+  }
+});
+
+// Get full raw headers
+router.get('/messages/:id/headers', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const result = await query(`
+    SELECT m.*, a.user_id FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const message = result.rows[0];
+
+  try {
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    const account = accountResult.rows[0];
+
+    let headers = '';
+    try {
+      headers = await imapManager.fetchHeaders(account, message.uid, message.folder);
+    } catch (fetchErr) {
+      console.warn('Headers IMAP fetch failed:', fetchErr.message);
+    }
+
+    if (!headers?.trim()) {
+      headers = buildHeadersFromMessage(message);
+    }
+
+    // This exists only to REPAIR a subject we never stored, so it is gated on the stored one
+    // being missing. It used to re-derive the subject every time and hand it back
+    // unconditionally; MessageHeaderModal pushes that value up through onSubjectResolved, so
+    // any flaw in header decoding silently rewrote the list and the open message with a worse
+    // value than the one already on screen. That is how #454 became visible. Never replacing
+    // a subject we already have keeps a decoding bug contained to this modal.
+    let resolvedSubject = message.subject;
+    const storedSubjectMissing = !message.subject || message.subject === '(no subject)';
+    if (storedSubjectMissing && headers?.trim()) {
+      const parsed = parseRawHeaders(headers);
+      const imapSubject = decodeMimeWords(parsed.subject || '').trim();
+      if (imapSubject && imapSubject !== '(no subject)') {
+        resolvedSubject = imapSubject;
+        await query('UPDATE messages SET subject = $1 WHERE id = $2', [imapSubject, id]);
+      }
+    }
+
+    res.json({ headers, subject: resolvedSubject });
+  } catch (err) {
+    console.error('Headers fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch message headers' });
+  }
+});
+
+// Bcc recipients of a draft, for reopening it in the composer. A draft's Bcc exists only in its own
+// headers and saving the reopened draft expunges that copy, so failing to read it has to be an
+// error, never an empty list: an empty list is what erased it. Drafts MailFlow saved carry it in
+// bcc_addresses; anything else (NULL) is read from the copy on the server.
+router.get('/messages/:id/bcc', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const unreadable = "Could not read this draft's Bcc recipients from the mail server.";
+  try {
+    const result = await query(`
+      SELECT m.account_id, m.uid, m.folder, m.message_id, m.bcc_addresses FROM messages m
+      JOIN email_accounts a ON m.account_id = a.id
+      WHERE m.id = $1 AND a.user_id = $2
+    `, [id, req.session.userId]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+    const message = result.rows[0];
+    if (Array.isArray(message.bcc_addresses)) return res.json({ bcc: message.bcc_addresses });
+
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    const account = accountResult.rows[0];
+    imapManager.noteUserActivity(account.id);
+    const headers = parseRawHeaders(await fetchWithTimeout(
+      imapManager.fetchHeaders(account, message.uid, message.folder),
+      BODY_FETCH_TIMEOUT_MS
+    ));
+    if (!Object.keys(headers).length) {
+      console.warn(`Draft Bcc: no headers for uid ${message.uid} in ${message.folder}`);
+      return res.status(502).json({ error: unreadable });
+    }
+    // Stops a uid that now holds some other message from handing back that message's Bcc.
+    const norm = v => String(v || '').replace(/[<>\s]/g, '').toLowerCase();
+    if (message.message_id && norm(message.message_id) !== norm(headers['message-id'])) {
+      console.warn(`Draft Bcc: uid ${message.uid} in ${message.folder} holds ${headers['message-id'] || 'no Message-ID'}, not ${message.message_id}`);
+      return res.status(409).json({ error: 'This draft changed on the mail server. Refresh the folder and try again.' });
+    }
+    res.json({ bcc: (headers.bcc || '').split('\n').flatMap(line => parseMailboxList(line)) });
+  } catch (err) {
+    console.warn('Draft Bcc fetch failed:', err.message);
+    res.status(502).json({ error: unreadable });
+  }
+});
+
+const ZIP_MAX_FILES = 100;
+const ZIP_MAX_TOTAL_BYTES = 150 * 1024 * 1024; // 150 MB
+const ZIP_MAX_FILE_BYTES  =  50 * 1024 * 1024; //  50 MB per file
+
+// Download all attachments as a ZIP archive
+router.get('/messages/:id/attachments.zip', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const result = await query(`
+    SELECT m.*, a.user_id FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const message = result.rows[0];
+
+  const attachments = typeof message.attachments === 'string'
+    ? JSON.parse(message.attachments || '[]')
+    : (message.attachments || []);
+
+  if (attachments.length === 0) return res.status(404).json({ error: 'No attachments' });
+  if (attachments.length > ZIP_MAX_FILES) return res.status(400).json({ error: `Too many attachments (max ${ZIP_MAX_FILES})` });
+
+  const knownTotal = attachments.reduce((sum, a) => sum + (a.size || 0), 0);
+  if (knownTotal > ZIP_MAX_TOTAL_BYTES) {
+    return res.status(413).json({ error: 'Total attachment size exceeds the 150 MB ZIP limit.' });
+  }
+
+  // Exclude per-file oversize items; unknown-size (0) are allowed through.
+  const eligible = attachments.filter(a => !a.size || a.size <= ZIP_MAX_FILE_BYTES);
+  if (eligible.length === 0) return res.status(413).json({ error: 'All attachments exceed the 50 MB per-file limit.' });
+
+  try {
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    if (!accountResult.rows.length) return res.status(404).json({ error: 'Account not found' });
+    const account = accountResult.rows[0];
+
+    const bufferMap = await imapManager.fetchMultipleAttachments(account, message.uid, message.folder, eligible);
+    if (bufferMap.size === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
+
+    // Deduplicate filenames: invoice.pdf → invoice (2).pdf
+    const usedNames = new Map();
+    const entries = [];
+    for (const att of eligible) {
+      const buf = bufferMap.get(att.part);
+      if (!buf) continue;
+      let name = safeFilename(att.filename);
+      if (usedNames.has(name)) {
+        const n = usedNames.get(name) + 1;
+        usedNames.set(name, n);
+        const dot = name.lastIndexOf('.');
+        name = dot > 0 ? `${name.slice(0, dot)} (${n})${name.slice(dot)}` : `${name} (${n})`;
+      } else {
+        usedNames.set(name, 1);
+      }
+      entries.push({ name, buf });
+    }
+
+    if (entries.length === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
+
+    const zipName = truncateFilename(message.subject || 'attachments', 100) + '-attachments.zip';
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', attachmentDisposition(zipName));
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.on('error', err => {
+      console.error('ZIP archive error:', err.message);
+      if (!res.headersSent) res.status(500).json({ error: 'Failed to create ZIP' });
+    });
+    archive.pipe(res);
+    for (const { name, buf } of entries) {
+      archive.append(buf, { name });
+    }
+    archive.finalize();
+  } catch (err) {
+    console.error('ZIP fetch error:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to create ZIP' });
+  }
+});
+
+// Download attachment
+router.get('/messages/:id/attachments/:part', async (req, res) => {
+  const { id, part } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+  let partNum;
+  try {
+    partNum = decodeURIComponent(part);
+  } catch {
+    return res.status(400).json({ error: 'Invalid attachment part identifier' });
+  }
+
+  const result = await query(`
+    SELECT m.*, a.user_id FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const message = result.rows[0];
+
+  // Find attachment metadata
+  const attachments = typeof message.attachments === 'string'
+    ? JSON.parse(message.attachments || '[]')
+    : (message.attachments || []);
+  const att = attachments.find(a => a.part === partNum);
+  if (!att) return res.status(404).json({ error: 'Attachment not found' });
+
+  // Reject oversized attachments before opening an IMAP connection.
+  // att.size comes from the IMAP BODYSTRUCTURE response and is generally accurate.
+  // A size of 0 means unknown — allow the fetch to proceed in that case.
+  const ATTACHMENT_SIZE_LIMIT = 50 * 1024 * 1024; // 50 MB
+  if (att.size > ATTACHMENT_SIZE_LIMIT) {
+    return res.status(413).json({ error: 'Attachment exceeds the 50 MB download limit.' });
+  }
+
+  try {
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    if (!accountResult.rows.length) return res.status(404).json({ error: 'Account not found' });
+    const buffer = await imapManager.fetchAttachment(accountResult.rows[0], message.uid, message.folder, partNum);
+
+    if (!buffer) return res.status(404).json({ error: 'Could not fetch attachment' });
+
+    res.setHeader('Content-Type', att.type || 'application/octet-stream');
+    res.setHeader('Content-Disposition', attachmentDisposition(att.filename));
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+  } catch (err) {
+    console.error('Attachment fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch attachment' });
+  }
+});
+
+// The image proxy (services/imageProxy.js): one remote image of one of the user's messages,
+// fetched by MailFlow. `u` is the reference exactly as the message's HTML writes it, and only a
+// reference that HTML holds is fetched, so this cannot fetch anything else. `w` is the width the
+// email shows it at, which it is fitted to (services/imageShrink.js).
+//
+// The references are read from the stored body, and also from it as the body route serves it
+// (head stripped, eBay image links unwrapped): the route writes that version back without waiting,
+// so on a first view an image request can arrive before it is stored. Kept for a few minutes per
+// user and message, as an email's images arrive together: within that time a reference already
+// found needs no query, where each image read the whole body from the database again (a
+// newsletter's 40 images, 40 reads of its body). A reference not found there is looked up afresh.
+// The list was made by this user's own query of their own message, so the shortcut serves no one
+// else; a message deleted in those minutes can still show its images until they pass.
+//
+// The image itself comes from the image cache (services/imageCache.js) when it is there. It never
+// changes for a given message, reference and width, so the browser may keep it a month without
+// asking, and asking with its ETag is answered at once.
+const imageProxyLimiter = createUserLimiter();
+const imageRefsCache = new Map();
+const IMAGE_REFS_TTL_MS = 5 * 60_000;
+const IMAGE_REFS_MAX = 200;
+const IMAGE_CACHE_CONTROL = 'private, max-age=2592000, immutable';
+const IMAGE_FAILURE_CACHE_CONTROL = 'private, max-age=600';
+function cachedImageRefs(key) {
+  const hit = imageRefsCache.get(key);
+  return hit && Date.now() - hit.at < IMAGE_REFS_TTL_MS ? hit.refs : null;
+}
+function imageRefsFor(key, stored) {
+  const served = rewriteAnchorHrefs(rewriteEbayImageserUrls(stripEmailHead(stored)));
+  const refs = new Map([...remoteImageRefs(served), ...remoteImageRefs(stored)]);
+  imageRefsCache.delete(key);
+  imageRefsCache.set(key, { refs, at: Date.now() });
+  if (imageRefsCache.size > IMAGE_REFS_MAX) imageRefsCache.delete(imageRefsCache.keys().next().value);
+  return refs;
+}
+
+router.get('/messages/:id/image', async (req, res) => {
+  const { id } = req.params;
+  const raw = typeof req.query.u === 'string' ? req.query.u : '';
+  if (!UUID_RE.test(id) || !raw || raw.length > 8192) return res.status(400).end();
+  const width = proxyWidth(req.query.w);
+  const userId = req.session.userId;
+
+  const refsKey = `${userId}:${id}`;
+  let url = cachedImageRefs(refsKey)?.get(raw);
+  if (!url) {
+    const result = await query(`
+      SELECT m.body_html FROM messages m
+      JOIN email_accounts a ON m.account_id = a.id
+      WHERE m.id = $1 AND a.user_id = $2
+    `, [id, userId]);
+    const stored = result.rows[0]?.body_html;
+    if (!stored) return res.status(404).end();
+    url = imageRefsFor(refsKey, stored).get(raw);
+  }
+  if (!url) return res.status(404).end();
+
+  const key = imageCacheKey(userId, url, width);
+  const etag = `"${key.slice(0, 40)}"`;
+  const headers = {
+    'Cache-Control': IMAGE_CACHE_CONTROL,
+    ETag: etag,
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+    'Cross-Origin-Resource-Policy': 'same-origin',
+    'Referrer-Policy': 'no-referrer',
+  };
+  if (req.get('If-None-Match') === etag) return res.status(304).set(headers).end();
+  const failed = imageCache.failure(key);
+  if (failed) return res.status(failed).set('Cache-Control', IMAGE_FAILURE_CACHE_CONTROL).end();
+
+  try {
+    const { bytes, type } = await imageCache.load(key, () => imageProxyLimiter(userId,
+      () => fetchProxiedImage(url).then((image) => shrinkImage(image, { width }))));
+    res.set({ ...headers, 'Content-Type': type, 'Content-Length': String(bytes.length) });
+    return res.send(bytes);
+  } catch (err) {
+    const status = err?.status || 502;
+    imageCache.fail(key, status);
+    return res.status(status).set('Cache-Control', IMAGE_FAILURE_CACHE_CONTROL).end();
+  }
+});
+
+// Download the full message as an .eml file (#381). The raw RFC 822 source, exactly as the
+// server stores it, so attachments and original headers survive the round trip into any
+// other mail client.
+router.get('/messages/:id/raw.eml', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const result = await query(`
+    SELECT m.id, m.uid, m.folder, m.subject, m.account_id, a.user_id FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const message = result.rows[0];
+
+  try {
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    if (!accountResult.rows.length) return res.status(404).json({ error: 'Account not found' });
+    const buffer = await imapManager.fetchRawMessage(accountResult.rows[0], message.uid, message.folder);
+    if (!buffer) return res.status(404).json({ error: 'Could not fetch message source' });
+
+    const name = `${truncateFilename(message.subject || 'message', 80)}.eml`;
+    res.setHeader('Content-Type', 'message/rfc822');
+    res.setHeader('Content-Disposition', attachmentDisposition(name));
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+  } catch (err) {
+    console.error('Raw message fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch message source' });
+  }
+});
+
+// Mark read/unread
+router.patch('/messages/:id/read', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+  const { read } = req.body;
+  const action = imapManager._newFlagAction();
+
+  const result = await query(`
+    SELECT m.*, a.user_id,
+           CASE WHEN m.message_id IS NULL THEN 1
+                ELSE (SELECT COUNT(*) FROM messages s
+                       WHERE s.account_id = m.account_id AND s.message_id = m.message_id)
+           END AS sibling_count
+    FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const message = result.rows[0];
+
+  const context = admitFlagChanges(imapManager, message.account_id, [message], '\\Seen', read, { action });
+  const intent = context.intents.get(`${id}:\\Seen`);
+  let applied, accountResult;
+  try {
+    [applied, accountResult] = await Promise.all([
+      imapManager._stampFlagIntent({ messageId: id, flag: '\\Seen', value: read, intent }, true),
+      query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]),
+    ]);
+  } catch (err) {
+    await imapManager._resolveFlagPush(message.account_id, id, '\\Seen', intent);
+    throw err;
+  }
+  if (!applied) {
+    await imapManager._resolveFlagPush(message.account_id, id, '\\Seen', intent);
+    return res.json({ ok: true, is_read: read });
+  }
+
+  // Keep the cached folder unread_count in sync so pagination totals stay accurate.
+  if (!!message.is_read !== !!read) {
+    adjustFolderCounts(message.account_id, message.folder, 0, read ? -1 : 1);
+    // Notify the user's OTHER sessions so a read/unread on one device reflects on the rest
+    // in place, without a full folder refetch (the originating device already applied it).
+    imapManager.broadcast({ type: 'message_flags', accountId: message.account_id, changes: [{ id, is_read: read }] }, req.session.userId);
+  }
+
+  // GTD: a labeled message owns a sibling row per folder. Fan the read change out to
+  // those rows (and their folder unread counts) so label views don't go stale. Gated on
+  // gtd_enabled (so a non-GTD account is byte-identical to pre-GTD behaviour) AND on the
+  // message actually having siblings — a plain single-folder message keeps the PK-only
+  // fast path. Gmail propagates Seen message-wide; per-copy servers need a write to
+  // each eligible flipped copy. Added writes do not delay this request's response.
+  const account = accountResult.rows[0];
+  let copies = [];
+  try {
+    if (Number(message.sibling_count) > 1 && await accountMaintainsLabelSiblings(message.account_id)) {
+      copies = await fanOutReadToSiblings(message.account_id, message.message_id, read, context) || [];
+      admitFlagChanges(imapManager, message.account_id, copies, '\\Seen', read, context);
+    }
+  } catch (err) { console.warn('Read-copy preparation failed:', err.message); }
+
+  try {
+    await imapManager.setFlag(account, message.uid, message.folder, '\\Seen', read, { intent });
+    await imapManager._resolveFlagPush(message.account_id, id, '\\Seen', intent);
+  } catch (err) {
+    console.error('IMAP flag update failed:', err.message);
+    // Retain this exact admission within the bounded retry lifetime.
+    imapManager._enqueueFlagPush(message.account_id, id, '\\Seen', read, intent);
+  }
+
+  if (copies.length) {
+    (async () => {
+      try {
+        if (account && !imapManager.isLabelStore(account)) {
+          const flippedIds = new Set(copies.map(r => r.id));
+          const targets = await readCopyTargets(message.account_id, message.message_id, message);
+          await pushSeen(imapManager, account, message.account_id, targets.filter(r => r.id !== id && flippedIds.has(r.id)), read, context);
+        }
+      } finally {
+        await releaseFlagChanges(imapManager, message.account_id, copies.filter(row => {
+          const token = context.intents.get(`${row.id}:\\Seen`);
+          return !token || imapManager._pendingFlagPush.get(message.account_id)?.get(token.key)?.intent !== token;
+        }), '\\Seen', context);
+      }
+    })().catch(err => console.warn('Read-copy push failed:', err.message));
+  }
+
+  // Refresh GTD section data if this message's thread carries a GTD label (its head shows read state).
+  notifyMailMutation([message], req.session.userId);
+
+  res.json({ ok: true, is_read: read });
+});
+
+// Each request owns one action before its first await, including late-discovered copies.
+async function releaseStarChanges(rows, context) {
+  for (const accountId of new Set(rows.map(r => r.account_id))) {
+    await releaseFlagChanges(imapManager, accountId, rows.filter(r => r.account_id === accountId), '\\Flagged', context);
+  }
+}
+
+async function pushExtraStars(account, acted, copies, starred, context) {
+  try {
+    const targets = [];
+    for (const mid of new Set(acted.map(r => r.message_id))) {
+      targets.push(...await readCopyTargets(account.id, mid, acted));
+    }
+    const selected = new Set(acted.map(r => r.id)), flipped = new Set(copies.map(r => r.id));
+    const eligible = targets.filter(r => !selected.has(r.id) && flipped.has(r.id) && r.is_starred === starred);
+    const pushed = new Set(eligible.map(r => r.id));
+    await releaseStarChanges(copies.filter(r => !pushed.has(r.id)), context);
+    await pushFlag(imapManager, account, account.id, eligible, '\\Flagged', starred, context);
+  } catch (err) {
+    await releaseStarChanges(copies, context);
+    console.warn('Star-copy push failed:', err.message);
+  }
+}
+
+// Star/unstar
+router.patch('/messages/:id/star', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+  const { starred } = req.body;
+  const context = { action: imapManager._newFlagAction(), intents: new Map() };
+  const cleanup = new Map();
+  try {
+    const result = await query(`
+      SELECT m.*, a.user_id,
+             CASE WHEN m.message_id IS NULL THEN 1
+                  ELSE (SELECT COUNT(*) FROM messages s
+                         WHERE s.account_id = m.account_id AND s.message_id = m.message_id)
+             END AS sibling_count
+      FROM messages m
+      JOIN email_accounts a ON m.account_id = a.id
+      WHERE m.id = $1 AND a.user_id = $2
+    `, [id, req.session.userId]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+    const message = result.rows[0];
+    cleanup.set(id, message);
+    admitFlagChanges(imapManager, message.account_id, [message], '\\Flagged', starred, context);
+    const intent = context.intents.get(`${id}:\\Flagged`);
+    if (!await imapManager._stampFlagIntent({ messageId: id, flag: '\\Flagged', value: starred, intent }, true)) {
+      return res.json({ ok: true, is_starred: starred });
+    }
+    const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    if (!account) throw new Error('Account no longer exists');
+    let copies = [];
+    if (Number(message.sibling_count) > 1 && await accountMaintainsLabelSiblings(message.account_id)) {
+      copies = (await fanOutStarToSiblings(message.account_id, message.message_id, starred, context)).filter(row => row.id !== id);
+      for (const row of copies) cleanup.set(row.id, row);
+      admitFlagChanges(imapManager, account.id, copies, '\\Flagged', starred, context);
+    }
+    try {
+      const confirmed = await imapManager.setFlag(account, message.uid, message.folder, '\\Flagged', starred, { intent });
+      if (confirmed === true && imapManager._isFlagIntentCurrent(intent)) {
+        notifyMailMutation([message], req.session.userId);
+        imapManager.broadcast({ type: 'message_flags', accountId: account.id, changes: [{ id, is_starred: starred }] }, req.session.userId);
+        await imapManager._resolveFlagPush(account.id, id, '\\Flagged', intent);
+        cleanup.delete(id);
+      }
+    } catch (err) {
+      if (imapManager._isFlagIntentCurrent(intent)) {
+        imapManager._enqueueFlagPush(account.id, id, '\\Flagged', starred, intent);
+        cleanup.delete(id);
+        imapManager.broadcast({ type: 'message_flags', accountId: account.id, changes: [{ id, is_starred: starred }] }, req.session.userId);
+      }
+      console.error('IMAP star update failed:', err.message);
+    }
+    if (copies.length && !imapManager.isLabelStore(account)) {
+      for (const row of copies) cleanup.delete(row.id);
+      void pushExtraStars(account, [message], copies, starred, context);
+    }
+    res.json({ ok: true, is_starred: starred });
+  } finally {
+    await releaseStarChanges([...cleanup.values()], context);
+  }
+});
+
+// Manual sync (INBOX)
+router.post('/sync', async (req, res) => {
+  const { accountId } = req.body; // optional — omit for all accounts
+  if (accountId) {
+    if (!UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
+    const check = await query(
+      'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
+      [accountId, req.session.userId]
+    );
+    if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  }
+  // Run sync in background so response returns immediately
+  imapManager.syncNow(req.session.userId, accountId || null)
+    .catch(err => console.error('syncNow error:', err.message));
+  res.json({ ok: true });
+});
+
+// Manual folder-structure resync ("Sync folders now" in the sidebar account menu
+// and on the accounts settings page). Refreshes the folder LIST so folders
+// created or renamed in other clients appear without waiting for a reconnect.
+router.post('/sync-folders', async (req, res) => {
+  const { accountId } = req.body; // optional — omit for all accounts
+  if (accountId) {
+    if (!UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
+    const check = await query(
+      'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
+      [accountId, req.session.userId]
+    );
+    if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  }
+  // Run in background so the response returns immediately; the folders_synced
+  // broadcast tells clients when to refetch the folder list.
+  imapManager.syncFoldersNow(req.session.userId, accountId || null)
+    .catch(err => console.error('syncFoldersNow error:', err.message));
+  res.json({ ok: true });
+});
+
+// On-demand folder sync — called when the user navigates to a folder with no local messages
+router.post('/sync-folder', async (req, res) => {
+  const { accountId, folder } = req.body;
+  if (!accountId || !folder) return res.status(400).json({ error: 'accountId and folder required' });
+  if (!UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
+  if (!isValidFolderName(folder)) return res.status(400).json({ error: 'Invalid folder name' });
+
+  const check = await query(
+    'SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2',
+    [accountId, req.session.userId]
+  );
+  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+
+  // Fire-and-forget — response returns immediately, WebSocket sync_complete notifies frontend
+  imapManager.syncFolderOnDemand(check.rows[0], folder)
+    .catch(err => console.error('syncFolderOnDemand error:', err.message));
+
+  res.json({ ok: true });
+});
+
+// Mark all read (DB + IMAP)
+router.post('/mark-all-read', async (req, res) => {
+  const { accountId, folder = 'INBOX' } = req.body;
+  if (!accountId || !UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
+  if (!isValidFolderName(folder)) return res.status(400).json({ error: 'Invalid folder name' });
+  const action = imapManager._newFlagAction();
+  const check = await query(
+    'SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2',
+    [accountId, req.session.userId]
+  );
+  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  let failure;
+  try { await imapManager.markAllReadImap(check.rows[0], folder, { action }); }
+  catch (err) { failure = err; console.warn('markAllReadImap failed:', err.message); }
+  try {
+    // Fence older, not-yet-admitted requests without restamping stable read rows.
+    await query(`UPDATE messages SET read_intent_version=$3 WHERE account_id=$1 AND folder=$2
+      AND is_deleted=false AND is_read=true AND read_changed_at IS NULL AND read_intent_version<$3::bigint`,
+    [accountId, folder, await action.version]);
+  } catch (err) { failure ||= err; console.warn('Mark-all version fence failed:', err.message); }
+  await query(`UPDATE folders SET unread_count = (SELECT COUNT(*) FILTER (WHERE is_read = false)
+    FROM messages WHERE account_id=$1 AND folder=$2) WHERE account_id=$1 AND path=$2`, [accountId, folder])
+    .catch(err => { failure ||= err; console.warn('Mark-all count update failed:', err.message); });
+  await pluginRegistry.runHook('onMailMutation', {
+    imapManager: imapManager.pluginFacade, accountId, userId: req.session.userId,
+    messageIds: [], actedFolders: [folder], folderWide: true,
+  }).catch(err => console.warn('onMailMutation hook failed:', err.message));
+  imapManager.scheduleCountRefresh?.(accountId);
+  imapManager.broadcast({ type: 'sync_complete', accountId }, check.rows[0].user_id);
+  if (failure) return res.status(502).json({ ok: false, code: 'mark_all_unconfirmed', confirmed: failure.confirmed ?? 0 });
+  res.json({ ok: true });
+});
+
+// Create folder
+router.post('/folders', async (req, res) => {
+  const { accountId, name, parentPath } = req.body;
+  if (!accountId || !name?.trim()) return res.status(400).json({ error: 'accountId and name required' });
+  if (!isValidFolderName(name.trim())) return res.status(400).json({ error: 'Invalid folder name' });
+  if (parentPath && !isValidFolderName(parentPath)) return res.status(400).json({ error: 'Invalid parent path' });
+  const check = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
+  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+
+  // Join parent and leaf with '/' and let ensureFolder translate: it splits on
+  // '/' and imapflow joins the segments with the server's real hierarchy
+  // delimiter and namespace, so a parent stored in native form (INBOX.Foo)
+  // plus a new leaf lands at INBOX.Foo.Bar on a dot-delimited server. The raw
+  // mailboxCreate this replaces ignored both, so a folder created through
+  // MailFlow could be stored under a path the server never had — and creating
+  // a subfolder beneath such a ghost silently vanished on the next
+  // folder-structure sync.
+  const requested = parentPath ? `${parentPath}/${name.trim()}` : name.trim();
+
+  try {
+    const { path } = await imapManager.ensureFolder(check.rows[0], requested, { resolvePath: true });
+    // Store the account's delimiter too — rows inserted without one (NULL)
+    // poison later delimiter lookups for subfolder creation and rename.
+    const delimResult = await query(
+      `SELECT delimiter FROM folders
+       WHERE account_id = $1 AND delimiter IS NOT NULL AND delimiter <> ''
+       LIMIT 1`,
+      [accountId]
+    );
+    await query(
+      `INSERT INTO folders (account_id, path, name, delimiter) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (account_id, path) DO NOTHING`,
+      [accountId, path, name.trim(), delimResult.rows[0]?.delimiter || null]
+    );
+    res.json({ ok: true, path });
+  } catch (err) {
+    console.error('Create folder error:', err);
+    res.status(500).json({ error: 'Failed to create folder' });
+  }
+});
+
+// Delete folder
+router.post('/folders/delete', async (req, res) => {
+  const { accountId, path } = req.body;
+  if (!accountId || !path) return res.status(400).json({ error: 'accountId and path required' });
+  if (!isValidFolderName(path)) return res.status(400).json({ error: 'Invalid folder path' });
+  const check = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
+  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+
+  try {
+    await imapManager.deleteFolder(check.rows[0], path);
+  } catch (err) {
+    console.error(`IMAP deleteFolder failed for ${path}:`, err.message);
+    return res.status(500).json({ error: 'Failed to delete folder on server' });
+  }
+  await query('DELETE FROM folders WHERE account_id = $1 AND path = $2', [accountId, path]);
+  await query('DELETE FROM messages WHERE account_id = $1 AND folder = $2', [accountId, path]);
+  res.json({ ok: true });
+});
+
+// Rename folder
+router.post('/folders/rename', async (req, res) => {
+  const { accountId, oldPath, newName } = req.body;
+  if (!accountId || !oldPath || !newName?.trim()) return res.status(400).json({ error: 'Missing required fields' });
+  if (!isValidFolderName(newName.trim())) return res.status(400).json({ error: 'Invalid folder name' });
+  if (!isValidFolderName(oldPath)) return res.status(400).json({ error: 'Invalid folder path' });
+  const check = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
+  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+
+  // Build the new path by replacing only the last path component
+  const delimResult = await query('SELECT delimiter FROM folders WHERE account_id = $1 AND path = $2', [accountId, oldPath]);
+  const delim = delimResult.rows[0]?.delimiter || '/';
+  const parts = oldPath.split(delim);
+  parts[parts.length - 1] = newName.trim();
+  const newPath = parts.join(delim);
+
+  try {
+    await imapManager.renameFolder(check.rows[0], oldPath, newPath);
+    // IMAP RENAME moves the entire subtree server-side — mirror that in the DB.
+    // Updating only the exact path left every child folder (and its messages)
+    // under the old path: the next folder sync then upserted the renamed tree
+    // from LIST (a visible duplicate), while the per-folder message sync kept
+    // trying to open the stale old child paths forever.
+    const childPrefix = oldPath + delim;
+    // If a sync raced us and already inserted rows at the new paths, drop the
+    // stale old rows instead of colliding with the unique (account_id, path) /
+    // (account_id, uid, folder) constraints.
+    await query(`
+      DELETE FROM folders old
+      WHERE old.account_id = $1
+        AND (old.path = $2 OR substr(old.path, 1, length($3)) = $3)
+        AND EXISTS (
+          SELECT 1 FROM folders n
+          WHERE n.account_id = $1
+            AND n.path = $4 || substr(old.path, length($2) + 1)
+        )`, [accountId, oldPath, childPrefix, newPath]);
+    await query(`
+      UPDATE folders SET path = $4 || substr(path, length($2) + 1), updated_at = NOW()
+      WHERE account_id = $1
+        AND (path = $2 OR substr(path, 1, length($3)) = $3)`,
+      [accountId, oldPath, childPrefix, newPath]);
+    await query(
+      'UPDATE folders SET name = $1, updated_at = NOW() WHERE account_id = $2 AND path = $3',
+      [newName.trim(), accountId, newPath]
+    );
+    await query(`
+      DELETE FROM messages old
+      WHERE old.account_id = $1
+        AND (old.folder = $2 OR substr(old.folder, 1, length($3)) = $3)
+        AND EXISTS (
+          SELECT 1 FROM messages n
+          WHERE n.account_id = $1
+            AND n.folder = $4 || substr(old.folder, length($2) + 1)
+            AND n.uid = old.uid
+        )`, [accountId, oldPath, childPrefix, newPath]);
+    await query(`
+      UPDATE messages SET folder = $4 || substr(folder, length($2) + 1)
+      WHERE account_id = $1
+        AND (folder = $2 OR substr(folder, 1, length($3)) = $3)`,
+      [accountId, oldPath, childPrefix, newPath]);
+    // Snooze records hold both folders by path: the wakeup finds the message by
+    // snoozed_folder and moves it back to original_folder, so a stale path strands it.
+    await query(`
+      UPDATE snoozed_messages SET snoozed_folder = $4 || substr(snoozed_folder, length($2) + 1)
+      WHERE account_id = $1
+        AND (snoozed_folder = $2 OR substr(snoozed_folder, 1, length($3)) = $3)`,
+      [accountId, oldPath, childPrefix, newPath]);
+    await query(`
+      UPDATE snoozed_messages SET original_folder = $4 || substr(original_folder, length($2) + 1)
+      WHERE account_id = $1
+        AND (original_folder = $2 OR substr(original_folder, 1, length($3)) = $3)`,
+      [accountId, oldPath, childPrefix, newPath]);
+    res.json({ ok: true, newPath });
+  } catch (err) {
+    console.error('Rename folder error:', err);
+    res.status(500).json({ error: 'Failed to rename folder' });
+  }
+});
+
+// Guards against two overlapping empties of the same (account, folder) — a double-click or a
+// second device would otherwise start two background deletes over the same folder.
+const emptyInFlight = new Set();
+
+// Empty folder (delete all messages). Emptying a large folder is a slow IMAP operation (chunked
+// delete + expunge over the provider), so it runs in the BACKGROUND: the request returns 202
+// immediately and the outcome is reported over WebSocket (folder_emptied). This keeps the UI from
+// hanging on big folders. On failure the DB rows are left in place so the next sync reconciles.
+router.post('/folders/empty', async (req, res) => {
+  const { accountId, path } = req.body;
+  if (!accountId || !path) return res.status(400).json({ error: 'accountId and path required' });
+  if (!isValidFolderName(path)) return res.status(400).json({ error: 'Invalid folder path' });
+  const check = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
+  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const account = check.rows[0];
+
+  const inflightKey = `${accountId}:${path}`;
+  if (emptyInFlight.has(inflightKey)) return res.status(409).json({ error: 'This folder is already being emptied' });
+  emptyInFlight.add(inflightKey);
+
+  res.status(202).json({ ok: true, started: true });
+
+  (async () => {
+    try {
+      await imapManager.emptyFolder(account, path);
+      await query('DELETE FROM messages WHERE account_id = $1 AND folder = $2', [accountId, path]);
+      await query(
+        'UPDATE folders SET total_count = 0, unread_count = 0 WHERE account_id = $1 AND path = $2',
+        [accountId, path]
+      );
+      imapManager.broadcast({ type: 'folder_emptied', accountId, folder: path, ok: true }, account.user_id);
+      imapManager.broadcast({ type: 'sync_complete', accountId }, account.user_id);
+    } catch (err) {
+      console.error(`Async emptyFolder failed for ${path}:`, err.message);
+      imapManager.broadcast({ type: 'folder_emptied', accountId, folder: path, ok: false }, account.user_id);
+    } finally {
+      emptyInFlight.delete(inflightKey);
+    }
+  })();
+});
+
+// Bulk mark read/unread
+router.post('/messages/bulk-read', async (req, res) => {
+  const { ids, read } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids array required' });
+  }
+  if (ids.length > 500) {
+    return res.status(400).json({ error: 'Too many ids — maximum 500 per request' });
+  }
+  if (!areValidUUIDs(ids)) {
+    return res.status(400).json({ error: 'Invalid message IDs' });
+  }
+  if (typeof read !== 'boolean') {
+    return res.status(400).json({ error: 'read must be a boolean' });
+  }
+
+  const context = { action: imapManager._newFlagAction(), intents: new Map() };
+  let touched = [];
+  try {
+    const result = await query(
+      `SELECT m.id, m.uid, m.folder, m.is_read, m.account_id, m.message_id FROM messages m
+       JOIN email_accounts a ON m.account_id = a.id
+       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
+      [req.session.userId, ids]
+    );
+
+    const owned = result.rows;
+    if (!owned.length) return res.json({ ok: true, updated: [] });
+
+    // Matching cache values still need confirmation when an older retry is pending.
+    let toUpdate = owned.filter(m => !!m.is_read !== !!read || imapManager._pendingFlagPush.get(m.account_id)?.has(`${m.id}:\\Seen`));
+    if (!toUpdate.length) return res.json({ ok: true, updated: [] });
+
+    for (const accountId of new Set(toUpdate.map(m => m.account_id))) {
+      admitFlagChanges(imapManager, accountId, toUpdate.filter(m => m.account_id === accountId), '\\Seen', read, context);
+    }
+    touched = toUpdate;
+    const updated = await query(
+      `UPDATE messages SET is_read = $1, read_changed_at = $3, read_intent_version = $4::bigint
+        WHERE id = ANY($2::uuid[]) AND (read_intent_version < $4::bigint
+          OR (read_intent_version = $4::bigint AND read_changed_at = $3::timestamptz)) RETURNING id`,
+      [read, toUpdate.map(m => m.id), context.action.marker, await context.action.version]
+    );
+    const applied = new Set(updated.rows.map(m => m.id));
+    for (const accountId of new Set(toUpdate.map(m => m.account_id))) {
+      await releaseFlagChanges(imapManager, accountId, toUpdate.filter(m => m.account_id === accountId && !applied.has(m.id)), '\\Seen', context);
+    }
+    toUpdate = toUpdate.filter(m => applied.has(m.id));
+
+    // Adjust cached unread counts per account+folder.
+    const folderDeltas = {};
+    for (const msg of toUpdate) {
+      if (!!msg.is_read === read) continue;
+      const key = `${msg.account_id}:${msg.folder}`;
+      if (!folderDeltas[key]) folderDeltas[key] = { accountId: msg.account_id, folder: msg.folder, delta: 0 };
+      folderDeltas[key].delta += read ? -1 : 1;
+    }
+    for (const { accountId, folder, delta } of Object.values(folderDeltas)) {
+      adjustFolderCounts(accountId, folder, 0, delta);
+    }
+
+    // GTD mirrors changed cache rows under the same request version. Per-copy STOREs
+    // remain detached; Gmail propagates the selected copy's flag message-wide.
+    const acctIds = [...new Set(toUpdate.map(m => m.account_id))];
+    const gtdAccts = new Set();
+    await Promise.all(acctIds.map(async (aid) => {
+      if (await accountMaintainsLabelSiblings(aid)) gtdAccts.add(aid);
+    }));
+    const gtdUpdatedIds = toUpdate.filter(m => gtdAccts.has(m.account_id)).map(m => m.id);
+    const siblings = gtdUpdatedIds.length ? await fanOutBulkReadToSiblings(gtdUpdatedIds, read, context) || [] : [];
+    touched = [...touched, ...siblings];
+    for (const accountId of new Set(siblings.map(r => r.account_id))) {
+      try { admitFlagChanges(imapManager, accountId, siblings.filter(r => r.account_id === accountId), '\\Seen', read, context); }
+      catch (err) { console.warn('Bulk read-copy admission failed:', err.message); }
+    }
+    // Reflect the bulk read/unread change on the user's other sessions in place (no full refetch).
+    imapManager.broadcast({ type: 'message_flags', changes: toUpdate.map(m => ({ id: m.id, is_read: read })) }, req.session.userId);
+
+    // IMAP flag updates — group by account to fetch each account row once.
+    const byAccount = {};
+    for (const msg of toUpdate) {
+      (byAccount[msg.account_id] = byAccount[msg.account_id] || []).push(msg);
+    }
+    for (const [accountId, msgs] of Object.entries(byAccount)) {
+      const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+      const account = accountResult.rows[0];
+      const results = await runInBatches(
+        msgs, 3,
+        msg => imapManager.setFlag(account, msg.uid, msg.folder, '\\Seen', read, { intent: context.intents.get(`${msg.id}:\\Seen`) })
+      );
+      for (const [i, r] of results.entries()) {
+        const intent = context.intents.get(`${msgs[i].id}:\\Seen`);
+        if (r.status === 'rejected') {
+          console.error(`bulk-read IMAP ${msgs[i].id}:`, extractImapError(r.reason));
+          // Durable retry so a later flag-sync pull can't revert this message to unread.
+          imapManager._enqueueFlagPush(accountId, msgs[i].id, '\\Seen', read, intent);
+        } else {
+          await imapManager._resolveFlagPush(accountId, msgs[i].id, '\\Seen', intent);
+        }
+      }
+      if (siblings.length && gtdAccts.has(accountId)) {
+        (async () => {
+          const copies = siblings.filter(r => r.account_id === accountId);
+          try {
+            if (account && !imapManager.isLabelStore(account)) {
+              const targets = [];
+              for (const mid of new Set(msgs.map(m => m.message_id))) targets.push(...await readCopyTargets(accountId, mid, msgs));
+              const acted = new Set(msgs.map(m => m.id)), flipped = new Set(copies.map(r => r.id));
+              await pushSeen(imapManager, account, accountId, targets.filter(r => !acted.has(r.id) && flipped.has(r.id)), read, context);
+            }
+          } finally {
+            await releaseFlagChanges(imapManager, accountId, copies.filter(row => {
+              const token = context.intents.get(`${row.id}:\\Seen`);
+              return !token || imapManager._pendingFlagPush.get(accountId)?.get(token.key)?.intent !== token;
+            }), '\\Seen', context);
+          }
+        })().catch(err => console.warn('Bulk read-copy push failed:', err.message));
+      }
+    }
+
+    // Refresh GTD section data for any updated thread that carries a GTD label.
+    notifyMailMutation(toUpdate, req.session.userId);
+
+    res.json({ ok: true, updated: toUpdate.map(m => m.id) });
+  } catch (err) {
+    for (const accountId of new Set(touched.map(m => m.account_id))) {
+      await releaseFlagChanges(imapManager, accountId, touched.filter(row => {
+        const token = context.intents.get(`${row.id}:\\Seen`);
+        return row.account_id === accountId && (!token || imapManager._pendingFlagPush.get(accountId)?.get(token.key)?.intent !== token);
+      }), '\\Seen', context);
+    }
+    console.error('bulk-read error:', err);
+    res.status(500).json({ error: 'Failed to update messages' });
+  }
+});
+
+// Bulk star/unstar (#434). Shaped like bulk-read: skip rows already at the target state,
+// optimistic DB write with the 30s local-wins stamp, then per-account IMAP \Flagged writes
+// with the durable retry queue. Stars never touch unread counts.
+router.post('/messages/bulk-star', async (req, res) => {
+  const { ids, starred } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'ids array required' });
+  if (ids.length > 500) return res.status(400).json({ error: 'Too many ids — maximum 500 per request' });
+  if (!areValidUUIDs(ids)) return res.status(400).json({ error: 'Invalid message IDs' });
+  if (typeof starred !== 'boolean') return res.status(400).json({ error: 'starred must be a boolean' });
+  const context = { action: imapManager._newFlagAction(), intents: new Map() };
+  const cleanup = new Map();
+  try {
+    const result = await query(
+      `SELECT m.id, m.uid, m.folder, m.is_starred, m.account_id, m.message_id FROM messages m
+       JOIN email_accounts a ON m.account_id = a.id
+       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`, [req.session.userId, ids]);
+    const selected = result.rows;
+    const needsWire = new Set(selected.filter(row => {
+      const prior = imapManager._flagIntents?.get(row.account_id)?.get(`${row.id}:\\Flagged`);
+      return !!row.is_starred !== starred || (prior && imapManager._isFlagIntentCurrent(prior) && prior.value !== starred);
+    }).map(row => row.id));
+    if (!selected.length) return res.json({ ok: true, updated: [] });
+    for (const row of selected) cleanup.set(row.id, row);
+    for (const accountId of new Set(selected.map(r => r.account_id))) {
+      admitFlagChanges(imapManager, accountId, selected.filter(r => r.account_id === accountId), '\\Flagged', starred, context);
+    }
+    const stamps = await Promise.all(selected.map(row => imapManager._stampFlagIntent({
+      messageId: row.id, flag: '\\Flagged', value: starred, intent: context.intents.get(`${row.id}:\\Flagged`),
+    }, true)));
+    const toUpdate = selected.filter((row, i) => stamps[i] && needsWire.has(row.id));
+    const byAccount = {};
+    for (const msg of toUpdate) (byAccount[msg.account_id] ||= []).push(msg);
+    for (const [accountId, msgs] of Object.entries(byAccount)) {
+      const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+      if (!account) throw new Error('Account no longer exists');
+      const siblings = [];
+      if (await accountMaintainsLabelSiblings(accountId)) {
+        for (const mid of new Set(msgs.map(m => m.message_id))) {
+          siblings.push(...(await fanOutStarToSiblings(accountId, mid, starred, context)).filter(row => !msgs.some(msg => msg.id === row.id)));
+        }
+        for (const row of siblings) cleanup.set(row.id, row);
+        admitFlagChanges(imapManager, accountId, siblings, '\\Flagged', starred, context);
+      }
+      const results = await runInBatches(msgs, 3, msg => imapManager.setFlag(account, msg.uid, msg.folder,
+        '\\Flagged', starred, { intent: context.intents.get(`${msg.id}:\\Flagged`) }));
+      await Promise.all(results.map(async (result, i) => {
+        const msg = msgs[i], intent = context.intents.get(`${msg.id}:\\Flagged`);
+        if (!imapManager._isFlagIntentCurrent(intent)) return;
+        if (result.status === 'fulfilled' && result.value !== true) return;
+        imapManager.broadcast({ type: 'message_flags', accountId, changes: [{ id: msg.id, is_starred: starred }] }, req.session.userId);
+        if (result.status === 'rejected') {
+          console.error(`bulk-star IMAP ${msg.id}:`, extractImapError(result.reason));
+          imapManager._enqueueFlagPush(accountId, msg.id, '\\Flagged', starred, intent);
+        } else {
+          await imapManager._resolveFlagPush(accountId, msg.id, '\\Flagged', intent);
+        }
+        cleanup.delete(msg.id);
+      }));
+      if (siblings.length && !imapManager.isLabelStore(account)) {
+        for (const row of siblings) cleanup.delete(row.id);
+        void pushExtraStars(account, msgs, siblings, starred, context);
+      }
+    }
+    notifyMailMutation(toUpdate, req.session.userId);
+    res.json({ ok: true, updated: toUpdate.map(m => m.id) });
+  } catch (err) {
+    console.error('bulk-star error:', err);
+    res.status(500).json({ error: 'Failed to update messages' });
+  } finally {
+    await releaseStarChanges([...cleanup.values()], context);
+  }
+});
+
+// Bulk delete (move to trash)
+router.post('/messages/bulk-delete', async (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids array required' });
+  }
+  if (ids.length > 500) {
+    return res.status(400).json({ error: 'Too many ids — maximum 500 per request' });
+  }
+  if (!areValidUUIDs(ids)) {
+    return res.status(400).json({ error: 'Invalid message id format' });
+  }
+
+  const moveGuards = [];
+  try {
+    const result = await query(
+      `SELECT m.*, a.user_id, a.folder_mappings FROM messages m
+       JOIN email_accounts a ON m.account_id = a.id
+       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
+      [req.session.userId, ids]
+    );
+
+    const owned = result.rows;
+    if (!owned.length) return res.json({ ok: true, deleted: [] });
+
+    // Guard source UIDs for the whole operation so reconcileDeletes can't delete a
+    // trash-move source row between the IMAP move and the re-INSERT CTE (message vanishing
+    // from both folders). Harmless for the expunge path (those rows are deleted anyway).
+    // Released in the finally below.
+    for (const m of owned) {
+      moveGuards.push({ accountId: m.account_id, folder: m.folder, uid: m.uid });
+      imapManager._guardMoveUid(m.account_id, m.folder, m.uid);
+    }
+
+    const byAccount = {};
+    for (const msg of owned) {
+      (byAccount[msg.account_id] = byAccount[msg.account_id] || []).push(msg);
+    }
+
+    // expungeSucceeded: permanently deleted (already in Trash, or no Trash folder on account).
+    // trashMoveSucceeded: moved from a non-Trash folder into Trash.
+    const expungeSucceeded = [];
+    const expungeUnverified = [];
+    const trashMoveSucceeded = []; // { msg, trashPath, newUid }
+    const accountsById = {};
+
+    for (const [accountId, msgs] of Object.entries(byAccount)) {
+      const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+      const account = accountResult.rows[0];
+      accountsById[accountId] = account;
+      const trashPath = await resolveTrashFolder(accountId, msgs[0].folder_mappings);
+      const allTrashPaths = await resolveAllTrashPaths(accountId, msgs[0].folder_mappings);
+      const allDraftsPaths = await resolveAllDraftsPaths(accountId, msgs[0].folder_mappings);
+
+      if (!trashPath) {
+        console.error(`bulk-delete: no Trash folder found for account ${accountId} — skipping ${msgs.length} messages`);
+        continue;
+      }
+
+      // Drafts and messages already in Trash are permanently deleted; others move to Trash.
+      const toExpunge = msgs.filter(m => allTrashPaths.has(m.folder) || allDraftsPaths.has(m.folder));
+      const toMove    = msgs.filter(m => !allTrashPaths.has(m.folder) && !allDraftsPaths.has(m.folder));
+
+      // Permanently delete messages already in a trash-like folder (grouped by actual folder).
+      if (toExpunge.length) {
+        const byExpungeFolder = {};
+        for (const msg of toExpunge) {
+          (byExpungeFolder[msg.folder] = byExpungeFolder[msg.folder] || []).push(msg);
+        }
+        for (const [expungeFolder, folderMsgs] of Object.entries(byExpungeFolder)) {
+          const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
+          const { succeeded, failed, unverified = [] } = await imapManager.bulkPermanentDelete(account, folderMsgs.map(m => m.uid), expungeFolder,
+            { expectMessageIds: new Map(folderMsgs.map(m => [Number(m.uid), m.message_id ?? null])) });
+          for (const uid of succeeded) expungeSucceeded.push(uidToMsg.get(String(uid)));
+          for (const uid of unverified) expungeUnverified.push(uidToMsg.get(String(uid)).id);
+          const refused = new Set(unverified.map(String));
+          for (const uid of failed) {
+            if (!refused.has(String(uid))) console.error(`bulk-delete IMAP expunge uid ${uid} from ${expungeFolder}: IMAP delete failed`);
+          }
+        }
+      }
+
+      // Move messages from non-Trash folders into Trash.
+      if (toMove.length) {
+        const byFolder = {};
+        for (const msg of toMove) {
+          (byFolder[msg.folder] = byFolder[msg.folder] || []).push(msg);
+        }
+        for (const [srcFolder, folderMsgs] of Object.entries(byFolder)) {
+          const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
+          const { uidMap, succeeded, failed } = await imapManager.bulkMoveMessages(account, folderMsgs.map(m => m.uid), srcFolder, trashPath);
+          for (const uid of succeeded) {
+            trashMoveSucceeded.push({ msg: uidToMsg.get(String(uid)), trashPath, newUid: uidMap.get(Number(uid)) || null });
+          }
+          for (const uid of failed) console.error(`bulk-delete IMAP move uid ${uid}: IMAP move failed`);
+        }
+      }
+    }
+
+    // Permanently deleted: remove DB rows immediately.
+    if (expungeSucceeded.length) {
+      await query('DELETE FROM messages WHERE id = ANY($1::uuid[])', [expungeSucceeded.map(m => m.id)]);
+    }
+
+    // Trash moves: same CTE approach as bulk-move — DELETE source rows and
+    // immediately re-INSERT at the destination when new UIDs are known.
+    // Group by trashPath since different accounts may have different Trash folders.
+    if (trashMoveSucceeded.length) {
+      const byTrashPath = {};
+      for (const u of trashMoveSucceeded) {
+        (byTrashPath[u.trashPath] = byTrashPath[u.trashPath] || []).push(u);
+      }
+      for (const [trashPath, entries] of Object.entries(byTrashPath)) {
+        const allIds    = entries.map(u => u.msg.id);
+        const withUid   = entries.filter(u => u.newUid);
+        await query(`
+          WITH deleted AS (
+            DELETE FROM messages WHERE id = ANY($1::uuid[]) RETURNING *
+          ),
+          uid_map(src_id, new_uid) AS (
+            SELECT * FROM unnest($2::uuid[], $3::bigint[])
+          )
+          INSERT INTO messages (${RELOCATE_INSERT_COLS})
+          SELECT ${RELOCATE_SELECT_COLS}
+          FROM deleted d
+          JOIN uid_map u ON d.id = u.src_id
+          ON CONFLICT (account_id, uid, folder) DO NOTHING
+        `, [allIds, withUid.map(u => u.msg.id), withUid.map(u => u.newUid), trashPath]);
+      }
+      // Non-UIDPLUS trash moves were deleted with no reinsert; pull each affected
+      // (account, trash folder) now so they reappear promptly instead of via IDLE.
+      const needResync = new Map(); // accountId -> Set<trashPath>
+      for (const u of trashMoveSucceeded) {
+        if (u.newUid) continue;
+        if (!needResync.has(u.msg.account_id)) needResync.set(u.msg.account_id, new Set());
+        needResync.get(u.msg.account_id).add(u.trashPath);
+      }
+      for (const [acctId, paths] of needResync) {
+        const acct = accountsById[acctId];
+        if (!acct) continue;
+        for (const tp of paths) {
+          imapManager.syncFolderOnDemand(acct, tp)
+            .catch(err => console.warn('post-trash destination sync failed:', err.message));
+        }
+      }
+    }
+
+    // Adjust cached folder counts.
+    // Source folders always lose the message; Trash gains only for non-Trash moves.
+    const allSucceeded = [
+      ...expungeSucceeded.map(m => m.id),
+      ...trashMoveSucceeded.map(u => u.msg.id),
+    ];
+    if (allSucceeded.length) {
+      const srcDeltas = {};
+      for (const msg of expungeSucceeded) {
+        const key = `${msg.account_id}:${msg.folder}`;
+        if (!srcDeltas[key]) srcDeltas[key] = { accountId: msg.account_id, path: msg.folder, total: 0, unread: 0 };
+        srcDeltas[key].total++;
+        if (!msg.is_read) srcDeltas[key].unread++;
+      }
+      for (const { msg } of trashMoveSucceeded) {
+        const key = `${msg.account_id}:${msg.folder}`;
+        if (!srcDeltas[key]) srcDeltas[key] = { accountId: msg.account_id, path: msg.folder, total: 0, unread: 0 };
+        srcDeltas[key].total++;
+        if (!msg.is_read) srcDeltas[key].unread++;
+      }
+      for (const { accountId, path, total, unread } of Object.values(srcDeltas)) {
+        adjustFolderCounts(accountId, path, -total, -unread);
+      }
+      const dstDeltas = {};
+      for (const { msg, trashPath } of trashMoveSucceeded) {
+        const key = `${msg.account_id}:${trashPath}`;
+        if (!dstDeltas[key]) dstDeltas[key] = { accountId: msg.account_id, path: trashPath, total: 0, unread: 0 };
+        dstDeltas[key].total++;
+        if (!msg.is_read) dstDeltas[key].unread++;
+      }
+      for (const { accountId, path, total, unread } of Object.values(dstDeltas)) {
+        adjustFolderCounts(accountId, path, total, unread);
+      }
+      // Notify clients viewing each Trash folder to refresh silently.
+      for (const { accountId, path } of Object.values(dstDeltas)) {
+        imapManager.broadcast({ type: 'folder_updated', folder: path, accountId }, req.session.userId);
+      }
+    }
+
+    // Refresh GTD section data for any deleted thread that still carries a GTD label sibling.
+    notifyMailMutation(owned, req.session.userId);
+
+    res.json({ ok: true, deleted: allSucceeded, ...(expungeUnverified.length ? { unverified: expungeUnverified } : {}) });
+  } catch (err) {
+    console.error('bulk-delete error:', err);
+    res.status(500).json({ error: 'Failed to delete messages' });
+  } finally {
+    for (const g of moveGuards) imapManager._unguardMoveUid(g.accountId, g.folder, g.uid);
+  }
+});
+
+// ── Mailbox cleanup (bloat analysis + per-sender preview) ──────────────────────
+// Both routes are READ-ONLY and strictly scoped to the caller's own account. Nothing here
+// deletes: the actual cleanup is performed by the client feeding the returned ids to the
+// existing /messages/bulk-delete (move-to-Trash) endpoint in <=500 batches.
+
+// Analyze an INBOX for "bloat": how much is bulk mail, the top bulk senders (Tier 1 cleanup
+// targets, exact from_email addresses), and promo-keyword buckets (Tier 2 guidance).
+router.get('/mailbox-usage', async (req, res) => {
+  const { accountId } = req.query;
+  if (!accountId || !UUID_RE.test(accountId)) return res.status(400).json({ error: 'valid accountId required' });
+  const acct = await query('SELECT id, folder_mappings FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
+  if (!acct.rows.length) return res.status(404).json({ error: 'Account not found' });
+  // Whether Archive is a usable cleanup action for this account (#403): the client
+  // offers Archive vs Trash and needs to know if an archive folder can be resolved.
+  const archiveFolder = await resolveArchiveFolder(accountId, acct.rows[0].folder_mappings);
+
+  const summary = await query(
+    `SELECT count(*)::int AS inbox_total, count(*) FILTER (WHERE is_bulk)::int AS bulk_total
+     FROM messages WHERE account_id = $1 AND folder = 'INBOX'`,
+    [accountId]
+  );
+  // Group senders case-insensitively so a sender that uses mixed-case addresses
+  // (Promo@x vs promo@x) is one row whose count matches the delete — cleanup-preview
+  // matches lower(from_email), so a case-sensitive count here would understate what
+  // clicking the row actually trashes. min(from_email) is a real observed casing for
+  // display; the delete lower-matches it and so still captures every case variant.
+  const senders = await query(
+    `SELECT min(from_email) AS from_email, max(from_name) AS from_name, count(*)::int AS count
+     FROM messages
+     WHERE account_id = $1 AND folder = 'INBOX' AND is_bulk
+       AND from_email IS NOT NULL AND from_email <> ''
+     GROUP BY lower(from_email) ORDER BY count DESC, lower(min(from_email)) LIMIT 25`,
+    [accountId]
+  );
+
+  // Tier 2 promo keyword buckets (fixed set), counted over INBOX in one pass. Informational only.
+  const KEYWORDS = ['% off', 'deal', 'sale', 'newsletter', 'coupon', 'webinar', 'last chance'];
+  const filters = KEYWORDS
+    .map((_, i) => `count(*) FILTER (WHERE subject ILIKE $${i + 2} OR coalesce(snippet,'') ILIKE $${i + 2})::int AS k${i}`)
+    .join(', ');
+  const kw = await query(
+    `SELECT ${filters} FROM messages WHERE account_id = $1 AND folder = 'INBOX'`,
+    [accountId, ...KEYWORDS.map(k => `%${k}%`)]
+  );
+
+  res.json({
+    accountId,
+    inboxTotal: summary.rows[0].inbox_total,
+    bulkTotal: summary.rows[0].bulk_total,
+    archiveAvailable: Boolean(archiveFolder),
+    tier1Senders: senders.rows.map(r => ({ fromEmail: r.from_email, fromName: r.from_name || '', count: r.count })),
+    tier2Keywords: KEYWORDS.map((k, i) => ({ keyword: k, count: kw.rows[0][`k${i}`] })),
+  });
+});
+
+// Return the INBOX message ids for ONE specific sender, so the client can move exactly those to
+// Trash via /messages/bulk-delete. Read-only; strictly scoped to the caller's account, INBOX, and
+// an EXACT (case-insensitive) from_email match — never a wildcard, never another folder. Scoped to
+// is_bulk so it trashes exactly the bulk messages the sender list counted (mailbox-usage counts
+// bulk-only): a non-bulk message from that sender (a receipt, a personal note) is never surprise-
+// trashed. Idempotent: once those messages are trashed, a re-run returns an empty set.
+router.get('/cleanup-preview', async (req, res) => {
+  const { accountId, fromEmail } = req.query;
+  if (!accountId || !UUID_RE.test(accountId)) return res.status(400).json({ error: 'valid accountId required' });
+  if (!fromEmail || typeof fromEmail !== 'string' || !fromEmail.trim()) return res.status(400).json({ error: 'fromEmail required' });
+  const acct = await query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
+  if (!acct.rows.length) return res.status(404).json({ error: 'Account not found' });
+
+  const rows = await query(
+    `SELECT id FROM messages
+     WHERE account_id = $1 AND folder = 'INBOX' AND is_bulk AND lower(from_email) = lower($2)`,
+    [accountId, fromEmail.trim()]
+  );
+  res.json({ accountId, fromEmail: fromEmail.trim(), count: rows.rows.length, ids: rows.rows.map(r => r.id) });
+});
+
+// Bulk move to folder
+router.post('/messages/bulk-move', async (req, res) => {
+  const { ids, folder } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0 || !folder) {
+    return res.status(400).json({ error: 'ids array and folder required' });
+  }
+  if (ids.length > 500) {
+    return res.status(400).json({ error: 'Too many ids — maximum 500 per request' });
+  }
+  if (!isValidFolderName(folder)) {
+    return res.status(400).json({ error: 'Invalid destination folder' });
+  }
+  if (!areValidUUIDs(ids)) {
+    return res.status(400).json({ error: 'Invalid message id format' });
+  }
+
+  const moveGuards = [];
+  try {
+    const result = await query(
+      `SELECT m.*, a.user_id FROM messages m
+       JOIN email_accounts a ON m.account_id = a.id
+       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
+      [req.session.userId, ids]
+    );
+
+    const owned = result.rows;
+    if (!owned.length) return res.json({ ok: true, moved: [] });
+
+    // Guard every source (account, folder, uid) for the whole bulk move. bulkMoveMessages
+    // removes the UIDs from the server (seconds of wall-clock), and a concurrent
+    // reconcileDeletes tick would otherwise see the source rows as orphans and delete them
+    // before the DELETE...RETURNING CTE re-inserts them at the destination — dropping the
+    // message from BOTH folders. Unguarded in the finally once the CTE has committed.
+    // Mirrors the single-message move paths.
+    for (const m of owned) {
+      moveGuards.push({ accountId: m.account_id, folder: m.folder, uid: m.uid });
+      imapManager._guardMoveUid(m.account_id, m.folder, m.uid);
+    }
+
+    const byAccount = {};
+    for (const msg of owned) {
+      (byAccount[msg.account_id] = byAccount[msg.account_id] || []).push(msg);
+    }
+
+    const movedIds = [];
+    const uidUpdates = [];
+    const resyncAccounts = []; // accounts whose moved msgs lacked new UIDs (non-UIDPLUS)
+    for (const [accountId, msgs] of Object.entries(byAccount)) {
+      // Verify the destination folder exists for this account
+      const folderCheck = await query(
+        'SELECT 1 FROM folders WHERE account_id = $1 AND path = $2',
+        [accountId, folder]
+      );
+      if (!folderCheck.rows.length) {
+        console.warn(`bulk-move: folder "${folder}" not found for account ${accountId}, skipping`);
+        continue;
+      }
+      const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+      const account = accountResult.rows[0];
+      const byFolder = {};
+      for (const msg of msgs) {
+        (byFolder[msg.folder] = byFolder[msg.folder] || []).push(msg);
+      }
+      let accountMissingUid = false;
+      for (const [srcFolder, folderMsgs] of Object.entries(byFolder)) {
+        const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
+        const { uidMap, succeeded, failed } = await imapManager.bulkMoveMessages(account, folderMsgs.map(m => m.uid), srcFolder, folder);
+        for (const uid of succeeded) {
+          const msg = uidToMsg.get(String(uid));
+          movedIds.push(msg.id);
+          const newUid = uidMap.get(Number(uid)) || null;
+          if (newUid) uidUpdates.push({ id: msg.id, newUid });
+          else accountMissingUid = true;
+        }
+        for (const uid of failed) console.error(`bulk-move IMAP uid ${uid}: IMAP move failed`);
+      }
+      if (accountMissingUid) resyncAccounts.push(account);
+    }
+
+    if (movedIds.length > 0) {
+      // DELETE source rows and, when we have UIDPLUS-provided new UIDs, immediately
+      // re-INSERT at the destination in one atomic CTE statement. This avoids any
+      // transient folder/uid state that could collide with existing rows (UIDs are
+      // per-folder, so the same UID number is valid in two different folders).
+      // If IMAP IDLE already inserted the destination row, ON CONFLICT DO NOTHING
+      // keeps it intact. For messages without new UIDs the DELETE-only path relies
+      // on IMAP IDLE + the message_id pre-check in processMsg to re-insert them.
+      const uidUpdateMap = new Map(uidUpdates.map(u => [u.id, u.newUid]));
+      const withNewUid   = movedIds.filter(id =>  uidUpdateMap.has(id));
+      await query(`
+        WITH deleted AS (
+          DELETE FROM messages WHERE id = ANY($1::uuid[]) RETURNING *
+        ),
+        uid_map(src_id, new_uid) AS (
+          SELECT * FROM unnest($2::uuid[], $3::bigint[])
+        )
+        INSERT INTO messages (${RELOCATE_INSERT_COLS})
+        SELECT ${RELOCATE_SELECT_COLS}
+        FROM deleted d
+        JOIN uid_map u ON d.id = u.src_id
+        ON CONFLICT (account_id, uid, folder) DO NOTHING
+      `, [movedIds, withNewUid, withNewUid.map(id => uidUpdateMap.get(id)), folder]);
+      // Messages moved on a non-UIDPLUS server were deleted with no reinsert; pull the
+      // destination folder now so they reappear promptly instead of waiting for IDLE.
+      for (const acct of resyncAccounts) {
+        imapManager.syncFolderOnDemand(acct, folder)
+          .catch(err => console.warn('post-move destination sync failed:', err.message));
+      }
+      // Adjust cached counts: decrement source folders, increment the destination.
+      const movedSet = new Set(movedIds);
+      const srcTotals = {};
+      for (const msg of owned) {
+        if (!movedSet.has(msg.id)) continue;
+        const key = `${msg.account_id}:${msg.folder}`;
+        if (!srcTotals[key]) srcTotals[key] = { accountId: msg.account_id, path: msg.folder, total: 0, unread: 0 };
+        srcTotals[key].total++;
+        if (!msg.is_read) srcTotals[key].unread++;
+      }
+      for (const { accountId, path, total, unread } of Object.values(srcTotals)) {
+        adjustFolderCounts(accountId, path, -total, -unread);
+        adjustFolderCounts(accountId, folder, total, unread);
+      }
+
+      // Notify clients that the destination folder has new content so they
+      // refresh without sounds or alerts (unlike new_messages).
+      for (const accountId of Object.keys(srcTotals).map(k => k.split(':')[0])) {
+        imapManager.broadcast({ type: 'folder_updated', folder, accountId }, req.session.userId);
+      }
+    }
+
+    // Refresh GTD section data for any moved thread that still carries a GTD label sibling.
+    notifyMailMutation(owned, req.session.userId);
+
+    res.json({ ok: true, moved: movedIds });
+  } catch (err) {
+    console.error('bulk-move error:', err);
+    res.status(500).json({ error: 'Failed to move messages' });
+  } finally {
+    for (const g of moveGuards) imapManager._unguardMoveUid(g.accountId, g.folder, g.uid);
+  }
+});
+
+// Copy into a selectable account-owned folder.
+router.post('/messages/:id/copy', async (req, res) => {
+  const { id } = req.params;
+  const { folder } = req.body || {};
+  if (!areValidUUIDs([id]) || !isValidFolderName(folder)) {
+    return res.status(400).json({ error: 'Invalid message or folder' });
+  }
+  const source = await query(`
+    SELECT m.id, m.account_id, m.uid, m.folder, a.folder_mappings
+    FROM messages m JOIN email_accounts a ON a.id = m.account_id
+    WHERE m.id = $1 AND a.user_id = $2 AND a.enabled = true AND m.is_deleted = false
+  `, [id, req.session.userId]);
+  const message = source.rows[0];
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  const destination = await query(`
+    SELECT path, name, special_use FROM folders
+    WHERE account_id = $1 AND path = $2 AND no_select = false
+  `, [message.account_id, folder]);
+  const target = destination.rows[0];
+  if (!target || message.folder === folder) return res.status(400).json({ error: 'Folder is not a copy target' });
+  const special = String(target.special_use || '').replaceAll('\\', '').toLowerCase();
+  const system = new Set(['inbox', 'sent', 'drafts', 'trash', 'junk', 'spam', 'archive', 'all', 'flagged']);
+  const names = new Set(['inbox', 'sent', 'drafts', 'trash', 'spam', 'junk', 'archive', 'all mail', 'starred', 'important']);
+  const mapped = Object.values(message.folder_mappings || {}).includes(folder);
+  if (system.has(special) || names.has(String(target.name || '').toLowerCase()) || mapped) {
+    return res.status(400).json({ error: 'System folder is not a label target' });
+  }
+  try {
+    const uid = await imapManager.copyMessage(message.account_id, message.uid, message.folder, folder);
+    imapManager.broadcast?.({ type: 'folder_updated', folder, accountId: message.account_id }, req.session.userId);
+    res.json({ ok: true, uid });
+  } catch (error) {
+    console.error('Message copy failed:', error.message);
+    res.status(502).json({ error: 'Could not copy message' });
+  }
+});
+
+// Bulk archive — moves messages to the archive folder for each account
+router.post('/messages/bulk-archive', async (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids array required' });
+  }
+  if (ids.length > 500) {
+    return res.status(400).json({ error: 'Too many ids — maximum 500 per request' });
+  }
+  if (!areValidUUIDs(ids)) {
+    return res.status(400).json({ error: 'Invalid message IDs' });
+  }
+
+  const moveGuards = [];
+  try {
+    const result = await query(
+      `SELECT m.*, a.user_id, a.folder_mappings FROM messages m
+       JOIN email_accounts a ON m.account_id = a.id
+       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
+      [req.session.userId, ids]
+    );
+
+    const owned = result.rows;
+    if (!owned.length) return res.json({ ok: true, archived: [], noArchiveFolder: [] });
+
+    // Guard source UIDs for the whole operation so reconcileDeletes can't delete a source
+    // row between the IMAP move and the re-INSERT CTE (message vanishing from both folders).
+    // Released in the finally below.
+    for (const m of owned) {
+      moveGuards.push({ accountId: m.account_id, folder: m.folder, uid: m.uid });
+      imapManager._guardMoveUid(m.account_id, m.folder, m.uid);
+    }
+
+    const byAccount = {};
+    for (const msg of owned) {
+      (byAccount[msg.account_id] = byAccount[msg.account_id] || []).push(msg);
+    }
+
+    const archivedIds = [];
+    const noArchiveFolder = [];
+    const accountsById = {};
+    // Archive-folder paths that resolved to Gmail's All Mail (special_use '\All').
+    // All Mail is excluded from sync/backfill and the relocate guard (imapManager.js),
+    // so messages archived there get their DB row deleted below instead of re-homed.
+    const allMailDestFolders = new Set();
+
+    for (const [accountId, msgs] of Object.entries(byAccount)) {
+      const archiveFolder = await resolveArchiveFolder(accountId, msgs[0].folder_mappings);
+      if (!archiveFolder) {
+        noArchiveFolder.push(accountId);
+        continue;
+      }
+      if (await isAllMailFolder(accountId, archiveFolder)) {
+        allMailDestFolders.add(archiveFolder);
+      }
+
+      const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+      const account = accountResult.rows[0];
+      accountsById[accountId] = account;
+      const byFolder = {};
+      for (const msg of msgs) {
+        (byFolder[msg.folder] = byFolder[msg.folder] || []).push(msg);
+      }
+      for (const [srcFolder, folderMsgs] of Object.entries(byFolder)) {
+        const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
+        const { uidMap, succeeded, failed } = await imapManager.bulkMoveMessages(account, folderMsgs.map(m => m.uid), srcFolder, archiveFolder);
+        for (const uid of succeeded) {
+          const msg = uidToMsg.get(String(uid));
+          archivedIds.push({ id: msg.id, accountId, folder: archiveFolder, newUid: uidMap.get(Number(uid)) || null });
+        }
+        for (const uid of failed) console.error(`bulk-archive IMAP uid ${uid}: IMAP move failed`);
+      }
+    }
+
+    // Update DB: same CTE DELETE+INSERT pattern as bulk-move — except when the
+    // destination is Gmail's All Mail, where the message just vanishes from our view
+    // (see allMailDestFolders above), so a plain DELETE with no reinsert is correct.
+    const byFolder = {};
+    for (const { id, folder, newUid } of archivedIds) {
+      (byFolder[folder] = byFolder[folder] || []).push({ id, newUid });
+    }
+    for (const [archiveFolder, entries] of Object.entries(byFolder)) {
+      const allIds  = entries.map(e => e.id);
+      if (allMailDestFolders.has(archiveFolder)) {
+        await query('DELETE FROM messages WHERE id = ANY($1::uuid[])', [allIds]);
+        continue;
+      }
+      const withUid = entries.filter(e => e.newUid != null);
+      await query(`
+        WITH deleted AS (
+          DELETE FROM messages WHERE id = ANY($1::uuid[]) RETURNING *
+        ),
+        uid_map(src_id, new_uid) AS (
+          SELECT * FROM unnest($2::uuid[], $3::bigint[])
+        )
+        INSERT INTO messages (${RELOCATE_INSERT_COLS})
+        SELECT ${RELOCATE_SELECT_COLS}
+        FROM deleted d
+        JOIN uid_map u ON d.id = u.src_id
+        ON CONFLICT (account_id, uid, folder) DO NOTHING
+      `, [allIds, withUid.map(e => e.id), withUid.map(e => e.newUid), archiveFolder]);
+    }
+
+    // Non-UIDPLUS archive moves were deleted with no reinsert; pull each affected
+    // (account, archive folder) now so they reappear promptly instead of via IDLE.
+    const needResync = new Map(); // accountId -> Set<archiveFolder>
+    for (const e of archivedIds) {
+      if (e.newUid) continue;
+      if (allMailDestFolders.has(e.folder)) continue; // no DB row there to keep fresh
+      if (!needResync.has(e.accountId)) needResync.set(e.accountId, new Set());
+      needResync.get(e.accountId).add(e.folder);
+    }
+    for (const [acctId, paths] of needResync) {
+      const acct = accountsById[acctId];
+      if (!acct) continue;
+      for (const fp of paths) {
+        imapManager.syncFolderOnDemand(acct, fp)
+          .catch(err => console.warn('post-archive destination sync failed:', err.message));
+      }
+    }
+
+    // Adjust cached folder counts: use signed deltas so source and dest share one pass.
+    if (archivedIds.length > 0) {
+      const idToArchiveDest = new Map(archivedIds.map(({ id, folder: dest }) => [id, dest]));
+      const folderDeltas = {}; // key: `${accountId}:${path}` -> { accountId, path, totalDelta, unreadDelta }
+      for (const msg of owned) {
+        const dest = idToArchiveDest.get(msg.id);
+        if (!dest) continue;
+        const wasUnread = !msg.is_read ? 1 : 0;
+        const srcKey = `${msg.account_id}:${msg.folder}`;
+        if (!folderDeltas[srcKey]) folderDeltas[srcKey] = { accountId: msg.account_id, path: msg.folder, totalDelta: 0, unreadDelta: 0 };
+        folderDeltas[srcKey].totalDelta--;
+        folderDeltas[srcKey].unreadDelta -= wasUnread;
+        if (allMailDestFolders.has(dest)) continue; // All Mail counts aren't tracked
+        const dstKey = `${msg.account_id}:${dest}`;
+        if (!folderDeltas[dstKey]) folderDeltas[dstKey] = { accountId: msg.account_id, path: dest, totalDelta: 0, unreadDelta: 0 };
+        folderDeltas[dstKey].totalDelta++;
+        folderDeltas[dstKey].unreadDelta += wasUnread;
+      }
+      for (const { accountId, path, totalDelta, unreadDelta } of Object.values(folderDeltas)) {
+        adjustFolderCounts(accountId, path, totalDelta, unreadDelta);
+      }
+      // Notify clients viewing each destination folder to refresh silently.
+      const destFolders = [...new Set(archivedIds.map(a => a.folder))].filter(f => !allMailDestFolders.has(f));
+      for (const dest of destFolders) {
+        const accountIds = [...new Set(archivedIds.filter(a => a.folder === dest).map(a => {
+          const msg = owned.find(m => m.id === a.id);
+          return msg?.account_id;
+        }).filter(Boolean))];
+        for (const accountId of accountIds) {
+          imapManager.broadcast({ type: 'folder_updated', folder: dest, accountId }, req.session.userId);
+        }
+      }
+    }
+
+    // Refresh GTD section data for any archived thread that still carries a GTD label sibling.
+    notifyMailMutation(owned, req.session.userId);
+
+    res.json({ ok: true, archived: archivedIds.map(a => a.id), noArchiveFolder });
+  } catch (err) {
+    console.error('bulk-archive error:', err);
+    res.status(500).json({ error: 'Failed to archive messages' });
+  } finally {
+    for (const g of moveGuards) imapManager._unguardMoveUid(g.accountId, g.folder, g.uid);
+  }
+});
+
+// A snooze record counts only while its message still sits in the folder it was snoozed into.
+// Moving a snoozed message out by hand leaves the record behind until the wake-up sweep removes
+// it, a few minutes after its wake time (imapManager's sweep uses this same test), and until
+// then the message could not be snoozed again (#269). Expects the record aliased as sm.
+export const LIVE_SNOOZE_SQL = `EXISTS (
+  SELECT 1 FROM messages m
+  WHERE m.account_id = sm.account_id AND m.message_id = sm.message_id_header
+    AND m.folder = sm.snoozed_folder AND m.is_deleted = false)`;
+
+// Gather the reply-chain conversation that should be snoozed alongside `msg`.
+//
+// Snoozing a single message doesn't work on Gmail: Gmail groups the inbox by
+// conversation, so moving one message to Snoozed only strips \Inbox from that
+// message — its thread siblings keep \Inbox and the whole conversation stays in
+// the inbox (#271). MailFlow's own inbox is thread-grouped too. So we snooze the
+// entire conversation, but bounded to the RFC 5322 reply chain (Message-ID /
+// In-Reply-To / References links) rather than thread_id: thread_id falls back to
+// subject grouping and can lump hundreds of unrelated messages together (e.g.
+// identical automated-notification emails), which must never be swept into Snoozed.
+//
+// Returns the messages in `msg`'s source folder reachable from `msg` through
+// header links (always including `msg` itself); excludes already-snoozed messages.
+export async function gatherSnoozeConversation(msg) {
+  if (!msg.thread_id) return [msg];
+
+  // Load the whole thread across ALL folders. thread_id is a superset of the true
+  // conversation, and the messages that hold a real conversation together — the
+  // other party's replies, your own Sent messages, the thread root — frequently
+  // live in Sent / All Mail rather than the inbox. They must be present as graph
+  // connectors or a genuine thread fragments and only part of it snoozes. The
+  // reply-chain walk below filters out the subject-only collisions that thread_id
+  // also collects (e.g. identical automated-notification emails).
+  const pool = (await query(
+    `SELECT id, uid, account_id, folder, message_id, in_reply_to, thread_references, is_read
+     FROM messages
+     WHERE account_id = $1 AND thread_id = $2 AND message_id IS NOT NULL`,
+    [msg.account_id, msg.thread_id]
+  )).rows;
+
+  // Ensure the triggering message is present (the query above could miss it on a
+  // transient read skew).
+  if (!pool.some(r => r.message_id === msg.message_id)) pool.push(msg);
+
+  const refsOf = (r) => {
+    const ids = (r.thread_references || '').match(/<[^>]+>/g) || [];
+    if (r.in_reply_to) ids.push(r.in_reply_to);
+    return ids;
+  };
+
+  // Undirected reply-chain graph over the whole thread; take the connected
+  // component containing `msg`. Messages with no header link into that component
+  // (subject-only collisions) are left out.
+  const adj = new Map();
+  const node = (m) => { let s = adj.get(m); if (!s) { s = new Set(); adj.set(m, s); } return s; };
+  for (const r of pool) node(r.message_id);
+  for (const r of pool) {
+    for (const ref of refsOf(r)) {
+      if (adj.has(ref)) { node(r.message_id).add(ref); node(ref).add(r.message_id); }
+    }
+  }
+  const seen = new Set([msg.message_id]);
+  const queue = [msg.message_id];
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const nb of (adj.get(cur) || [])) if (!seen.has(nb)) { seen.add(nb); queue.push(nb); }
+  }
+
+  // Snooze only the conversation members in the acted-on message's source folder
+  // (the inbox copies — Sent copies carry no \Inbox and shouldn't move), skipping
+  // any already snoozed. Already-snoozed messages stay valid graph connectors above.
+  const already = new Set(
+    (await query(
+      `SELECT sm.message_id_header FROM snoozed_messages sm
+       WHERE sm.account_id = $1 AND sm.message_id_header = ANY($2) AND ${LIVE_SNOOZE_SQL}`,
+      [msg.account_id, [...seen]]
+    )).rows.map(r => r.message_id_header)
+  );
+  // Dedupe by Message-ID so a message that somehow has two rows in the source
+  // folder isn't moved (and recorded) twice.
+  const picked = new Map();
+  for (const r of pool) {
+    if (seen.has(r.message_id) && r.folder === msg.folder && !already.has(r.message_id) && !picked.has(r.message_id)) {
+      picked.set(r.message_id, r);
+    }
+  }
+  // Return the acted-on message first so the caller can treat a failure moving it
+  // as fatal before any sibling has been touched (no partial snooze on error).
+  const rest = [...picked.values()].filter(r => r.message_id !== msg.message_id);
+  // msg always qualifies (it's the acted-on, not-yet-snoozed message in its own
+  // folder); fall back to it directly if the pool row for it was missed.
+  const self = picked.get(msg.message_id) || msg;
+  return [self, ...rest];
+}
+
+// When a snooze ends: a valid date in the future, within 30 days.
+export function parseSnoozeUntil(until) {
+  if (!until) return { error: 'until is required' };
+  const date = new Date(until);
+  if (isNaN(date.getTime())) return { error: 'until must be a valid ISO date' };
+  if (date <= new Date()) return { error: 'until must be in the future' };
+  const maxDate = new Date();
+  maxDate.setDate(maxDate.getDate() + 30);
+  if (date > maxDate) return { error: 'until must be within 30 days' };
+  return { date };
+}
+
+// The live snooze records of a snoozed message and those snoozed with it (#269): its thread's
+// messages waiting in the same Snoozed folder until the same time. Snoozing takes the whole reply
+// chain at once, so changing or ending the snooze does too; a later, separate snooze of another
+// message in the thread keeps its own time. As imapManager.snoozedRows returns them.
+//
+// Its conversation is the reply chain the snooze took (gatherSnoozeConversation), not every message
+// sharing its thread_id: that groups by subject too, so two separately snoozed "Build failed"
+// notifications set to the same morning came back, or moved, together.
+async function snoozedTogether(msg, userId) {
+  const chain = await gatherSnoozeConversation(msg);
+  const ids = [...new Set([msg.message_id, ...chain.map(r => r.message_id)].filter(Boolean))];
+  return imapManager.snoozedRows(
+    `sm.user_id = $1 AND sm.account_id = $2 AND sm.snoozed_folder = $3
+     AND sm.snooze_until = (
+       SELECT own.snooze_until FROM snoozed_messages own
+       WHERE own.user_id = $1 AND own.account_id = $2 AND own.message_id_header = $4 AND own.snoozed_folder = $3
+       ORDER BY own.snooze_until LIMIT 1)
+     AND m.message_id = ANY($5::text[])`,
+    [userId, msg.account_id, msg.folder, msg.message_id, ids]
+  );
+}
+
+// The reader's own message, with its account's user.
+async function ownedMessage(id, userId) {
+  const r = await query(
+    `SELECT m.*, a.user_id FROM messages m
+     JOIN email_accounts a ON a.id = m.account_id
+     WHERE m.id = $1 AND a.user_id = $2`,
+    [id, userId]
+  );
+  return r.rows[0] || null;
+}
+
+// Snooze a message: move it to a Snoozed IMAP folder and record when to restore it
+router.post('/messages/:id/snooze', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const { date: untilDate, error: untilError } = parseSnoozeUntil(req.body?.until);
+  if (untilError) return res.status(400).json({ error: untilError });
+
+  // Ownership check
+  const msgResult = await query(
+    `SELECT m.*, a.user_id FROM messages m
+     JOIN email_accounts a ON a.id = m.account_id
+     WHERE m.id = $1 AND a.user_id = $2`,
+    [id, req.session.userId]
+  );
+  if (!msgResult.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const msg = msgResult.rows[0];
+
+  if (!msg.message_id) return res.status(400).json({ error: 'Message has no Message-ID header — cannot snooze' });
+
+  // Check if already snoozed
+  const existing = await query(
+    `SELECT sm.id FROM snoozed_messages sm
+     WHERE sm.account_id = $1 AND sm.message_id_header = $2 AND ${LIVE_SNOOZE_SQL}`,
+    [msg.account_id, msg.message_id]
+  );
+  if (existing.rows.length) return res.status(400).json({ error: 'Message is already snoozed' });
+
+  const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [msg.account_id]);
+  const account = accountResult.rows[0];
+
+  // Snooze the whole reply-chain conversation, not just this message (see
+  // gatherSnoozeConversation for why Gmail requires this and why it's bounded
+  // to the header reply chain rather than thread_id).
+  const convo = await gatherSnoozeConversation(msg);
+
+  // Drop the leftover records of earlier snoozes of these messages, so the new snooze is the
+  // only one and an old wake time cannot wake the message early.
+  await query(
+    `DELETE FROM snoozed_messages sm
+     WHERE sm.account_id = $1 AND sm.message_id_header = ANY($2) AND NOT ${LIVE_SNOOZE_SQL}`,
+    [msg.account_id, convo.map(m => m.message_id)]
+  );
+
+  // Store the server's real path (INBOX.Snoozed under an INBOX. namespace prefix): folder
+  // sync files the moved mail under it, so rows written as bare 'Snoozed' belong to no
+  // folder and the sync adds each message a second time.
+  let snoozedFolder;
+  try {
+    ({ path: snoozedFolder } = await imapManager.ensureFolder(account, 'Snoozed', { resolvePath: true }));
+  } catch (err) {
+    console.error(`Snooze ensureFolder failed for message ${id}:`, err.message);
+    return res.status(500).json({ error: 'Failed to move message to Snoozed folder' });
+  }
+
+  if (msg.folder === snoozedFolder) {
+    return res.status(400).json({ error: 'Message is already in Snoozed folder' });
+  }
+
+  for (const tm of convo) {
+    imapManager._guardMoveUid(tm.account_id, tm.folder, tm.uid);
+    try {
+      let snoozedUid;
+      try {
+        snoozedUid = await imapManager.moveMessage(account, tm.uid, tm.folder, snoozedFolder);
+      } catch (err) {
+        console.error(`Snooze IMAP move failed for message ${tm.id}:`, err.message);
+        // The message the user acted on must succeed; a failed sibling is logged
+        // and skipped so the rest of the conversation still snoozes.
+        if (tm.id === msg.id) return res.status(500).json({ error: 'Failed to move message to Snoozed folder' });
+        continue;
+      }
+      if (snoozedUid != null) {
+        await query('UPDATE messages SET folder = $1, uid = $2 WHERE id = $3', [snoozedFolder, snoozedUid, tm.id]);
+      } else {
+        imapManager._guardMoveUid(tm.account_id, snoozedFolder, tm.uid);
+        await query('UPDATE messages SET folder = $1 WHERE id = $2', [snoozedFolder, tm.id]);
+        setTimeout(() => imapManager._unguardMoveUid(tm.account_id, snoozedFolder, tm.uid), 10_000);
+      }
+
+      await query(
+        `INSERT INTO snoozed_messages (user_id, account_id, message_id_header, original_folder, snooze_until, snoozed_folder)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [req.session.userId, tm.account_id, tm.message_id, tm.folder, untilDate.toISOString(), snoozedFolder]
+      );
+
+      adjustFolderCounts(tm.account_id, tm.folder, -1, tm.is_read ? 0 : -1);
+      adjustFolderCounts(tm.account_id, snoozedFolder, 1, tm.is_read ? 0 : 1);
+    } finally {
+      imapManager._unguardMoveUid(tm.account_id, tm.folder, tm.uid);
+    }
+  }
+
+  // Refresh GTD section data if the snoozed conversation carries a GTD label (its in_inbox flips).
+  notifyMailMutation(convo, req.session.userId);
+
+  res.json({ ok: true });
+});
+
+// The Snoozed view (#269): change when a snoozed conversation comes back, as snoozing it did for
+// the whole reply chain.
+router.patch('/messages/:id/snooze', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+  const { date: untilDate, error: untilError } = parseSnoozeUntil(req.body?.until);
+  if (untilError) return res.status(400).json({ error: untilError });
+  const msg = await ownedMessage(id, req.session.userId);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
+  const rows = msg.message_id ? await snoozedTogether(msg, req.session.userId) : [];
+  if (!rows.length) return res.status(404).json({ error: 'Message is not snoozed' });
+  await query('UPDATE snoozed_messages SET snooze_until = $1 WHERE id = ANY($2)',
+    [untilDate.toISOString(), rows.map(r => r.snooze_id)]);
+  imapManager.broadcast({ type: 'folder_updated', folder: msg.folder, accountId: msg.account_id }, req.session.userId);
+  res.json({ ok: true, until: untilDate.toISOString() });
+});
+
+// The Snoozed view (#269): bring a snoozed conversation back now, to where it was snoozed from, as
+// its wake-up would, but keeping its read state: the reader asked for it.
+router.post('/messages/:id/unsnooze', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+  const msg = await ownedMessage(id, req.session.userId);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
+  const rows = msg.message_id ? await snoozedTogether(msg, req.session.userId) : [];
+  if (!rows.length) return res.status(404).json({ error: 'Message is not snoozed' });
+  const notWoken = [];
+  for (const row of rows) {
+    if (!(await imapManager.wakeSnoozed(row, { markUnread: false }))) notWoken.push(row);
+  }
+  // One this request did not wake may be back anyway: its own wake-up got there first, or is
+  // bringing it back right now. Only a snooze that is still live and not being woken failed.
+  const stillSnoozed = notWoken.length
+    ? (await imapManager.snoozedRows('sm.id = ANY($1::uuid[])', [notWoken.map(r => r.snooze_id)]))
+      .filter(r => !imapManager.isWakingSnooze(r.snooze_id))
+    : [];
+  const restored = rows.length - stillSnoozed.length;
+  if (!restored) return res.status(500).json({ error: 'Failed to bring the message back' });
+  notifyMailMutation(rows.map(r => ({ account_id: r.account_id, message_id: r.message_id_header, folder: r.snoozed_folder })), req.session.userId);
+  res.json({ ok: true, restored });
+});
+
+// Delete (move to trash; drafts are permanently deleted)
+async function deleteMessage(req, res, id) {
+  const result = await query(`
+    SELECT m.*, a.user_id FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const message = result.rows[0];
+
+  const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+  const account = accountResult.rows[0];
+  const wasUnread = !message.is_read ? 1 : 0;
+
+  // Drafts bypass Trash and are permanently deleted (consistent with all major email clients).
+  const allDraftsPaths = await resolveAllDraftsPaths(message.account_id, account.folder_mappings);
+  if (allDraftsPaths.has(message.folder)) {
+    try {
+      const deleted = await imapManager.permanentDeleteMessage(account, message.uid, message.folder,
+        { expectMessageId: message.message_id ?? null });
+      if (deleted !== true) return res.status(409).json({
+        error: 'Cannot safely delete this message: its server identity is missing or ambiguous',
+        code: 'message_identity_unverified',
+      });
+    } catch (err) {
+      console.error('IMAP permanent delete (draft) failed:', err.message);
+      return res.status(500).json({ error: 'Failed to delete draft' });
+    }
+    await query('DELETE FROM messages WHERE id = $1', [id]);
+    adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
+    imapManager.broadcast({ type: 'folder_updated', folder: message.folder, accountId: message.account_id }, req.session.userId);
+    return res.json({ ok: true });
+  }
+
+  const trashPath = await resolveTrashFolder(message.account_id, account.folder_mappings);
+  const allTrashPaths = await resolveAllTrashPaths(message.account_id, account.folder_mappings);
+  const strategy = getDeleteStrategy(message.folder, trashPath, allTrashPaths);
+
+  if (strategy.action === 'no_trash') {
+    return res.status(422).json({ error: 'No Trash folder configured for this account' });
+  }
+
+  if (strategy.action === 'move') {
+    // Guard the source UID before the IMAP move so reconcileDeletes cannot delete
+    // the DB row if an EXPUNGE arrives while the move is in flight.
+    imapManager._guardMoveUid(message.account_id, message.folder, message.uid);
+    let newUid;
+    try {
+      try {
+        newUid = await imapManager.moveMessage(account, message.uid, message.folder, trashPath);
+      } catch (err) {
+        console.error('IMAP move to trash failed:', err.message);
+        return res.status(500).json({ error: 'Failed to delete message' });
+      }
+      // The trashed row takes a new id, as the bulk relocate does, so a replayed or stale DELETE
+      // of the old id 404s instead of finding the row in Trash and expunging it. A delete from the
+      // Trash view names the new id and stays permanent.
+      if (newUid != null) {
+        // Delete any stale row the sync may have already inserted at the destination,
+        // then update the source row in place to avoid a unique-constraint violation.
+        await query('DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 AND id != $4',
+          [message.account_id, newUid, trashPath, id]);
+        await query('UPDATE messages SET folder = $1, uid = $2, id = gen_random_uuid() WHERE id = $3', [trashPath, newUid, id]);
+      } else {
+        // Non-UIDPLUS: DB holds the stale source UID at the destination. Guard it so
+        // reconcileDeletes does not treat it as an orphan before the next sync corrects it.
+        imapManager._guardMoveUid(message.account_id, trashPath, message.uid);
+        await query('UPDATE messages SET folder = $1, id = gen_random_uuid() WHERE id = $2', [trashPath, id]);
+        setTimeout(() => imapManager._unguardMoveUid(message.account_id, trashPath, message.uid), 10_000);
+      }
+    } finally {
+      imapManager._unguardMoveUid(message.account_id, message.folder, message.uid);
+    }
+    adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
+    adjustFolderCounts(message.account_id, trashPath, 1, wasUnread);
+  } else {
+    // strategy.action === 'expunge': message is already in Trash — permanently delete.
+    try {
+      const deleted = await imapManager.permanentDeleteMessage(account, message.uid, message.folder,
+        { expectMessageId: message.message_id ?? null });
+      if (deleted !== true) return res.status(409).json({
+        error: 'Cannot safely delete this message: its server identity is missing or ambiguous',
+        code: 'message_identity_unverified',
+      });
+    } catch (err) {
+      console.error('IMAP permanent delete failed:', err.message);
+      return res.status(500).json({ error: 'Failed to delete message' });
+    }
+    await query('DELETE FROM messages WHERE id = $1', [id]);
+    adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
+  }
+  imapManager.broadcast({ type: 'folder_updated', folder: message.folder, accountId: message.account_id }, req.session.userId);
+  // Refresh GTD section data if this thread still carries a GTD label sibling (same staleness the
+  // bulk-delete route addresses, reached via the single-message delete button).
+  notifyMailMutation([message], req.session.userId);
+  res.json({ ok: true });
+}
+
+// One DELETE per message at a time. An overlapping duplicate's MOVE finds nothing and reads as a
+// non-UIDPLUS success, so it would adjust counts again, and if its UPDATE lands first it re-files
+// the row under the stale source uid and the first request's UPDATE misses the rotated id.
+const deleteInFlight = new Set();
+
+router.delete('/messages/:id', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const inflightKey = `${req.session.userId}:${id.toLowerCase()}`;
+  if (deleteInFlight.has(inflightKey)) return res.status(409).json({ error: 'This message is already being deleted' });
+  deleteInFlight.add(inflightKey);
+  try {
+    await deleteMessage(req, res, id);
+  } finally {
+    deleteInFlight.delete(inflightKey);
+  }
+});
+
+// ── Antispam (v0.1) ─────────────────────────────────────────────────────────
+// Manual "Mark as Spam" / "Mark as Not Spam" endpoints.
+// They move the message to the account's spam folder (or back to INBOX for
+// ham) via IMAP, persist the user override in messages.spam_user_override,
+// and log the decision to spam_training_log so future releases can train
+// per-user models on it.
+//
+// No automatic classification runs here — that ships in v0.2 (ML) and v0.3 (SA).
+
+// Helper: build the v0.2 feature payload for a messages row at mark time.
+// Shape matches spam_training_log (migration 0048) + spamModelStore inputs.
+function extractSpamFeatures(message) {
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  const attachmentNames = attachments
+    .map(a => a?.filename || a?.name)
+    .filter(Boolean)
+    .map(f => { const dot = String(f).lastIndexOf('.'); return dot > 0 ? String(f).slice(dot + 1).toLowerCase() : null; })
+    .filter(Boolean);
+
+  const msg = {
+    subject: message.subject || '',
+    body: message.body_text || '',
+    bodyHtml: message.body_html || '',
+    from: message.from_email ? `<${message.from_email}>` : null,
+    replyTo: null,
+    headers: [],
+    attachments,
+  };
+
+  return {
+    subject: msg.subject,
+    body_text: message.body_text || null,
+    body_html: message.body_html || null,
+    token_counts: countTokens(tokenize(msg)),
+    flag_features: extractFlagFeatures(msg),
+    sender_domain: message.from_email ? message.from_email.split('@').pop()?.toLowerCase() || null : null,
+    attachment_types: attachmentNames.length ? attachmentNames : null,
+  };
+}
+
+// count token occurrences into {word: n}
+function countTokens(tokens) {
+  const counts = {};
+  for (const t of tokens) counts[t] = (counts[t] || 0) + 1;
+  return counts;
+}
+
+// Log one training decision with its v0.2 features, then feed the ML model.
+async function logSpamTraining(userId, message, folder, label, features) {
+  await query(
+    `INSERT INTO spam_training_log
+       (user_id, account_id, message_id_header, message_uid, folder, label, source,
+        subject, body_text, body_html, token_counts, flag_features, sender_domain, attachment_types)
+     VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10, $11, $12, $13)
+     ON CONFLICT DO NOTHING`,
+    [
+      userId, message.account_id, message.message_id || null, message.uid, folder, label,
+      features.subject, features.body_text, features.body_html,
+      JSON.stringify(features.token_counts), JSON.stringify(features.flag_features),
+      features.sender_domain, features.attachment_types ?? null,
+    ]
+  );
+  // Incremental training: update the user's Naive Bayes model in <1s.
+  // Non-blocking on failure — user feedback must never break the HTTP path.
+  try {
+    await updateIncrementalForUser(userId, {
+      subject: features.subject,
+      body: features.body_text || '',
+      bodyHtml: features.body_html || '',
+      from: message.from_email ? `<${message.from_email}>` : null,
+      attachments: Array.isArray(message.attachments) ? message.attachments : [],
+    }, label);
+  } catch (err) {
+    console.warn(`spam incremental training failed for user ${userId}:`, err.message);
+  }
+}
+
+// Helper: move a single message to a destination folder, update DB, log to
+// training_log, and broadcast folder_updated. Shared between /spam and /ham.
+async function moveForSpamLabel(messageId, userId, destinationFolder, label) {
+  const result = await query(`
+    SELECT m.*, a.user_id, a.folder_mappings FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [messageId, userId]);
+
+  if (!result.rows.length) return { ok: false, status: 404, error: 'Message not found' };
+  const message = result.rows[0];
+
+  // v0.2: extract token/flag features at mark time (Solution C, migration
+  // 0048) and feed the per-user Naive Bayes model incrementally. The stored
+  // features make the retrain path independent of message persistence.
+  const spamFeatures = extractSpamFeatures(message);
+
+  // No-op: message already in the destination folder.
+  if (message.folder === destinationFolder) {
+    // Still record the training label so the user's intent is captured
+    // (e.g. re-confirming a verdict), but skip the IMAP move.
+    await logSpamTraining(userId, message, destinationFolder, label, spamFeatures);
+    await query(
+      `UPDATE messages SET spam_user_override = $1, spam_verdict = $1, spam_analyzed_at = NOW() WHERE id = $2`,
+      [label, messageId]
+    );
+    return { ok: true, status: 200, body: { ok: true, alreadyInFolder: true, folder: destinationFolder } };
+  }
+
+  const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+  const account = accountResult.rows[0];
+
+  // Guard the source UID before the IMAP move so reconcileDeletes cannot
+  // delete the DB row if an EXPUNGE arrives while the move is in flight.
+  imapManager._guardMoveUid(account.id, message.folder, message.uid);
+  let newUid;
+  try {
+    try {
+      newUid = await imapManager.moveMessage(account, message.uid, message.folder, destinationFolder);
+    } catch (err) {
+      console.error(`IMAP move for /${label} failed:`, err.message);
+      return { ok: false, status: 502, error: `IMAP move failed: ${err.message}` };
+    }
+    if (newUid != null) {
+      await query('DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 AND id != $4',
+        [account.id, newUid, destinationFolder, messageId]);
+      await query(
+        `UPDATE messages SET folder = $1, uid = $2,
+            spam_user_override = $3, spam_verdict = $3, spam_analyzed_at = NOW()
+         WHERE id = $4`,
+        [destinationFolder, newUid, label, messageId]
+      );
+    } else {
+      // Non-UIDPLUS server: DB holds the stale source UID at the destination.
+      imapManager._guardMoveUid(account.id, destinationFolder, message.uid);
+      await query(
+        `UPDATE messages SET folder = $1,
+            spam_user_override = $2, spam_verdict = $2, spam_analyzed_at = NOW()
+         WHERE id = $3`,
+        [destinationFolder, label, messageId]
+      );
+      setTimeout(() => imapManager._unguardMoveUid(account.id, destinationFolder, message.uid), 10_000);
+    }
+  } finally {
+    imapManager._unguardMoveUid(account.id, message.folder, message.uid);
+  }
+
+  // Adjust cached folder counts.
+  const wasUnread = !message.is_read ? 1 : 0;
+  adjustFolderCounts(account.id, message.folder, -1, -wasUnread);
+  adjustFolderCounts(account.id, destinationFolder, 1, wasUnread);
+
+  // Training log: capture the decision for future model training. Record the UID that now
+  // lives in the destination folder: on a UIDPLUS move the row was re-keyed to newUid above,
+  // so message.uid (the pre-move source UID) would no longer match the messages row. Non-UIDPLUS
+  // servers keep the source UID at the destination, so newUid is null there and we fall back to it.
+  await logSpamTraining(
+    userId,
+    { ...message, uid: newUid ?? message.uid, account_id: account.id },
+    destinationFolder, label, spamFeatures,
+  );
+
+  // If folder_mappings.spam is not yet configured, learn from the discovered folder.
+  if (label === 'spam' && !account.folder_mappings?.spam) {
+    await query(
+      `UPDATE email_accounts SET folder_mappings = folder_mappings || jsonb_build_object('spam', $1::text)
+       WHERE id = $2 AND NOT (folder_mappings ? 'spam')`,
+      [destinationFolder, account.id]
+    ).catch(err => console.warn('Failed to auto-persist folder_mappings.spam:', err.message));
+  }
+
+  imapManager.broadcast(
+    { type: 'folder_updated', folder: destinationFolder, accountId: account.id },
+    userId
+  );
+
+  // Refresh GTD section data if the (un)spammed message's thread carries a GTD label. Covers both
+  // /spam and /ham, which share this mover. The already-in-folder no-op path above returns
+  // early without a move, so GTD section data is untouched there.
+  notifyMailMutation([message], userId);
+
+  return { ok: true, status: 200, body: { ok: true, folder: destinationFolder, newUid: newUid || null } };
+}
+
+// POST /api/mail/messages/:id/spam
+// Moves the message to the account's spam/junk folder and records the user
+// override as spam. Coexists with the future ML/SA auto-classification:
+// spam_user_override always wins over auto verdicts.
+router.post('/messages/:id/spam', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const lookup = await query(`
+    SELECT m.account_id, a.folder_mappings FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+
+  if (!lookup.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const spamFolder = await resolveSpamFolder(lookup.rows[0].account_id, lookup.rows[0].folder_mappings);
+  if (!spamFolder) return res.status(422).json({ error: 'No spam folder configured for this account' });
+
+  const result = await moveForSpamLabel(id, req.session.userId, spamFolder, 'spam');
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  res.json(result.body);
+});
+
+// GET /api/mail/category-counts
+// Returns unread message counts per category for the INBOX. Used by the
+// category tab bar to show unread badges. Scoped to the user; optionally
+// filtered to a single account via ?accountId=.
+router.get('/category-counts', async (req, res) => {
+  const { accountId } = req.query;
+  if (accountId && !UUID_RE.test(accountId)) {
+    return res.status(400).json({ error: 'Invalid account id' });
+  }
+
+  const accountsResult = await query(
+    'SELECT id, include_in_unified_inbox FROM email_accounts WHERE user_id = $1 AND enabled = true',
+    [req.session.userId]
+  );
+  const { accountIds: scopedIds } = resolveAccountScope(accountsResult.rows, accountId);
+  if (!scopedIds.length) return res.json({ counts: {} });
+
+  const result = await query(`
+    SELECT COALESCE(m.category, 'primary') AS category,
+           COUNT(*) FILTER (WHERE m.is_read = false)::int AS unread_count
+    FROM messages m
+    WHERE m.account_id = ANY($1)
+      AND m.folder = 'INBOX'
+      AND m.is_deleted = false
+    GROUP BY COALESCE(m.category, 'primary')
+  `, [scopedIds]);
+
+  const counts = {};
+  for (const row of result.rows) {
+    counts[row.category] = row.unread_count;
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json({ counts });
+});
+
+// PATCH /api/mail/messages/:id/category
+// Manually override the computed category for a single message.
+router.patch('/messages/:id/category', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const { category } = req.body;
+  const VALID_CATEGORIES = new Set(['primary', 'newsletter', 'promotion', 'automated', 'social']);
+  if (!VALID_CATEGORIES.has(category)) {
+    return res.status(400).json({ error: 'Invalid category' });
+  }
+
+  // A chosen category is stored as itself, 'primary' included. NULL means "not chosen": the
+  // ingest classifier leaves Primary that way, and the Recategorize backfill (which reads only
+  // NULL rows) and a re-synced row (COALESCE onto NULL) may still fill it in. Storing a chosen
+  // Primary as NULL let either one move the message back out of Primary (#489).
+  const result = await query(
+    `UPDATE messages SET category = $1
+     FROM email_accounts a
+     WHERE messages.id = $2
+       AND messages.account_id = a.id
+       AND a.user_id = $3
+     RETURNING messages.id`,
+    [category, id, req.session.userId]
+  );
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  res.json({ ok: true, category });
+});
+
+// POST /api/mail/messages/:id/unsubscribe
+// Processes a one-click unsubscribe (RFC 8058) or returns parsed
+// unsubscribe options for the frontend to handle (URL open, mailto compose).
+router.post('/messages/:id/unsubscribe', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const result = await query(`
+    SELECT m.list_unsubscribe, m.list_unsubscribe_post
+    FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2 AND m.is_deleted = false
+  `, [id, req.session.userId]);
+
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const { list_unsubscribe: rawUnsub, list_unsubscribe_post: rawUnsubPost } = result.rows[0];
+  if (!rawUnsub) return res.status(400).json({ error: 'No unsubscribe header' });
+  const list_unsubscribe = decodeMimeWords(rawUnsub);
+  const list_unsubscribe_post = rawUnsubPost ? decodeMimeWords(rawUnsubPost) : rawUnsubPost;
+
+  // Parse angle-bracket-wrapped URLs/mailtos from the header value.
+  // e.g. "<https://example.com/unsub>, <mailto:list@example.com?subject=unsubscribe>"
+  const refs = [...list_unsubscribe.matchAll(/<([^>]+)>/g)].map(m => m[1].trim());
+  const httpsUrl = refs.find(r => /^https:\/\//i.test(r));
+  const mailtoUrl = refs.find(r => /^mailto:/i.test(r));
+
+  const isOneClick = /List-Unsubscribe=One-Click/i.test(list_unsubscribe_post || '');
+
+  // RFC 8058 one-click: POST to the https URL on behalf of the user.
+  if (isOneClick && httpsUrl) {
+    // Validate the URL host — DNS-resolved check blocks hostnames that resolve to private IPs.
+    let parsed;
+    try { parsed = new URL(httpsUrl); } catch {
+      return res.status(400).json({ error: 'Invalid unsubscribe URL' });
+    }
+    const hostErr = await validateHost(parsed.hostname);
+    if (hostErr) return res.status(400).json({ error: 'Unsubscribe URL not allowed' });
+
+    try {
+      // safeFetch validates the resolved IP of the initial host AND every redirect
+      // hop, so an attacker-supplied List-Unsubscribe URL can't redirect to an
+      // internal address. (The validateHost above stays as a fast pre-check.)
+      const unsub = await safeFetch(httpsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mailflow/1.0' },
+        body: 'List-Unsubscribe=One-Click',
+        signal: AbortSignal.timeout(10000),
+      });
+      if (unsub.ok) {
+        await query('UPDATE messages SET unsubscribed_at = NOW() WHERE id = $1', [id]);
+        return res.json({ ok: true, type: 'one-click' });
+      }
+      console.warn(`One-click unsubscribe returned ${unsub.status} for ${httpsUrl}`);
+      // Fall through to URL/mailto fallback
+    } catch (err) {
+      console.warn('One-click unsubscribe failed:', err.message);
+      // Fall through to URL/mailto options instead
+    }
+  }
+
+  // Return parsed options for the frontend to handle.
+  // Mark unsubscribed_at optimistically — the user has been given the mechanism to complete it.
+  await query('UPDATE messages SET unsubscribed_at = NOW() WHERE id = $1', [id]);
+  res.json({
+    ok: true,
+    type: httpsUrl ? 'url' : 'mailto',
+    url: httpsUrl || null,
+    mailto: mailtoUrl || null,
+  });
+});
+
+// POST /api/mail/messages/:id/ham
+// Moves a message back from the spam folder to INBOX and records the override
+// as ham (not spam). Only meaningful when the message is currently in a
+// spam-like folder; returns 400 otherwise.
+router.post('/messages/:id/ham', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const lookup = await query(`
+    SELECT m.account_id, m.folder, a.folder_mappings FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+
+  if (!lookup.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const allSpam = await resolveAllSpamPaths(lookup.rows[0].account_id, lookup.rows[0].folder_mappings);
+  if (!allSpam.has(lookup.rows[0].folder)) {
+    return res.status(400).json({ error: 'Message is not in the spam folder' });
+  }
+
+  // Resolve inbox folder per account — Gmail, Exchange and others may not use
+  // the literal 'INBOX' (e.g. 'Inbox' on Dovecot, 'Posteingang', etc.).
+  // Same pattern as folder_mappings.sent / .drafts in send.js and draft.js.
+  const inboxFolder = lookup.rows[0].folder_mappings?.inbox || 'INBOX';
+  const result = await moveForSpamLabel(id, req.session.userId, inboxFolder, 'ham');
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  res.json(result.body);
+});
+
+export default router;

@@ -1,0 +1,18 @@
+{
+  "base_commit": "123ba32ec5cd8c30f9c174201428ba9bcb06b433",
+  "base_tree": "d32a97d55ff16e02f0e134ce34ef4f7ad060fa2d",
+  "effective_tree": "dce9459a8906352d92a577d0d9fabd7f7e3ba719",
+  "ordered_sources": [
+    "published123 CAS proof + schema/narrow chain",
+    "sealed retry owned hunks excluding foreign snooze overlap",
+    "da55 bounded identity/expunge/delete symbols",
+    "f6 mark-all methods/route",
+    "a1 helpers/API",
+    "0b selected-read dependency",
+    "7a root stars/generic pushFlag",
+    "sealed owner probe/fixture bytes"
+  ],
+  "principle": "exact preimages and fragment hashes; no branch merge or moving checkout; shared original methods outside named spans remain base bytes",
+  "candidate_commit": null,
+  "review_requirement": "New assembled tree is UNREVIEWED/UNRUN; existing component reviews do not approve this effective tree. Root publisher reviews fixed packet before normal-hook push; product publication still requires existing independent exact-source review."
+}

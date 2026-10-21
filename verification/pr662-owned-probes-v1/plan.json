@@ -1,0 +1,792 @@
+{
+  "status": "SOURCE_ONLY_UNRUN_NOT_ACCEPTED",
+  "source": {
+    "repository": "salmonumbrella/mailflow",
+    "sha": "123ba32ec5cd8c30f9c174201428ba9bcb06b433",
+    "tree": "d32a97d55ff16e02f0e134ce34ef4f7ad060fa2d",
+    "effective_tree": "dce9459a8906352d92a577d0d9fabd7f7e3ba719",
+    "candidate_commit": null,
+    "status": "SOURCE_ONLY_UNRUN_NOT_ACCEPTED",
+    "package_lock_sha256": "6543e04c27b0168917d04559d173d2e3efb5e1d955e760894600d6b80f0f1d70",
+    "node": "22.23.3",
+    "vitest": "4.1.11",
+    "imapflow": "1.7.8",
+    "pg": "8.20.0",
+    "overlay_files": {
+      "backend/src/plugins/api.js": {
+        "sha256": "6d7ed2c72133285884eae5347ca37bad10b893cba6b4469fe5f1f84bad72ee2e",
+        "base_sha256": "b286d8a4bbe971c07fe81b3fb6039716b045e7b31e5b644d17849657a74ca989",
+        "mode": "100644"
+      },
+      "backend/src/routes/mail.deleteIdentity.test.js": {
+        "sha256": "297a87e37010449ce16119a08d7c6e0b9b67538180c47b599f6295660dc628c4",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/routes/mail.js": {
+        "sha256": "5dc4a6875b20084014bce8f57c870de59c1fa3f36acc8287ee2132749333abd0",
+        "base_sha256": "269033216a9d68ce5050973d14634ef49eb31de417a984332990e8598ae7a3eb",
+        "mode": "100644"
+      },
+      "backend/src/routes/mail.markAllConfirmation.test.js": {
+        "sha256": "452c580ff446f58d796c6b2651d7387cad7fa737b720972e69a39dad270b8f8a",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/routes/mail.starCopiesReview.test.js": {
+        "sha256": "161f50613a6dada0080ab30a2e47d40a81ea421505df83f04337cf1e6bcef9c4",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/services/imapIdentity.js": {
+        "sha256": "b0dd326a4bfcbd11a6038387c206443bf734c5b005e070d2c9a5db8405fdbe79",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/services/imapManager.flagAddress.test.js": {
+        "sha256": "1e05ac733dddbf4d95f5068887feb610537f205e3e37beceb6cdace66d8f1190",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/services/imapManager.js": {
+        "sha256": "77ce54b4db231d48f51232f95d8b8bd42cfdea4856619bd69ca4b9bf21aed1b1",
+        "base_sha256": "55c49090f309965b9ddea88ba4a2cf91c207774a48faa422494c2e019cae3f4a",
+        "mode": "100644"
+      },
+      "backend/src/services/imapManager.retryReview.test.js": {
+        "sha256": "5903a10c4000d9f68fb393b0c07ee50bc64837f590ac35bcd03bf19240d50dc9",
+        "base_sha256": "04f0eb9e4bef8586cb2d24643fad07a6ce80f602e7ffbc58921e2f7cb55b5f34",
+        "mode": "100644"
+      },
+      "backend/src/services/imapMarkAllConfirmation.test.js": {
+        "sha256": "c5beda6b2744381f3642b97f08f43ee03e256ae6df278543c5c372c1f03bc97f",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/services/labels.js": {
+        "sha256": "c976dbf358521c808fd18416edcc06c67e6a8ef422357a0a089e11de51ee408e",
+        "base_sha256": "f40cb7b4ae0ee7cdd29c516ae34a3629c9cf60889f914e08647415d533bd9516",
+        "mode": "100644"
+      },
+      "backend/src/utils/mailUtils.js": {
+        "sha256": "563ecd2f5dc43b538e35a5f54cba7b42fde1cc5bbbf1de60219d4509d581425e",
+        "base_sha256": "3d404184113c7901f81aaba81cefb3142db4d3e310edebb79476ceb4fc5cabb4",
+        "mode": "100644"
+      }
+    },
+    "fragments": [
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "whole_file",
+        "source": "123ba32ec5cd8c30f9c174201428ba9bcb06b433",
+        "sha256": "55c49090f309965b9ddea88ba4a2cf91c207774a48faa422494c2e019cae3f4a"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 1",
+        "source": "owners/retry/source-map/hunks/01.patch",
+        "before_sha256": "9e85bb04cd45353ce7336d0dcd09d967bacac05ee409474c786d89b3c5448312",
+        "fragment_sha256": "cf2d63fa010bd0d3985bfca8c221cd069f2ef5a6cac17b6e82023f418f643693"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 2",
+        "source": "owners/retry/source-map/hunks/02.patch",
+        "before_sha256": "97be7011e5f4c8bb5b617cdd65453b1a3e1a3c999c038c95c1043b9f0334af06",
+        "fragment_sha256": "47370d149215429e795cf423633e16e369e43f355dedf8dae29152f3de3f90d3"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 3",
+        "source": "owners/retry/source-map/hunks/03.patch",
+        "before_sha256": "cce25a28116eb7743e88419bb645a528034f43d44a2652760ee09faf9a1b608b",
+        "fragment_sha256": "69b906988740d5caf477b63f0f5db7933294c71f7df049f6fce160a01309642f"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 4",
+        "source": "owners/retry/source-map/hunks/04.patch",
+        "before_sha256": "1799d46151048cf288631d1a7d023ae02f3d6adbc0c3f4e6f61ab42d23cff7db",
+        "fragment_sha256": "1cf077f9fe2fa9a0f45fc48aeb94a55ac61667ec18d30c6d6bcb88b75fae9e4a"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 5",
+        "source": "owners/retry/source-map/hunks/05.patch",
+        "before_sha256": "2711083244912db7342ad776321dbdc92a9f298987b6cc734e2bfabc9e9ebfae",
+        "fragment_sha256": "c55e576f5297fa1685a9622789bb056fbf9c73d64f7c252677d2ad3bed9ea37b"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 6",
+        "source": "owners/retry/source-map/hunks/06.patch",
+        "before_sha256": "aea15c84c1e5ebdbf62217c2385b87f92c46a4d8a5126bd62627652e90575733",
+        "fragment_sha256": "7d7ecc874cf893c4a737230b216be2457b229c34fad822692d6950e57db271ce"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 7",
+        "source": "owners/retry/source-map/hunks/07.patch",
+        "before_sha256": "9e73debc90dead5346f6dc9dc1d3def4a49a68b2e2313ccdb9bb811ecf61df14",
+        "fragment_sha256": "1bd656fcda94b809fdba7651bd4b0f7a9216807f877f2f8ee7cbd80c9b3e8cf9"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 8",
+        "source": "owners/retry/source-map/hunks/08.patch",
+        "before_sha256": "b4e3da094344a27899a4e1bceae3dd2e7bb57bcb092ca53186fbb76c6620bfdd",
+        "fragment_sha256": "89e1d34654734539c954867a3da1eec5c86a9425517478b5666244e48ba653c3"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 9",
+        "source": "owners/retry/source-map/hunks/09.patch",
+        "before_sha256": "df50e4e2560de71558f7384b20f9decdc46beed775d127ee17d11a4c17bcff28",
+        "fragment_sha256": "7ee60003cc8e4853f652bfe7ca3f29df83660103f87fbb9b0e6bceb426f02d7f"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 10",
+        "source": "owners/retry/source-map/hunks/10.patch",
+        "before_sha256": "67dd7733377a73957a1d30ea5dc8104faaf9c208bb906315da2dbeb742b32d6e",
+        "fragment_sha256": "27822dbc44b88c09a35eb932e32464172c95b006235d2a08b0cf497665348abf"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 11",
+        "source": "owners/retry/source-map/hunks/11.patch",
+        "before_sha256": "d3e1f00d67d9f7141e52b50955a45522a1bba66543358f284b6a0470b3a749bd",
+        "fragment_sha256": "a564ea3f00e375b7a9b145afa720210d3a9c62a2ce104cb19d0ec194972408be"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 12",
+        "source": "owners/retry/source-map/hunks/12.patch",
+        "before_sha256": "f339b8d453078baa4e50f33d8bf2cc11160902013ae19e6ff8bec90c3c28b252",
+        "fragment_sha256": "32460d6c4ad208998cc4b32fc31cc4f9c89ba22bb4949bb4a78715568009a644"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 13",
+        "source": "owners/retry/source-map/hunks/13.patch",
+        "before_sha256": "228ecbf483a371d4a4019ec8be9208fcb287bcda9fb462b4dc969a86dc2be6e7",
+        "fragment_sha256": "93261dd2224c5c24617cff89e9fee2e3d31fe7c61a0debc81ed28f1e1f3f6187"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 14",
+        "source": "owners/retry/source-map/hunks/14.patch",
+        "before_sha256": "a361176ba7ab81ab8d3492659550f481ec934fdf2c7da2d0651c06183382605a",
+        "fragment_sha256": "ad326708906bca9604f29162af7cc17c7777f56c37d28801583daf91197f1921"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 15",
+        "source": "owners/retry/source-map/hunks/15.patch",
+        "before_sha256": "b1ac5edd073858fbc7e1c9c518534982480e320da99c78fbcd178cd72e5de9c5",
+        "fragment_sha256": "706638415488ddeed0c9dd97e323d662ec9e0b51d8376691e68b9fd3f2873012"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 16",
+        "source": "owners/retry/source-map/hunks/16.patch",
+        "before_sha256": "dc29f29fb8fb26f00206870d6596b562414a99e807b77970ec3b9051c65d74d8",
+        "fragment_sha256": "e490a10550109c9af4e549317b63e5f3deff89624a667619088f723de24d0bb0"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 17",
+        "source": "owners/retry/source-map/hunks/17.patch",
+        "before_sha256": "101557a1f946220e41ecc4a6ed970b7d4a3955bc92f7180b4152bc03e8b0a622",
+        "fragment_sha256": "b495a06db22af8107fa0b89e8e2e914e128d71879cab0cd086e3e3106a4ebded"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 18",
+        "source": "owners/retry/source-map/hunks/18.patch",
+        "before_sha256": "9d33ea7fac6f32e316aa81814956272bcc480e5204c5cb23259e4bfb20e1cb78",
+        "fragment_sha256": "217d05cd6ea69f7f3d594da897c5ccf821cf3c69fb183d1f0102d7c1b002e7b3"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 19",
+        "source": "owners/retry/source-map/hunks/19.patch",
+        "before_sha256": "2bd67e41d4616ca09c4a657d97ea9e3c6ca924daee55435c3af78587d6b57824",
+        "fragment_sha256": "b62d79c1afa1657f5d3777f26fef0d523dea93bfdfb27fa527e1c6a4614f0dab"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 20",
+        "source": "owners/retry/source-map/hunks/20.patch",
+        "before_sha256": "c118ee62cb1735fa1ecca7c61651ce08d692e8cb77570969cf76bdc4feb65a45",
+        "fragment_sha256": "b9071042120bd578dfd29ea3446658d64dfc068f400691492fddd8711c667ab5"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 21",
+        "source": "owners/retry/source-map/hunks/21.patch",
+        "before_sha256": "6bcff18142a17dc97c7b068856981794e35a8eba8cc37d5862baf479d016aa57",
+        "fragment_sha256": "4995304029c08c1d17c99272f7f674ec0efa6182fa3047672769677f601583f2"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 22",
+        "source": "owners/retry/source-map/hunks/22.patch",
+        "before_sha256": "cdd4698f15e9e775154feb8dc6f3123d53b774cb941c427778d7a292700fab5a",
+        "fragment_sha256": "367641a9ed4c0c4329cec2882b5eb235fef2fbfae37e313433fafc4ae1cf925d"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 23",
+        "source": "owners/retry/source-map/hunks/23.patch",
+        "before_sha256": "3602977cc91ab55bf0825ddc0a14b9067c3716c04b72d3bcbc6a17713ea0286b",
+        "fragment_sha256": "77b3e24b098a9e9bc7c455d1b3f3303f2acfc6a934a55f0314be82c9574ea015"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 24",
+        "source": "owners/retry/source-map/hunks/24.patch",
+        "before_sha256": "3f1de506a66d90e098bd453cea6052bd619ce80cbc0644a1cdc245c73a0635b2",
+        "fragment_sha256": "79c9290d16cf584ea703f488ca966796ad417764b536fb41a8bda026b2180548"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 25",
+        "source": "owners/retry/source-map/hunks/25.patch",
+        "before_sha256": "af854837f259b4f4d979f7ddbf2120b2077d7bdc3c69ead44c1c20caa05e1d8b",
+        "fragment_sha256": "558fea35a9fd9174df06017b00fac22344305aed4b1e867d658e2e2040833df5"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "retry-owned hunk 26",
+        "source": "owners/retry/source-map/hunks/26.patch",
+        "before_sha256": "ec2a3afc39597402901fdfe0b9911d3ecd5c8b6720ff40a12f73fc81f7a20ca6",
+        "fragment_sha256": "6582dcab88faa8ff3f4ab26b751e6685b2564c601ccf34c828295a2a3830a382"
+      },
+      {
+        "file": "backend/src/services/imapIdentity.js",
+        "operation": "whole_file",
+        "source": "da55d9b1a4e5379a74e9220bc7ba4c9ce0b37038 + root-owned export only",
+        "sha256": "b0dd326a4bfcbd11a6038387c206443bf734c5b005e070d2c9a5db8405fdbe79"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "permanentDeleteMessage",
+        "source": "da55d9b1a4e5379a74e9220bc7ba4c9ce0b37038",
+        "before_sha256": "f1444cad648bc73776776119c91391e60978fba61b21be56b6c46de6d7844dde",
+        "fragment_sha256": "75ac2dadbc275319b60f71cfe278d9922bcf4c8e32cd9f964b3b73a3a086ba83"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "bulkPermanentDelete",
+        "source": "da55d9b1a4e5379a74e9220bc7ba4c9ce0b37038",
+        "before_sha256": "b6d0fd455a34c7c4b481c4df3e5a85b2a93868260914c02afca7e9d866c41458",
+        "fragment_sha256": "4d4bdff84f1aee003a03880394166d969763acf6f86995924d85dae358907100"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "expungeUids",
+        "source": "da55d9b1a4e5379a74e9220bc7ba4c9ce0b37038",
+        "before_sha256": "a0aff4ee107ce49d088dac4b25df9e5cea33d9a5cf3f69b654bb0913ce63d411",
+        "fragment_sha256": "50e3098d93d97d3e598220e0249e0823727edcc0a1a1b0283775d8f1ca7b062c"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "insert deleteSelectionProof",
+        "source": "da55d9b1a4e5379a74e9220bc7ba4c9ce0b37038",
+        "before_sha256": "50e3098d93d97d3e598220e0249e0823727edcc0a1a1b0283775d8f1ca7b062c",
+        "fragment_sha256": "ce8a1e297fa55d97d3b43b08387285bd75d0c065c49c4c9fcc12d8db68901cfa"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "imapIdentity import",
+        "source": "root named import union",
+        "before_sha256": "d860adb9ec72a2b00f3a8ac704215322a3ea34293123bb7e4d1816d3deb526be",
+        "fragment_sha256": "e4a5a6b53b5b286ebc6a63623b3e921b9b4e0fa8f5c429921def9572cb5a3656"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "_markSeenInFolder",
+        "source": "f6c0877e40cfd4bfcb3ccd798db002aedb82eb55",
+        "before_sha256": "b5c9b0b356c053e84a3fbb956dc2f7a4b8bc276d46491e330e3006b888d03ce5",
+        "fragment_sha256": "e4b754f87948c6c7d062d4a087038e7b3bdab3ef38f376f6299eb72a09099b67"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "operation": "replace_fragment",
+        "symbol": "markAllReadImap",
+        "source": "f6c0877e40cfd4bfcb3ccd798db002aedb82eb55",
+        "before_sha256": "cdf3a7c39e0344b650bcc663361a6ad059b70948b0db2e7895c40eedf1e19663",
+        "fragment_sha256": "9fddfc6e27944173637fbf2fa2d6b9ba9ac5677da9a8b03a341535bdb907a14d"
+      },
+      {
+        "file": "backend/src/routes/mail.js",
+        "operation": "whole_file",
+        "source": "0b5f4f589fe77856836967c536684206ecb8e76d",
+        "sha256": "5de58af71766dbda04099fc065555d6e43840709563be0833a653b3f1debe184"
+      },
+      {
+        "file": "backend/src/routes/mail.js",
+        "operation": "replace_fragment",
+        "symbol": "star helper + single-star block",
+        "source": "7a55059792cbd044913dfa69fb52c40c5d881040",
+        "before_sha256": "0bda6a875049d79ab3c5c3f532141ec726771b2e451cad6fa3a6ff58726ec5e3",
+        "fragment_sha256": "7b44374dfd01a2afd376b3b5ad155fceb86392691c4c474c3d1b617499b30db2"
+      },
+      {
+        "file": "backend/src/routes/mail.js",
+        "operation": "replace_fragment",
+        "symbol": "bulk-star route",
+        "source": "7a55059792cbd044913dfa69fb52c40c5d881040",
+        "before_sha256": "d98fe0da0c904404837d4a9c0180925683a0a7dde496c001714008a9ac4635b0",
+        "fragment_sha256": "a3134decd5b68769e9c241dad03c1906478490dfc01777171762b4c7c1198b8d"
+      },
+      {
+        "file": "backend/src/routes/mail.js",
+        "operation": "replace_fragment",
+        "symbol": "mark-all route",
+        "source": "f6c0877e40cfd4bfcb3ccd798db002aedb82eb55",
+        "before_sha256": "2e6fc23256f5b29b4152a951353747f8ae4c144a67c52683d4d15bc4c9efcfa5",
+        "fragment_sha256": "b6ce8475a5a263fcbdf4c3ff1438b7fc9a0f2d4e10eb1f71292b52d64faf615f"
+      },
+      {
+        "file": "backend/src/routes/mail.js",
+        "operation": "replace_fragment",
+        "symbol": "bulk-delete route",
+        "source": "da55d9b1a4e5379a74e9220bc7ba4c9ce0b37038",
+        "before_sha256": "41e391de974ceb47ab8a51bf471be6d9f0a585221aa232a3eec61e3b36120542",
+        "fragment_sha256": "93718fe408844944c2d3133742a963923dd668c77a3cfb5784fd0a1444464f56"
+      },
+      {
+        "file": "backend/src/routes/mail.js",
+        "operation": "replace_fragment",
+        "symbol": "deleteMessage",
+        "source": "da55d9b1a4e5379a74e9220bc7ba4c9ce0b37038",
+        "before_sha256": "b11a03ac4f48181722857abf62b83c284dad217d4bd7c0fa24e0d3f9eff5734d",
+        "fragment_sha256": "859f4d56f954845d8aab259944b3c35b842354a9af7f14d719a6be8a59f661f2"
+      },
+      {
+        "file": "backend/src/routes/mail.js",
+        "operation": "replace_fragment",
+        "symbol": "mailUtils import union",
+        "source": "7a55059792cbd044913dfa69fb52c40c5d881040",
+        "before_sha256": "48c2eb2dac7cac9f73b827ae3732d0945c155891dc029bf199c4831d9da6826c",
+        "fragment_sha256": "a26dd0bcceaca7f793cf9ebe6028ce53bb6a79dbbb60516006b70969dff9f620"
+      },
+      {
+        "file": "backend/src/utils/mailUtils.js",
+        "operation": "whole_file",
+        "source": "7a55059792cbd044913dfa69fb52c40c5d881040 (includes frozen a1d5ed1027f475f3c331ad16c83e19946484c1c0 action helpers)",
+        "sha256": "563ecd2f5dc43b538e35a5f54cba7b42fde1cc5bbbf1de60219d4509d581425e"
+      },
+      {
+        "file": "backend/src/services/labels.js",
+        "operation": "whole_file",
+        "source": "a1d5ed1027f475f3c331ad16c83e19946484c1c0",
+        "sha256": "c976dbf358521c808fd18416edcc06c67e6a8ef422357a0a089e11de51ee408e"
+      },
+      {
+        "file": "backend/src/plugins/api.js",
+        "operation": "whole_file",
+        "source": "a1d5ed1027f475f3c331ad16c83e19946484c1c0",
+        "sha256": "6d7ed2c72133285884eae5347ca37bad10b893cba6b4469fe5f1f84bad72ee2e"
+      },
+      {
+        "file": "backend/src/services/imapManager.flagAddress.test.js",
+        "operation": "whole_file",
+        "source": "owners/retry/files/backend/src/services/imapManager.flagAddress.test.js",
+        "sha256": "1e05ac733dddbf4d95f5068887feb610537f205e3e37beceb6cdace66d8f1190"
+      },
+      {
+        "file": "backend/src/services/imapManager.retryReview.test.js",
+        "operation": "whole_file",
+        "source": "owners/retry/files/backend/src/services/imapManager.retryReview.test.js",
+        "sha256": "5903a10c4000d9f68fb393b0c07ee50bc64837f590ac35bcd03bf19240d50dc9"
+      },
+      {
+        "file": "backend/src/routes/mail.deleteIdentity.test.js",
+        "operation": "whole_file",
+        "source": "owners/safety/files/backend/src/routes/mail.deleteIdentity.test.js",
+        "sha256": "297a87e37010449ce16119a08d7c6e0b9b67538180c47b599f6295660dc628c4"
+      },
+      {
+        "file": "backend/src/services/imapMarkAllConfirmation.test.js",
+        "operation": "whole_file",
+        "source": "owners/safety/files/backend/src/services/imapMarkAllConfirmation.test.js",
+        "sha256": "c5beda6b2744381f3642b97f08f43ee03e256ae6df278543c5c372c1f03bc97f"
+      },
+      {
+        "file": "backend/src/routes/mail.starCopiesReview.test.js",
+        "operation": "whole_file",
+        "source": "owners/root/files/backend/src/routes/mail.starCopiesReview.test.js",
+        "sha256": "161f50613a6dada0080ab30a2e47d40a81ea421505df83f04337cf1e6bcef9c4"
+      },
+      {
+        "file": "backend/src/routes/mail.markAllConfirmation.test.js",
+        "operation": "whole_file",
+        "source": "f6c0877e40cfd4bfcb3ccd798db002aedb82eb55",
+        "sha256": "452c580ff446f58d796c6b2651d7387cad7fa737b720972e69a39dad270b8f8a"
+      },
+      {
+        "file": "backend/src/services/imapManager.flagIntent.postgres.test.js",
+        "operation": "whole_file",
+        "source": "123ba32ec5cd8c30f9c174201428ba9bcb06b433",
+        "sha256": "2a9626576d9fc2351f3c86a74f395ed6d5b4430095719359b9970f73649249e4"
+      },
+      {
+        "file": "backend/migrations/0079_message_flag_addresses.sql",
+        "operation": "whole_file",
+        "source": "123ba32ec5cd8c30f9c174201428ba9bcb06b433",
+        "sha256": "73f11599cae9ec180356b8ce9d2db085a06ee5955153e7ba3a12a9daf379051f"
+      }
+    ],
+    "excluded": [
+      "snooze9ab finder/wake protocol and cache component not adopted into this pending-probe bundle",
+      "raw consumer source-only integration",
+      "660 adapter",
+      "global aggregate7614",
+      "full migrations",
+      "earlier7933/385 acceptance"
+    ]
+  },
+  "preupgrade": {
+    "repository": "salmonumbrella/mailflow",
+    "sha": "6ef1a4deeb211f1817c30269350ef3fb0948785d",
+    "tree": "cfeb55655ad459ce0fc4b623ca3fbc134200f456",
+    "package_lock_sha256": "6543e04c27b0168917d04559d173d2e3efb5e1d955e760894600d6b80f0f1d70",
+    "required_env": "MAILFLOW_PREUPGRADE_BACKEND",
+    "dependency_resolution": "guarded legacy backend/node_modules symlink to exact primary locked install; no second install"
+  },
+  "commands": [
+    {
+      "id": "01-address",
+      "file": "backend/src/services/imapManager.flagAddress.test.js",
+      "expected_native_passes": 72,
+      "deadline_seconds": 600,
+      "test_timeout_ms": 30000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "R12-STORE-response-four",
+          "pattern": "does not confirm .* when selection drifts during the actual STORE response",
+          "count": 4
+        },
+        {
+          "id": "R12-invalidated-proof-two",
+          "pattern": "does not let invalidated old-epoch address proof cancel a legitimate moved",
+          "count": 2
+        },
+        {
+          "id": "historical-main-MOVE-migration-two",
+          "pattern": "refuses an unrelated legacy source UID after real preupgrade MOVE and migration",
+          "count": 2
+        }
+      ],
+      "closure_reason": "Changed address/move/reassert runtime and fixture model; retain all72 oracles including previous3timeouts and six pending controls.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapManager.flagAddress.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=30000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "02-retry",
+      "file": "backend/src/services/imapManager.retryReview.test.js",
+      "expected_native_passes": 39,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 30000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "retained-10000-bound",
+          "pattern": "bounds retained retries across expiry while terminal SQL is delayed",
+          "count": 1
+        }
+      ],
+      "closure_reason": "Changed selected-session stamp/clear closure and fake SQL contract; all39 required to revisit24 prior failures. Explicit20000ms capacity deadline is unchanged.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapManager.retryReview.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=30000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "03-deletion",
+      "file": "backend/src/routes/mail.deleteIdentity.test.js",
+      "expected_native_passes": 110,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "R16-zero-EXPUNGE-four",
+          "pattern": "bulk keeps local state when .* fails before any EXPUNGE, UIDPLUS=",
+          "count": 4
+        },
+        {
+          "id": "R16-recovery-array-eight",
+          "pattern": "bulk refuses malformed recovery UID array .* after a lost EXPUNGE reply",
+          "count": 8
+        },
+        {
+          "id": "R16-proof-classification-four",
+          "pattern": "fails closed before expunge on invalid or over-budget SEARCH result",
+          "count": 4
+        }
+      ],
+      "closure_reason": "Exactda55 delete/expunge and route fragments merged with bounded identity export; new12 and stronger4 assertions plus same-file protocol/identity controls.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/routes/mail.deleteIdentity.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "04-markall-service",
+      "file": "backend/src/services/imapMarkAllConfirmation.test.js",
+      "expected_native_passes": 42,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "markall-last-STORE-three",
+          "pattern": "does not certify the last STORE after epoch drift for (?:1|500|501) UIDs",
+          "count": 3
+        }
+      ],
+      "closure_reason": "Frozenf6 mark-all methods with final address core; preserve all39 previous service oracles plus three final-chunk controls.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapMarkAllConfirmation.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "05-markall-route",
+      "file": "backend/src/routes/mail.markAllConfirmation.test.js",
+      "expected_native_passes": 8,
+      "deadline_seconds": 240,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [],
+      "closure_reason": "Mark-all route is an assembled source fragment; its eight cases include six actualSQL version/count/hook controls.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/routes/mail.markAllConfirmation.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "06-stars",
+      "file": "backend/src/routes/mail.starCopiesReview.test.js",
+      "expected_native_passes": 41,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "star-pending-1",
+          "pattern": "fences\\ all\\ genuine\\ copies\\ when\\ a\\ later\\ bulk\\ no\\-op\\ targets\\ a\\ different\\ copy",
+          "count": 1
+        },
+        {
+          "id": "star-pending-2",
+          "pattern": "keeps\\ a\\ current\\ copy\\ intent\\ queued\\ while\\ a\\ newer\\ refused\\ address\\ proof\\ holds\\ it",
+          "count": 1
+        },
+        {
+          "id": "star-pending-3",
+          "pattern": "confirms\\ or\\ retains\\ a\\ same\\-value\\ pending\\ retry\\ when\\ a\\ repeated\\ bulk\\ request\\ appears\\ unchanged",
+          "count": 1
+        },
+        {
+          "id": "star-pending-4",
+          "pattern": "keeps\\ same\\-value\\ bulk\\ ownership\\ while\\ an\\ earlier\\ in\\-flight\\ STORE\\ fails",
+          "count": 1
+        }
+      ],
+      "closure_reason": "Frozen7a star/generic pushFlag plus selected-read/action-helper dependencies; all37 component cases plus four pending R13-R15 oracles.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/routes/mail.starCopiesReview.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "07-CAS-PG",
+      "file": "backend/src/services/imapManager.flagIntent.postgres.test.js",
+      "expected_native_passes": 16,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 30000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "actual-JSON-restore-next-intent",
+          "pattern": "allocates the next intent above JSON-restored bigint versions",
+          "count": 1
+        }
+      ],
+      "closure_reason": "Address replay/clear now has physical identity and xmin CAS predicates; retains actualSQL lifecycle counterproof and separate real backup/restore.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapManager.flagIntent.postgres.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=30000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    }
+  ],
+  "expected_native_passes": 328,
+  "enumeration_status": "SOURCE_DERIVED_UNRUN; native discovery/result required",
+  "required_pending_probes": {
+    "R12": 6,
+    "R16_new": 12,
+    "R16_strengthened_existing": 4,
+    "markall_final_STORE": 3,
+    "stars": 4
+  },
+  "not_claimed": [
+    "new source runtime acceptance",
+    "earlier7933/385 results for this source",
+    "full suite",
+    "full global migrations0076-0079",
+    "read same-value/defer followups",
+    "raw-consumer successor integration",
+    "snooze9ab integrated epoch acceptance",
+    "660 adoption",
+    "provider/live mailbox/performance/deployment"
+  ],
+  "postgres": {
+    "image": "postgres:16.15-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0",
+    "server_version_num": 160015,
+    "primary_database": "mailflow_flag_test_main",
+    "backup_database": "mailflow_flag_test_backup",
+    "role": "mailflow_fixture NOSUPERUSER NOCREATEDB NOCREATEROLE CONNECTION LIMIT2; owns both disposable databases",
+    "privileges": [
+      "CONNECT",
+      "TEMP",
+      "CREATE/DROP owned schema/table/sequence",
+      "SET search_path",
+      "xmin::text",
+      "gen_random_uuid()",
+      "bigint/timestamptz/jsonb",
+      "real writeBackup/restoreBackup"
+    ],
+    "environment": [
+      "MAILFLOW_TEST_DATABASE_URL",
+      "MAILFLOW_FLAG_BACKUP_TEST_DATABASE_URL",
+      "MAILFLOW_PREUPGRADE_BACKEND"
+    ],
+    "persistent_backup_objects": [
+      "email_accounts",
+      "folders",
+      "message_flag_intent_version_seq",
+      "messages",
+      "schema_migrations"
+    ],
+    "cleanup": "main DB must have no leftover custom schemas/public relations/backends per command; backup exact known fixture inventory audited and both discarded with owned tmpfs service"
+  },
+  "timeout_policy": "Preserve historical retry/address/CAS general testTimeout30000, other files default5000, and explicit per-test20000. No assertion/limit/timeout weakening. Outer bounded file deadline is not an oracle timeout.",
+  "failure_policy": "Run every native test in each selected complete file; no bail, no skips/todo/pending accepted. Retain failure reports, continue other files only after source/process/SQL cleanup audit. Any failed/missing/skipped/timeout case makes final status failed_or_incomplete."
+}

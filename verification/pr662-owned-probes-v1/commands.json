@@ -1,0 +1,248 @@
+[
+  {
+    "id": "01-address",
+    "file": "backend/src/services/imapManager.flagAddress.test.js",
+    "expected_native_passes": 72,
+    "deadline_seconds": 600,
+    "test_timeout_ms": 30000,
+    "database": "mailflow_flag_test_main",
+    "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+    "application_name_prefix": "pr662-",
+    "required_case_patterns": [
+      {
+        "id": "R12-STORE-response-four",
+        "pattern": "does not confirm .* when selection drifts during the actual STORE response",
+        "count": 4
+      },
+      {
+        "id": "R12-invalidated-proof-two",
+        "pattern": "does not let invalidated old-epoch address proof cancel a legitimate moved",
+        "count": 2
+      },
+      {
+        "id": "historical-main-MOVE-migration-two",
+        "pattern": "refuses an unrelated legacy source UID after real preupgrade MOVE and migration",
+        "count": 2
+      }
+    ],
+    "closure_reason": "Changed address/move/reassert runtime and fixture model; retain all72 oracles including previous3timeouts and six pending controls.",
+    "argv_template": [
+      "node",
+      "--max-old-space-size=512",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/services/imapManager.flagAddress.test.js",
+      "--maxWorkers=1",
+      "--no-file-parallelism",
+      "--testTimeout=30000",
+      "--no-cache",
+      "--reporter=json",
+      "--outputFile=<private-native-report>"
+    ]
+  },
+  {
+    "id": "02-retry",
+    "file": "backend/src/services/imapManager.retryReview.test.js",
+    "expected_native_passes": 39,
+    "deadline_seconds": 300,
+    "test_timeout_ms": 30000,
+    "database": "mailflow_flag_test_main",
+    "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+    "application_name_prefix": "pr662-",
+    "required_case_patterns": [
+      {
+        "id": "retained-10000-bound",
+        "pattern": "bounds retained retries across expiry while terminal SQL is delayed",
+        "count": 1
+      }
+    ],
+    "closure_reason": "Changed selected-session stamp/clear closure and fake SQL contract; all39 required to revisit24 prior failures. Explicit20000ms capacity deadline is unchanged.",
+    "argv_template": [
+      "node",
+      "--max-old-space-size=512",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/services/imapManager.retryReview.test.js",
+      "--maxWorkers=1",
+      "--no-file-parallelism",
+      "--testTimeout=30000",
+      "--no-cache",
+      "--reporter=json",
+      "--outputFile=<private-native-report>"
+    ]
+  },
+  {
+    "id": "03-deletion",
+    "file": "backend/src/routes/mail.deleteIdentity.test.js",
+    "expected_native_passes": 110,
+    "deadline_seconds": 300,
+    "test_timeout_ms": 5000,
+    "database": "mailflow_flag_test_main",
+    "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+    "application_name_prefix": "pr662-",
+    "required_case_patterns": [
+      {
+        "id": "R16-zero-EXPUNGE-four",
+        "pattern": "bulk keeps local state when .* fails before any EXPUNGE, UIDPLUS=",
+        "count": 4
+      },
+      {
+        "id": "R16-recovery-array-eight",
+        "pattern": "bulk refuses malformed recovery UID array .* after a lost EXPUNGE reply",
+        "count": 8
+      },
+      {
+        "id": "R16-proof-classification-four",
+        "pattern": "fails closed before expunge on invalid or over-budget SEARCH result",
+        "count": 4
+      }
+    ],
+    "closure_reason": "Exactda55 delete/expunge and route fragments merged with bounded identity export; new12 and stronger4 assertions plus same-file protocol/identity controls.",
+    "argv_template": [
+      "node",
+      "--max-old-space-size=512",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/routes/mail.deleteIdentity.test.js",
+      "--maxWorkers=1",
+      "--no-file-parallelism",
+      "--testTimeout=5000",
+      "--no-cache",
+      "--reporter=json",
+      "--outputFile=<private-native-report>"
+    ]
+  },
+  {
+    "id": "04-markall-service",
+    "file": "backend/src/services/imapMarkAllConfirmation.test.js",
+    "expected_native_passes": 42,
+    "deadline_seconds": 300,
+    "test_timeout_ms": 5000,
+    "database": "mailflow_flag_test_main",
+    "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+    "application_name_prefix": "pr662-",
+    "required_case_patterns": [
+      {
+        "id": "markall-last-STORE-three",
+        "pattern": "does not certify the last STORE after epoch drift for (?:1|500|501) UIDs",
+        "count": 3
+      }
+    ],
+    "closure_reason": "Frozenf6 mark-all methods with final address core; preserve all39 previous service oracles plus three final-chunk controls.",
+    "argv_template": [
+      "node",
+      "--max-old-space-size=512",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/services/imapMarkAllConfirmation.test.js",
+      "--maxWorkers=1",
+      "--no-file-parallelism",
+      "--testTimeout=5000",
+      "--no-cache",
+      "--reporter=json",
+      "--outputFile=<private-native-report>"
+    ]
+  },
+  {
+    "id": "05-markall-route",
+    "file": "backend/src/routes/mail.markAllConfirmation.test.js",
+    "expected_native_passes": 8,
+    "deadline_seconds": 240,
+    "test_timeout_ms": 5000,
+    "database": "mailflow_flag_test_main",
+    "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+    "application_name_prefix": "pr662-",
+    "required_case_patterns": [],
+    "closure_reason": "Mark-all route is an assembled source fragment; its eight cases include six actualSQL version/count/hook controls.",
+    "argv_template": [
+      "node",
+      "--max-old-space-size=512",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/routes/mail.markAllConfirmation.test.js",
+      "--maxWorkers=1",
+      "--no-file-parallelism",
+      "--testTimeout=5000",
+      "--no-cache",
+      "--reporter=json",
+      "--outputFile=<private-native-report>"
+    ]
+  },
+  {
+    "id": "06-stars",
+    "file": "backend/src/routes/mail.starCopiesReview.test.js",
+    "expected_native_passes": 41,
+    "deadline_seconds": 300,
+    "test_timeout_ms": 5000,
+    "database": "mailflow_flag_test_main",
+    "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+    "application_name_prefix": "pr662-",
+    "required_case_patterns": [
+      {
+        "id": "star-pending-1",
+        "pattern": "fences\\ all\\ genuine\\ copies\\ when\\ a\\ later\\ bulk\\ no\\-op\\ targets\\ a\\ different\\ copy",
+        "count": 1
+      },
+      {
+        "id": "star-pending-2",
+        "pattern": "keeps\\ a\\ current\\ copy\\ intent\\ queued\\ while\\ a\\ newer\\ refused\\ address\\ proof\\ holds\\ it",
+        "count": 1
+      },
+      {
+        "id": "star-pending-3",
+        "pattern": "confirms\\ or\\ retains\\ a\\ same\\-value\\ pending\\ retry\\ when\\ a\\ repeated\\ bulk\\ request\\ appears\\ unchanged",
+        "count": 1
+      },
+      {
+        "id": "star-pending-4",
+        "pattern": "keeps\\ same\\-value\\ bulk\\ ownership\\ while\\ an\\ earlier\\ in\\-flight\\ STORE\\ fails",
+        "count": 1
+      }
+    ],
+    "closure_reason": "Frozen7a star/generic pushFlag plus selected-read/action-helper dependencies; all37 component cases plus four pending R13-R15 oracles.",
+    "argv_template": [
+      "node",
+      "--max-old-space-size=512",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/routes/mail.starCopiesReview.test.js",
+      "--maxWorkers=1",
+      "--no-file-parallelism",
+      "--testTimeout=5000",
+      "--no-cache",
+      "--reporter=json",
+      "--outputFile=<private-native-report>"
+    ]
+  },
+  {
+    "id": "07-CAS-PG",
+    "file": "backend/src/services/imapManager.flagIntent.postgres.test.js",
+    "expected_native_passes": 16,
+    "deadline_seconds": 300,
+    "test_timeout_ms": 30000,
+    "database": "mailflow_flag_test_main",
+    "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+    "application_name_prefix": "pr662-",
+    "required_case_patterns": [
+      {
+        "id": "actual-JSON-restore-next-intent",
+        "pattern": "allocates the next intent above JSON-restored bigint versions",
+        "count": 1
+      }
+    ],
+    "closure_reason": "Address replay/clear now has physical identity and xmin CAS predicates; retains actualSQL lifecycle counterproof and separate real backup/restore.",
+    "argv_template": [
+      "node",
+      "--max-old-space-size=512",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/services/imapManager.flagIntent.postgres.test.js",
+      "--maxWorkers=1",
+      "--no-file-parallelism",
+      "--testTimeout=30000",
+      "--no-cache",
+      "--reporter=json",
+      "--outputFile=<private-native-report>"
+    ]
+  }
+]
