@@ -1,0 +1,35 @@
+{
+  "allModesPreserved": true,
+  "allUnchangedFilesRehashedAgainstBase": true,
+  "archiveExtracted": false,
+  "baseBundleSha256": "2b46894a8a49be67b36dbe828b620b1eb3ae9e3a9b3e7994582733d40143a8b6",
+  "basePacketManifestSha256": "f5a073143dc5d7872f25d102a3ef8a613d0941493ccd399c0af700c5d10cee45",
+  "changedMemberBytes": [
+    "artifacts/2026-10-21-same-app-orchestrator/root-source-v8-accepted.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/bootstrap.mjs",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/files.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/freeze.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/runtime.mjs"
+  ],
+  "replacementMembers": [
+    "artifacts/2026-10-21-same-app-orchestrator/root-source-v8-accepted.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/README.md",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/bindings.py",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/bootstrap.mjs",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/files.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/fixture-dependency-reference.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/freeze.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/metadata.test.mjs",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/run.py",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/runtime.mjs",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/static-validation.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/support.py"
+  ],
+  "rootSourceAcceptanceSha256": "3fe0e3b22c5f739446e1559ca66814fa5da7e949cfe35ed41f69c440a238bef6",
+  "runtimeExecuted": false,
+  "sourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+  "sourceTree": "726385949110b2d1eef6168fa5765942136b955e",
+  "sourceV8ManifestSha256": "44f26228faf45d1c88eee5cb56c7166572bb764a478162e667a0903b2f20b4ed",
+  "unchangedLinks": 85,
+  "unchangedRegularFiles": 34391
+}

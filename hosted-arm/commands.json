@@ -1,0 +1,22 @@
+{
+  "sourcePreparationOnly": true,
+  "proposedBranch": "verification/ci-mailflow-arm-v8",
+  "repository": "salmonumbrella/mailflow",
+  "runner": "ubuntu-24.04-arm",
+  "sourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+  "sourceTree": "726385949110b2d1eef6168fa5765942136b955e",
+  "bundle": "Pinned chunks, no npm or registry install; app via pinned checkout.",
+  "workflowCommands": [
+    "python3 harness/hosted-arm/hosted.py --verify-only --state \"$RUNNER_TEMP/mailflow-arm-state\"",
+    "python3 harness/hosted-arm/hosted.py --execute-reviewed --source \"$GITHUB_WORKSPACE/app\" --state \"$RUNNER_TEMP/mailflow-arm-state\"",
+    "python3 harness/hosted-arm/hosted.py --cleanup-only --state \"$RUNNER_TEMP/mailflow-arm-state\""
+  ],
+  "runAttempt": 1,
+  "runtimeReleased": false,
+  "missingExecutionInputs": [
+    "Root review of this exact bundle/adapter and separate one-run runtime grant",
+    "Upload new content-addressed chunks to EXISTING release419720320 only; no release creation or old-asset replacement"
+  ],
+  "noAdditionalFrozenDependencyInputMissing": true,
+  "payloadTransport": "Fresh content-addressed bundle.part-* names, proposed additions to existing verification-arm-inputs-2026-10-21-v5; no uploads performed and no dependency payloads in Git."
+}

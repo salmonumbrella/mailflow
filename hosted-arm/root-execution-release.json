@@ -1,0 +1,29 @@
+{
+  "status": "ROOT_RELEASED_ONE_CHANGED_SOURCE_V8_HOSTED_ARM_DIAGNOSTIC",
+  "sourceManifestSha256": "44f26228faf45d1c88eee5cb56c7166572bb764a478162e667a0903b2f20b4ed",
+  "bundleSha256": "60d0a11d7eb9a1ecf8418ac88ff20016eb229d1c28ac5b4e50b4c90af9e33ee6",
+  "adapterSha256": "f57b60dda7b0f96794f64eece22b2e12f202a8e2e731bd27f0bb2aa922c571c8",
+  "rootBundleReviewSha256": "0caf31657431e2594a1ec9846d96d567f696bc4e0461067372cf398fda34065c",
+  "policySha256": "0cf367831e101c7b5f913f13d779aca1dbc2703df41ea34300c96af50c063881",
+  "workflowSha256": "0bb94fe2e21f596803b5aaabb0bfecd73ef08965b224f3db6a67bd680676f711",
+  "publisher": "mailflow-setup only",
+  "branch": "verification/ci-mailflow-arm-v8",
+  "workflowPath": ".github/workflows/ci-mailflow-arm-v8.yml",
+  "existingReleaseId": 419720320,
+  "existingReleaseTag": "verification-arm-inputs-2026-10-21-v5",
+  "authorizedAssetNames": [
+    "bundle.part-000-7169e1fba14041c27affa0f89e06c286affcd9db43e8f039490f276656289312",
+    "bundle.part-001-ac929023303d33d06cda7281e8cf7a5f53a4baba23c62f908b5a617e0bb40964",
+    "bundle.part-002-6401fba9634487fccf75865352cc12fd98d4b7c8f286c291140e9977e099a527",
+    "bundle.part-003-db398eff8a2542b293b511411f3fd162b0c97d455e347484290f6d7343bb2dc9",
+    "bundle.part-004-a973dbf4a06e22d7be30ff4cacdc9fd744097a0c3b684aaf67363e5f7d7b554e"
+  ],
+  "conditions": [
+    "Inspect exact releaseid/tag/currenttarget and gh+Git publicsalmonumbrella identity beforewrites; upload onlynew5contentaddressedassets with NOclobber and verifyactualGHdigests/sizes; nevercreatepublishrelease oroverwriteexistingassets",
+    "Normalhookpublication exactfinalmanifestpayloads plus workflowduplicate, namedverificationbranch only; ensure onlyintendedworkfloweligible",
+    "One dedicated ubuntu24.04ARM attempt; job40min/controller20min/observedlease30min, existingCPU/memory/images/depsunchanged, freshresourcepreflightrequired",
+    "Runrealorchestratoronce, preservesemanticgates/failure/readiness/redaction/ownedcleanup; no automaticunchangedretry",
+    "Supplementaloriginal7614/driver007 diagnostic; notlatestv36/fullMini/provider/browser/108k/performanceacceptance"
+  ],
+  "runtimeExecuted": false
+}

@@ -1,0 +1,30 @@
+{
+  "task": "vault#5a6k",
+  "status": "FILE_ONLY_SOURCE_V8_BUNDLE_ADAPTER_PROPOSAL_NOT_RUNTIME_RELEASED",
+  "sourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+  "sourceTree": "726385949110b2d1eef6168fa5765942136b955e",
+  "sourceV8ManifestSha256": "44f26228faf45d1c88eee5cb56c7166572bb764a478162e667a0903b2f20b4ed",
+  "rootSourceReviewSha256": "3fe0e3b22c5f739446e1559ca66814fa5da7e949cfe35ed41f69c440a238bef6",
+  "driverSourceVerificationSha256": "1120a40957c99f02b81eefb2f0d559fe98f7237d6a8c62458d883cb72ea513ba",
+  "baseAdapterSha256": "fe310cdcefbd9f70f5e0c03bc253e90cfcf69c9318f6940a15fb1beb3ae797fd",
+  "adapterSha256": "f57b60dda7b0f96794f64eece22b2e12f202a8e2e731bd27f0bb2aa922c571c8",
+  "bundleSha256": "60d0a11d7eb9a1ecf8418ac88ff20016eb229d1c28ac5b4e50b4c90af9e33ee6",
+  "existingReleaseId": 419720320,
+  "existingReleaseTag": "verification-arm-inputs-2026-10-21-v5",
+  "createRelease": false,
+  "overwriteAssets": false,
+  "uploadsPerformed": false,
+  "githubWritesPerformed": false,
+  "runtimeReleased": false,
+  "runtimeExecuted": false,
+  "optionalV6Promoted": false,
+  "previousNativeFailure": 39630956210,
+  "historicalBlockedPredicate": "UNOBSERVED",
+  "supplementalOnly": true,
+  "Mini108kProviderBrowserPerformanceAccepted": false,
+  "remainingInputs": [
+    "Root review of exact proposal",
+    "Later explicit additions of the new content-addressed chunks to existing release419720320",
+    "Separate exact one-run runtime grant and normal-hook publication"
+  ]
+}

@@ -1,0 +1,70 @@
+name: Proposed ARM small v8 bootstrap observations
+on:
+  push:
+    branches: [verification/ci-mailflow-arm-v8]
+    paths:
+      - .github/workflows/ci-mailflow-arm-v8.yml
+      - hosted-arm/**
+permissions:
+  contents: read
+concurrency:
+  group: mailflow-arm-v8-small
+  cancel-in-progress: false
+jobs:
+  actual:
+    if: github.repository == 'salmonumbrella/mailflow' && github.run_attempt == 1
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - name: Exact published harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
+      - name: Fetch exact dependency payloads from verification release
+        env:
+          GH_TOKEN: ''
+        run: |
+          python3 - <<'PYPAYLOAD'
+          import hashlib, json, pathlib, urllib.request
+          root = pathlib.Path('harness/hosted-arm')
+          receipt = json.loads((root/'bundle-receipt.json').read_text())
+          origin = 'https://github.com/salmonumbrella/mailflow/releases/download/verification-arm-inputs-2026-10-21-v5/'
+          for name, item in receipt['chunks'].items():
+              assert pathlib.Path(name).name == name and name.startswith('bundle.part-')
+              request = urllib.request.Request(origin+name, headers={'User-Agent':'OpenAI File Downloader, XaiImageApiFetch/1.0'})
+              digest = hashlib.sha256()
+              size = 0
+              with urllib.request.urlopen(request, timeout=120) as response, (root/name).open('xb') as output:
+                  for block in iter(lambda: response.read(1048576), b''):
+                      size += len(block)
+                      assert size <= item['bytes']
+                      digest.update(block)
+                      output.write(block)
+              assert size == item['bytes'] and digest.hexdigest() == item['sha256']
+          PYPAYLOAD
+      - name: Exact reviewed application
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 76146779946849581b5b26dd35933ebd00fe847d
+          path: app
+          persist-credentials: false
+      - name: Full bundle hashes, no daemon
+        run: python3 harness/hosted-arm/hosted.py --verify-only --state "$RUNNER_TEMP/mailflow-arm-state"
+      - name: Observed preflight, expiring lease, actual unchanged driver
+        run: python3 harness/hosted-arm/hosted.py --execute-reviewed --source "$GITHUB_WORKSPACE/app" --state "$RUNNER_TEMP/mailflow-arm-state"
+      - name: Exact owned cleanup, including interrupted controller
+        if: always()
+        run: python3 harness/hosted-arm/hosted.py --cleanup-only --state "$RUNNER_TEMP/mailflow-arm-state"
+      - name: Sanitized actual reports, including failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: same-app-arm-small-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/mailflow-arm-state/result.json
+            ${{ runner.temp }}/mailflow-arm-state/preflight.json
+            ${{ runner.temp }}/mailflow-arm-state/fallback-cleanup-*.json

@@ -1,0 +1,25 @@
+{
+  "task": "vault#5a6k",
+  "runtimeReleased": true,
+  "mode": "small",
+  "sourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+  "sourceTree": "726385949110b2d1eef6168fa5765942136b955e",
+  "orchestratorManifestSha256": "44f26228faf45d1c88eee5cb56c7166572bb764a478162e667a0903b2f20b4ed",
+  "driverSourceVerificationSha256": "1120a40957c99f02b81eefb2f0d559fe98f7237d6a8c62458d883cb72ea513ba",
+  "leaseSeconds": 1800,
+  "deadlineMs": 1200000,
+  "limits": {
+    "nodeCpus": 2,
+    "pgCpus": 1,
+    "redisCpus": 0.25,
+    "maxTotalCpus": 3.25,
+    "nodeMemoryMiB": 6144,
+    "pgMemoryMiB": 2048,
+    "redisMemoryMiB": 256,
+    "fixtureHeapMiB": 512,
+    "tmpMiB": 512,
+    "minimumFreeDiskBytes": 4294967296
+  },
+  "acceptance": "Supplemental Linux ARM development-mode same-app component proof only. Mini108k, production, provider, browser and performance remain open.",
+  "rootReview": "Root verified actual34403regular bytes/modes+85links and all5chunk hashes from actualarchive. Exactv8 source accepted by existingOpus and Root. Adapter differs fe310only source namespace/manifest/Rootreceipt. One changed-source dedicated ARM diagnostic with original7614app/driver007, unchangedlimits/deadline; historicalbootstrapcauseUNPROVEN."
+}

@@ -1,0 +1,28 @@
+{
+  "status": "ROOT_VERIFIED_SOURCE_V8_ARM_BUNDLE_ADAPTER_NOT_RUNTIME_RELEASED",
+  "archiveSha256": "60d0a11d7eb9a1ecf8418ac88ff20016eb229d1c28ac5b4e50b4c90af9e33ee6",
+  "regularFileBytesModesVerified": 34403,
+  "linksVerified": 85,
+  "chunksVerifiedFromActualArchive": {
+    "bundle.part-000-7169e1fba14041c27affa0f89e06c286affcd9db43e8f039490f276656289312": "7169e1fba14041c27affa0f89e06c286affcd9db43e8f039490f276656289312",
+    "bundle.part-001-ac929023303d33d06cda7281e8cf7a5f53a4baba23c62f908b5a617e0bb40964": "ac929023303d33d06cda7281e8cf7a5f53a4baba23c62f908b5a617e0bb40964",
+    "bundle.part-002-6401fba9634487fccf75865352cc12fd98d4b7c8f286c291140e9977e099a527": "6401fba9634487fccf75865352cc12fd98d4b7c8f286c291140e9977e099a527",
+    "bundle.part-003-db398eff8a2542b293b511411f3fd162b0c97d455e347484290f6d7343bb2dc9": "db398eff8a2542b293b511411f3fd162b0c97d455e347484290f6d7343bb2dc9",
+    "bundle.part-004-a973dbf4a06e22d7be30ff4cacdc9fd744097a0c3b684aaf67363e5f7d7b554e": "a973dbf4a06e22d7be30ff4cacdc9fd744097a0c3b684aaf67363e5f7d7b554e"
+  },
+  "allAppDriverWireDependenciesUnchanged": true,
+  "changedMemberBytes": [
+    "artifacts/2026-10-21-same-app-orchestrator/root-source-v8-accepted.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/bootstrap.mjs",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/files.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/freeze.json",
+    "artifacts/2026-10-21-same-app-orchestrator/source-v8/runtime.mjs"
+  ],
+  "source9PayloadsAndFreezeRootReceiptMatch": true,
+  "adapterReverseToAcceptedFe310Exact": true,
+  "workflowActionlintPythonAST": "PASS",
+  "sourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+  "driverVerification": "1120a40957c99f02b81eefb2f0d559fe98f7237d6a8c62458d883cb72ea513ba",
+  "scope": "Supplemental changed bootstrap diagnostic on original7614, notlatestfeature/Mini/provider/browser/108k/performance",
+  "runtimeReleased": false
+}

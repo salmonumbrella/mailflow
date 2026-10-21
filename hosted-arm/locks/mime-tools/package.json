@@ -1,0 +1,8 @@
+{
+  "name": "mailflow-acceptance-mime-tools",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "mailparser": "3.10.0"
+  }
+}
