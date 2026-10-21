@@ -22,8 +22,8 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - label: mailflow-integrated-v15
-            source_sha: 2363c2ec5978ba5454e26e9b3ba7910c19c68757
+          - label: mailflow-integrated-corrective-v17
+            source_sha: abc5e1979dbcab5da15494b90d1ff713f2026d76
     steps:
       - uses: actions/checkout@v6
         with:
