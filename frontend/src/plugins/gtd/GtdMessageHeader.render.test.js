@@ -54,7 +54,7 @@ globalThis.__VITE_ENV__ = { MODE: 'test', DEV: false, PROD: true };
 
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
-const { patchGtdMetadata, clearGtdMetadata, tickGtdMetadataClock } = await import('./metadataStore.js');
+const { clearGtdMetadata, tickGtdMetadataClock } = await import('./metadataStore.js');
 
 test('runtime fetches GTD search results even for accounts excluded from unified inbox', async () => {
   const { useStore } = await import('../../store/index.js');
