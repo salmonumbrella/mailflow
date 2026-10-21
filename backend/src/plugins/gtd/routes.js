@@ -9,6 +9,12 @@ import { applyLabel, hasMessageCopy, resolveLabelCopyUid, removeExactLabelCopy, 
 const router = Router();
 router.use(requireAuth);
 
+function rejectArchiveResidue(res, message) {
+  if (message.is_archive_residue !== true) return false;
+  res.status(409).json({ error: 'This action is not supported for archive residue', code: 'archive-residue-read-only' });
+  return true;
+}
+
 // Message/account ids are always UUIDs; pre-validate before any DB lookup so a malformed
 // id is a clean 400 rather than a parametrized query that just finds nothing (404) or a
 // driver cast error. Same idiom + regex as mail.js.
@@ -148,6 +154,7 @@ router.post('/classify', async (req, res) => {
 
   const msg = await loadOwnedMessage(req.session.userId, messageId);
   if (!msg) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, msg)) return;
 
   const { enabled, folders } = await getGtdConfig(msg.account_id);
   const target = classifyTarget({ enabled, folders, state });
@@ -163,6 +170,8 @@ router.post('/classify', async (req, res) => {
     const oldStateFolders = new Set(Object.entries(folders)
       .filter(([otherState, folder]) => otherState !== state && folder !== toFolder)
       .map(([, folder]) => folder));
+    // Residue exists only in special-use All Mail, never a GTD state folder.
+    // This folder filter excludes it even though candidates project no flag.
     const threadCopies = msg.thread_key
       ? await getMessagesByThreadKeys(msg.account_id, [msg.thread_key])
       : [];
@@ -261,6 +270,7 @@ router.post('/classify/undo', async (req, res) => {
 
   const msg = await loadOwnedMessage(req.session.userId, messageId);
   if (!msg) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, msg)) return;
 
   const { enabled, folders } = await getGtdConfig(msg.account_id);
   const target = classifyTarget({ enabled, folders, state });
@@ -319,6 +329,7 @@ router.delete('/classify', async (req, res) => {
 
   const msg = await loadOwnedMessage(req.session.userId, messageId);
   if (!msg) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, msg)) return;
 
   const { enabled, folders } = await getGtdConfig(msg.account_id);
   const target = classifyTarget({ enabled, folders, state });
@@ -365,6 +376,7 @@ router.post('/done', async (req, res) => {
 
   const msg = await loadOwnedMessage(req.session.userId, id);
   if (!msg) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, msg)) return;
   if (!msg.message_id) return res.status(400).json({ error: 'Message has no Message-ID — cannot mark done' });
 
   const { enabled, folders } = await getGtdConfig(msg.account_id);
@@ -401,6 +413,8 @@ router.post('/done', async (req, res) => {
   // would 404 that retry and orphan the copies not yet stripped, so keep it alive until every
   // other copy is gone. (msg.folder is absent from target.folders in the inbox 'all' case —
   // the acted INBOX row is never stripped anyway — so the ordering is a no-op there.)
+  // Residue is All Mail-only. Done targets configured GTD label folders and
+  // INBOX, so an ordinary thread's archived residue sibling is left in place.
   const stripOrder = [
     ...target.folders.filter(f => f !== msg.folder),
     ...target.folders.filter(f => f === msg.folder),

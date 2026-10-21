@@ -1,6 +1,7 @@
 import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
-import { bootstrapGmailIdentity, isBackfillFolder } from './archiveCoverage.js';
-import { recordBackgroundRefusal } from './backgroundDownloadBudget.js';
+import { bootstrapGmailIdentity, isBackfillFolder, withGmailIdentityWrite, assertNoArchiveResidue,
+  sanitizeArchiveMetadata, runArchiveCoverageBatch as scanArchiveCoverageBatch } from './archiveCoverage.js';
+import { recordBackgroundRefusal, reserveBackgroundBudget } from './backgroundDownloadBudget.js';
 import { extractImapError } from './imapError.js';
 import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
 import { ImapFlow } from 'imapflow';
@@ -19,6 +20,7 @@ import { decrypt } from './encryption.js';
 import { sendPushToUser } from './pushNotifications.js';
 import { redactEmail } from '../utils/redact.js';
 import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
+import { sanitizeStr } from '../utils/sanitizeStr.js';
 import { getAccountAddresses } from './mailAccess.js';
 import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
@@ -1486,8 +1488,10 @@ export function relocateExemptGuard(exemptFolders, paramIndex) {
 // (RETURNING is empty if a sync beat us to it), and unread only when the copy is
 // unread. Extracted (like relocateExemptGuard) so the DB behavior is unit-testable
 // without a live IMAP pool.
-export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid) {
-  const res = await query(`
+export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid, proof = {}) {
+  const source = Object.hasOwn(proof, 'providerMsgid') ? { provider_msgid: proof.providerMsgid }
+    : (await query('SELECT provider_msgid FROM messages WHERE account_id=$1 AND folder=$2 AND uid=$3', [accountId, fromFolder, uid])).rows[0];
+  const res = await withGmailIdentityWrite(accountId, [source?.provider_msgid], db => db.query(`
     INSERT INTO messages (
       account_id, uid, folder, message_id, subject,
       from_name, from_email, to_addresses, cc_addresses,
@@ -1511,9 +1515,14 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid, is_archive_residue
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
+      AND provider_msgid IS NOT DISTINCT FROM $6::text AND NOT is_archive_residue
     ON CONFLICT (account_id, uid, folder) DO NOTHING
     RETURNING id, is_read
-  `, [accountId, fromFolder, uid, newUid, toFolder]);
+  `, [accountId, fromFolder, uid, newUid, toFolder, source?.provider_msgid || null]), {
+    folder: source?.provider_msgid ? toFolder : undefined, uidValidity: proof.destinationUidValidity,
+    source: source?.provider_msgid ? { folder: fromFolder, uid, providerMsgid: source.provider_msgid,
+      uidValidity: proof.sourceUidValidity } : undefined,
+  });
   const row = res.rows[0];
   if (row) {
     adjustFolderCounts(accountId, toFolder, 1, row.is_read ? 0 : 1);
@@ -1679,10 +1688,17 @@ export async function collectRelocateExemptFolders(account) {
   return [...new Set(sets.flat().filter(Boolean))];
 }
 
-// Strip null bytes that PostgreSQL's UTF-8 encoding rejects (some emails contain them)
-function sanitizeStr(str) {
-  if (typeof str !== 'string') return str;
-  return str.replace(/\0/g, '');
+// Shared with archive metadata preparation so malformed headers cannot stall a batch.
+export async function prepareArchiveRecord(account, raw, folder) {
+  const parsed = await parseMessage(raw);
+  enrichParsedMetadata(parsed, { accountEmail: account.email_address, accountName: account.name,
+    senderName: account.sender_name, folderPath: folder, sentFolderPath: account.folder_mappings?.sent });
+  // Enrichment may decode encoded header fallbacks. Sanitize its final output
+  // before threading can bind any of that text to PostgreSQL.
+  const safe = sanitizeArchiveMetadata(parsed);
+  safe.threadId = await computeThreadId(account.id, safe.messageId, safe.inReplyTo, safe.references, safe.subject,
+    { fromEmail: safe.fromEmail, to: safe.to, cc: safe.cc, own: account.email_address, isBulk: safe.isBulk });
+  return safe;
 }
 
 // Parse RFC 5322 References header into an ordered array of angle-bracketed Message-IDs.
@@ -3716,6 +3732,8 @@ export class ImapManager {
           );
         });
       }
+      if (syncProfile.labelStore) setImmediate(() => this.runArchiveCoverageBatch(syncAccount).catch(err =>
+        console.warn('Archive coverage:', extractImapError(err))));
     } catch (err) {
       const detail = extractImapError(err);
       console.error(`Sync error for ${logAccount(account)}:`, detail);
@@ -3951,6 +3969,7 @@ export class ImapManager {
   // use to refresh a label folder without disturbing the persistent IDLE sync client. Testable:
   // a plugin tick can mock this away instead of exercising a live IMAP pool.
   async syncFolderViaPool(account, folder) {
+    if (await this._isArchiveFolder(account, folder)) return this.runArchiveCoverageBatch(account);
     return withFreshClient(account, (client) =>
       this.syncMessages(account, client, folder, 100, false, true));
   }
@@ -4085,6 +4104,10 @@ export class ImapManager {
   }
 
   async _refreshObservedFolder(account, path, observed) {
+    if (await this._isArchiveFolder(account, path)) {
+      const result = await this.runArchiveCoverageBatch(account);
+      return result != null;
+    }
     let complete = false;
     let missing = false;
     let expired = false;
@@ -4404,6 +4427,7 @@ export class ImapManager {
   }
 
   async syncMessages(account, client, folder = 'INBOX', limit = 50, prefetchBody = true, noBodyParts = false) {
+    if (await this._isArchiveFolder(account, folder)) return this.runArchiveCoverageBatch(account);
     const provider = providerProfile(account);
 
     try {
@@ -4579,7 +4603,7 @@ export class ImapManager {
               } catch { /* non-fatal — leave category NULL */ }
             }
 
-            const result = await query(`
+            const result = await withGmailIdentityWrite(account.id, [provider.labelStore ? parsed.providerMsgid : null], db => db.query(`
               INSERT INTO messages (
                 account_id, uid, folder, message_id, subject,
                 from_name, from_email, to_addresses, cc_addresses,
@@ -4671,7 +4695,7 @@ export class ImapManager {
               sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
               sanitizeStr(parsed.forwardedFromName), sanitizeStr(parsed.forwardedFromEmail), sanitizeStr(parsed.forwardedVia),
               providerProfile(account).labelStore ? parsed.providerMsgid || null : null,
-            ]);
+            ]), { folder: provider.labelStore ? folder : undefined, uidValidity: client.mailbox?.uidValidity });
             if (result.rows[0]?.is_new) {
               insertedCount++;
               // Inbox-ingest candidate: any newly-inserted INBOX row, read OR unread (read state
@@ -5073,6 +5097,7 @@ export class ImapManager {
   //   4. For non-Gmail providers also store body_html/body_text during backfill so
   //      clicking an old email never needs a live IMAP round-trip.
   async backfillMessages(account, folder = 'INBOX') {
+    if (await this._isArchiveFolder(account, folder)) return this.runArchiveCoverageBatch(account);
     const backfillKey = `${account.id}:${folder}`;
     if (this.backfillRunning.has(backfillKey)) return;
     // Backfill opens its own login per run, so it honors the secondary backoff like the
@@ -5333,7 +5358,7 @@ export class ImapManager {
                   } catch { /* non-fatal */ }
                 }
 
-                const bfInsert = await query(`
+                const bfInsert = await withGmailIdentityWrite(account.id, [cfg.labelStore ? parsed.providerMsgid : null], db => db.query(`
                   INSERT INTO messages (
                     account_id, uid, folder, message_id, subject,
                     from_name, from_email, to_addresses, cc_addresses,
@@ -5423,7 +5448,7 @@ export class ImapManager {
                   sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
                   sanitizeStr(parsed.forwardedFromName), sanitizeStr(parsed.forwardedFromEmail), sanitizeStr(parsed.forwardedVia),
                   providerProfile(account).labelStore ? parsed.providerMsgid || null : null,
-                ]);
+                ]), { folder: cfg.labelStore ? folder : undefined, uidValidity: bfUidValidity });
                 backfilledRows++;
                 // v0.2 antispam: classify genuinely-new rows — the same hook the
                 // sync path uses, so a manual reindex (or the initial population
@@ -5680,11 +5705,12 @@ export class ImapManager {
 
       // Then all other known folders (discovered at connect time by syncFolders)
       const folderResult = await query(
-        "SELECT path FROM folders WHERE account_id = $1 AND path != 'INBOX' ORDER BY path",
+        "SELECT path,special_use FROM folders WHERE account_id = $1 AND path != 'INBOX' ORDER BY path",
         [account.id]
       );
 
-      for (const { path } of folderResult.rows) {
+      for (const { path, special_use } of folderResult.rows) {
+        if (profile.labelStore && special_use === '\\All') continue;
         if (!isBackfillFolder(path, profile)) continue;
         await this.backfillMessages(account, path).catch(err =>
           console.warn(`Backfill skipped ${logAccount(account)}/${path}: ${err.message}`)
@@ -5701,6 +5727,7 @@ export class ImapManager {
       const canLogIn = !this._secondaryConnectBlocked(account.id)
         && (await query('SELECT id FROM email_accounts WHERE id = $1 AND enabled', [account.id])).rows.length > 0;
       if (canLogIn) {
+        this.runArchiveCoverageBatch(account).catch(err => console.warn('Archive coverage:', extractImapError(err)));
         // Both run as background jobs after the complete signal — neither should block the UI.
         this.refreshBulkFlags(account).catch(err =>
           console.warn(`Bulk flag refresh failed for ${logAccount(account)}:`, err.message)
@@ -5942,6 +5969,7 @@ export class ImapManager {
   async upsertSentMessageRecord(account, folder, uid, {
     messageId,
     providerMsgid = null,
+    uidValidity = null,
     subject,
     fromName,
     fromEmail,
@@ -5963,7 +5991,7 @@ export class ImapManager {
       ? await computeThreadId(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references), sanitizeStr(subject),
         { fromEmail, to, cc, own: account.email_address })
       : null;
-    await query(`
+    const written = await withGmailIdentityWrite(account.id, [providerProfile(account).labelStore ? providerMsgid : null], db => db.query(`
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
@@ -6004,7 +6032,11 @@ export class ImapManager {
       safeDate(date), sanitizeStr(snippet || ''), threadId,
       Array.isArray(bcc) && bcc.length ? JSON.stringify(bcc) : null,
       providerProfile(account).labelStore ? providerMsgid : null,
-    ]);
+    ]), { folder: providerProfile(account).labelStore ? folder : undefined, uidValidity });
+    if (written.pending) {
+      await this.syncFolderOnDemand?.(account, folder);
+      return { pending: true };
+    }
   }
 
   // Persist a local Drafts row immediately after appending a draft to IMAP, so the
@@ -6018,6 +6050,7 @@ export class ImapManager {
   async upsertDraftMessageRecord(account, folder, uid, {
     messageId,
     providerMsgid = null,
+    uidValidity = null,
     subject,
     fromName,
     fromEmail,
@@ -6035,7 +6068,7 @@ export class ImapManager {
   }) {
     if (!uid || !folder) return;
     const msgId = sanitizeStr(messageId);
-    await query(`
+    const written = await withGmailIdentityWrite(account.id, [providerProfile(account).labelStore ? providerMsgid : null], db => db.query(`
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
@@ -6081,7 +6114,11 @@ export class ImapManager {
       references,
       Boolean(hasAttachments),
       providerProfile(account).labelStore ? providerMsgid : null,
-    ]);
+    ]), { folder: providerProfile(account).labelStore ? folder : undefined, uidValidity });
+    if (written.pending) {
+      await this.syncFolderOnDemand?.(account, folder);
+      return { pending: true };
+    }
   }
 
   async findReplyDrafts(account, paths, messageIds) {
@@ -6182,7 +6219,7 @@ export class ImapManager {
           AND f.uid_validity::text = $18)`;
     // All fields come from this live FETCH. Reusing a UID after UIDVALIDITY changes must
     // never pair the new headers with an old body's cache or an old recipient list.
-    const { rows } = await query(`
+    const { rows } = await withGmailIdentityWrite(account.id, [providerProfile(account).labelStore ? parsed.providerMsgid : null], db => db.query(`
       INSERT INTO messages (account_id, uid, folder, message_id, subject, from_name, from_email,
         to_addresses, cc_addresses, bcc_addresses, in_reply_to, thread_references, thread_id,
         date, flags, has_attachments, attachments, is_read, provider_msgid)
@@ -6208,7 +6245,8 @@ export class ImapManager {
       JSON.stringify(parsed.cc || []), JSON.stringify(bcc), parsed.inReplyTo || null,
       parsed.references || null, threadId || null, safeDate(parsed.date),
       JSON.stringify(parsed.flags || []), parsed.hasAttachments, JSON.stringify(structure.attachments),
-      uidValidity, validIdentity, providerProfile(account).labelStore ? parsed.providerMsgid || null : null]);
+      uidValidity, validIdentity, providerProfile(account).labelStore ? parsed.providerMsgid || null : null]),
+    { folder: providerProfile(account).labelStore ? folder : undefined, uidValidity });
     if (!rows.length) throw new Error('Draft ingestion did not persist a row');
     return { id: rows[0].id, account_id: account.id, uid, folder, message_id: parsed.messageId,
       subject: parsed.subject || '', from_email: parsed.fromEmail, from_name: parsed.fromName,
@@ -6216,6 +6254,64 @@ export class ImapManager {
       in_reply_to: parsed.inReplyTo, thread_references: parsed.references, thread_id: rows[0].thread_id,
       date: parsed.date, has_attachments: parsed.hasAttachments, attachments: structure.attachments,
       attachments_complete: true, uid_validity: uidValidity };
+  }
+
+  async _isArchiveFolder(account, folder) {
+    if (!providerProfile(account).labelStore) return false;
+    const { rows } = await query('SELECT special_use FROM folders WHERE account_id=$1 AND path=$2', [account.id, folder]);
+    return rows[0]?.special_use === '\\All';
+  }
+
+  async _assertWritableSource(account, folder, uids = null) {
+    await assertNoArchiveResidue(account.id, folder, uids);
+    if (await this._isArchiveFolder(account, folder)) {
+      throw Object.assign(new Error('This action is not supported for archive residue'), { status: 409, code: 'archive-residue-read-only' });
+    }
+  }
+
+  async runArchiveCoverageBatch(account, { signal } = {}) {
+    if (!providerProfile(account).labelStore || this._secondaryConnectBlocked?.(account.id)) return;
+    this._archiveRunning ||= new Set();
+    this._archiveNextRun ||= new Map();
+    if (this._archiveRunning.has(account.id) || Date.now() < (this._archiveNextRun.get(account.id) || 0)) return;
+    const host = (account.imap_host || '').toLowerCase();
+    const foregroundPending = () => [...connectionPools.values()].some(pool => pool.host === host && pool.waiters.length);
+    if (signal?.aborted || foregroundPending()) return;
+    const { rows: enabled } = await query(`SELECT id FROM email_accounts WHERE id=$1 AND enabled
+      AND NOT EXISTS(SELECT 1 FROM archive_coverage c JOIN folders f ON f.account_id=c.account_id AND f.path=c.folder
+        WHERE c.account_id=$1 AND f.special_use=$2 AND c.phase='paused')`, [account.id, '\\All']);
+    if (!enabled.length || this._archiveRunning.has(account.id)) return;
+    this._archiveRunning.add(account.id);
+    let held = false, deferAt = 0;
+    try {
+      await this._bgConnSem.acquire(host);
+      held = true;
+      if (signal?.aborted || foregroundPending()) return;
+      if (!(await query('SELECT id FROM email_accounts WHERE id=$1 AND enabled', [account.id])).rows.length) return;
+      const admission = await reserveBackgroundBudget(account.id, host, { messages: 0, bytes: 1024 });
+      if (!admission.allowed) {
+        deferAt = admission.deferAt;
+        return { pending: true, deferAt };
+      }
+      const result = await withFreshClient(account, client => scanArchiveCoverageBatch(account, {
+        client, signal, profile: providerProfile(account), foregroundPending,
+        prepareRecord: raw => prepareArchiveRecord(account, raw, client.mailbox?.path),
+      }));
+      this.broadcast({ type: 'archive_coverage_progress', accountId: account.id, phase: 'archive', ...result }, account.user_id);
+      deferAt = result?.deferAt || 0;
+      return result;
+    } catch (error) {
+      const detail = extractImapError(error);
+      if (error.archiveProviderRead && (isConnectionRefusal(detail) || isAuthFailure(detail))) {
+        if (/\[LIMIT\]|rate.?limit|too many|maximum.*connections|connection limit|over quota|throttl/i.test(detail)) recordBackgroundRefusal(host);
+        this._noteSecondaryRefusal?.(account);
+      }
+      throw error;
+    } finally {
+      if (held) this._bgConnSem.release(host);
+      this._archiveNextRun.set(account.id, Math.max(Date.now() + 2000, deferAt));
+      this._archiveRunning.delete(account.id);
+    }
   }
 
   async bootstrapProviderIdentity(account, client, folder) {
@@ -6283,6 +6379,7 @@ export class ImapManager {
   // Called when the user navigates to a folder that has no local messages yet.
   // Uses a pooled connection — does NOT touch the main sync connection.
   async syncFolderOnDemand(account, folder) {
+    if (await this._isArchiveFolder(account, folder)) return this.runArchiveCoverageBatch(account);
     const key = `${account.id}:${folder}`;
     if (this.onDemandSyncing.has(key)) {
       console.log(`syncFolderOnDemand skipped (already running): ${logAccount(account)}/${folder}`);
@@ -7084,6 +7181,7 @@ export class ImapManager {
   }
 
   async moveMessageGetNewUid(account, uid, fromFolder, toFolder) {
+    await this._assertWritableSource(account, fromFolder, [uid]);
     let newUid = null;
     try {
       await withFreshClient(account, async (client) => {
@@ -7106,6 +7204,7 @@ export class ImapManager {
   }
 
   async deleteFolder(account, path) {
+    await this._assertWritableSource(account, path);
     return withFreshClient(account, async (client) => {
       // If the pool connection has this folder selected, switch to INBOX first
       if ((client.mailbox?.path || '').toLowerCase() === path.toLowerCase()) {
@@ -7117,6 +7216,7 @@ export class ImapManager {
   }
 
   async renameFolder(account, oldPath, newPath) {
+    await this._assertWritableSource(account, oldPath);
     // The guard below cannot deselect INBOX, and the UI never offers renaming it.
     if (oldPath.toUpperCase() === 'INBOX') throw new Error('INBOX cannot be renamed');
     return withFreshClient(account, async (client) => {
@@ -7132,6 +7232,7 @@ export class ImapManager {
   }
 
   async emptyFolder(account, folder) {
+    await this._assertWritableSource(account, folder);
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
@@ -7222,6 +7323,7 @@ export class ImapManager {
   }
 
   async moveMessage(account, uid, fromFolder, toFolder) {
+    await this._assertWritableSource(account, fromFolder, [uid]);
     let newUid = null;
     try {
       await withFreshClient(account, async (client) => {
@@ -7246,6 +7348,7 @@ export class ImapManager {
   // read from a stale row, or looked up in the wrong account, would otherwise expunge whatever
   // sits there. Resolves false, having deleted nothing, when it does not match.
   async permanentDeleteMessage(account, uid, folder, { expectMessageId } = {}) {
+    await this._assertWritableSource(account, folder, [uid]);
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
@@ -7281,15 +7384,33 @@ export class ImapManager {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
     if (!account) throw new Error(`copyMessage: account ${accountId} not found`);
+    await this._assertWritableSource(account, fromFolder, [uid]);
+    if (await this._isArchiveFolder(account, toFolder)) throw Object.assign(new Error('Archive residue must be admitted through archive coverage'), { status: 409, code: 'archive-residue-read-only' });
+
+    const labelStore = providerProfile(account).labelStore;
+    const source = labelStore ? (await query(`SELECT m.provider_msgid,f.uid_validity FROM messages m
+      JOIN folders f ON f.account_id=m.account_id AND f.path=m.folder
+      WHERE m.account_id=$1 AND m.folder=$2 AND m.uid=$3 AND NOT m.is_deleted AND NOT m.is_archive_residue`,
+    [accountId, fromFolder, uid])).rows[0] : null;
+    if (labelStore && !source) throw new Error('Copy source changed; resync before copying');
+    const proof = labelStore ? { providerMsgid: source.provider_msgid } : {};
 
     let newUid = null;
     try {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
+          if (labelStore) {
+            proof.sourceUidValidity = client.mailbox?.uidValidity;
+            if (source.uid_validity == null || proof.sourceUidValidity == null ||
+                String(source.uid_validity) !== String(proof.sourceUidValidity)) {
+              throw new Error('Copy source epoch changed; resync before copying');
+            }
+          }
           const result = await client.messageCopy(String(uid), toFolder, { uid: true });
           if (result === false) throw new Error('messageCopy returned false — server did not confirm copy');
           if (result?.uidMap) newUid = result.uidMap.get(Number(uid)) || null;
+          proof.destinationUidValidity = result?.uidValidity;
         } finally {
           lock.release();
         }
@@ -7299,11 +7420,18 @@ export class ImapManager {
       throw err;
     }
 
+    if (newUid != null) {
+      const sibling = await insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid, proof);
+      // A provider UID is insufficient if its source/target epoch or identity
+      // changed before storage. Do not confirm that locator to label callers.
+      if (labelStore && source.provider_msgid && sibling == null) newUid = null;
+    }
+
     // Hand off to label plugins (GTD broadcasts its section-refresh and, on the deferred path,
-    // reconciles once the sibling lands — see plugins/gtd/hooks.js afterLabelCopy). Fired before
-    // the sibling INSERT to preserve the historical emit-then-insert order; `newUid` tells the
+    // reconciles once the sibling lands — see plugins/gtd/hooks.js afterLabelCopy). `newUid` tells the
     // plugin whether the sibling is available now (UIDPLUS) or deferred to a destination sync
-    // (null). The hook swallows per-plugin errors and the plugin's deferred work is fire-and-
+    // (null). Fenced persistence precedes the hook so rejected locators stay deferred.
+    // The hook swallows per-plugin errors and the plugin's deferred work is fire-and-
     // forget, so this never blocks or breaks the copy.
     await pluginRegistry.runHook('afterLabelCopy', { mgr: this.pluginFacade, account, toFolder, fromFolder, srcUid: uid, newUid });
 
@@ -7311,12 +7439,11 @@ export class ImapManager {
       // Servers without UIDPLUS confirm COPY but cannot name its destination UID.
       // Pull the target so ordinary folders (which have no label plugin hook)
       // gain their local sibling row without waiting for the next backfill.
-      this.syncFolderOnDemand(account, toFolder)
+      await this.syncFolderOnDemand(account, toFolder)
         .catch(err => console.warn(`Post-copy folder sync failed: ${err.message}`));
       return null;
     }
 
-    await insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid);
     return newUid;
   }
 
@@ -7327,6 +7454,7 @@ export class ImapManager {
   // Post-remove notification is a plugin concern (generic `afterLabelRemove` hook), so this
   // stays label-feature-agnostic.
   async removeMessageCopy(accountId, uid, folder) {
+    await assertNoArchiveResidue(accountId, folder, [uid]);
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
     if (!account) throw new Error(`removeMessageCopy: account ${accountId} not found`);
@@ -7349,6 +7477,7 @@ export class ImapManager {
   // before trusting the source-absence result.
   async bulkMoveMessages(account, uids, fromFolder, toFolder) {
     if (!uids.length) return { uidMap: new Map(), succeeded: [], failed: [] };
+    await this._assertWritableSource(account, fromFolder, uids);
     let destUidNextBefore = null;
 
     // Capture UIDNEXT on a dedicated connection so a STATUS failure (e.g. toFolder
@@ -7496,6 +7625,7 @@ export class ImapManager {
   // To prevent collateral damage, we temporarily unflag any other \Deleted messages
   // before expunging, then restore them in a finally block.
   async bulkPermanentDelete(account, uids, folder) {
+    await this._assertWritableSource(account, folder, uids);
     if (!uids.length) return { succeeded: [], failed: [] };
     try {
       await withFreshClient(account, async (client) => {
@@ -7655,7 +7785,7 @@ export class ImapManager {
   async snoozedRows(where, params) {
     const result = await query(`
       SELECT sm.id AS snooze_id, sm.user_id, sm.account_id,
-             sm.message_id_header, sm.original_folder, sm.snoozed_folder, m.uid, m.is_read
+             sm.message_id_header, sm.original_folder, sm.snoozed_folder, m.uid, m.is_read, m.is_archive_residue
       FROM snoozed_messages sm
       JOIN messages m ON m.account_id = sm.account_id
                      AND m.message_id = sm.message_id_header

@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
-vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('./db.js', () => {
+  const query = vi.fn();
+  // Unit SQL-shape checks share the same query spy; real transaction and lock
+  // behavior is exercised separately by the dedicated PostgreSQL fixtures.
+  return { query, withTransaction: vi.fn(async fn => fn({ query })) };
+});
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), parseMailboxList: vi.fn(() => [{ name: 'Hidden', email: 'hidden@example.test' }]), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((parsed) => parsed) }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
@@ -499,6 +504,7 @@ describe('insertCopiedSibling', () => {
   beforeEach(() => query.mockReset());
 
   it('inserts the destination sibling from the source row with the copied UID', async () => {
+    query.mockResolvedValueOnce({ rows: [{ provider_msgid: null }] });
     query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: true }] });
     query.mockResolvedValue({ rows: [] });
 
@@ -511,7 +517,8 @@ describe('insertCopiedSibling', () => {
     expect(ins[0]).toContain('WHERE account_id = $1 AND folder = $2 AND uid = $3');
     // Idempotent against the next destination-folder sync.
     expect(ins[0]).toContain('ON CONFLICT (account_id, uid, folder) DO NOTHING');
-    expect(ins[1]).toEqual(['acct-1', 'INBOX', 100, 5001, 'Todo']);
+    expect(ins[1]).toEqual(['acct-1', 'INBOX', 100, 5001, 'Todo', null]);
+    expect(ins[0]).toContain('provider_msgid IS NOT DISTINCT FROM $6::text');
     // delivery_addresses is copied verbatim from the source row, same as list_unsubscribe.
     expect(ins[0]).toContain('delivery_addresses');
     // So is a draft's Bcc (0061), in both the INSERT list and the SELECT.
@@ -519,6 +526,7 @@ describe('insertCopiedSibling', () => {
   });
 
   it('increments destination unread only when the copied message is unread', async () => {
+    query.mockResolvedValueOnce({ rows: [{ provider_msgid: null }] });
     query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: false }] });
     query.mockResolvedValue({ rows: [] });
     await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
@@ -527,6 +535,7 @@ describe('insertCopiedSibling', () => {
   });
 
   it('counts total but not unread for a read copy', async () => {
+    query.mockResolvedValueOnce({ rows: [{ provider_msgid: null }] });
     query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: true }] });
     query.mockResolvedValue({ rows: [] });
     await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
@@ -534,6 +543,7 @@ describe('insertCopiedSibling', () => {
   });
 
   it('adjusts no counts when a prior sync already inserted the sibling (ON CONFLICT hit)', async () => {
+    query.mockResolvedValueOnce({ rows: [{ provider_msgid: null }] });
     query.mockResolvedValueOnce({ rows: [] }); // DO NOTHING → no RETURNING row
     await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
     expect(countAdjusts()).toHaveLength(0);
@@ -3138,6 +3148,11 @@ describe('staleness probe connection recovery', () => {
 describe('Gmail label memberships (#418)', () => {
   let rows, acct, serverUids;
   const sent = '[Gmail]/Sent Mail';
+  const folderRows = [
+    { path: 'INBOX', uid_validity: '1', special_use: null },
+    { path: sent, uid_validity: '1', special_use: '\\Sent' },
+    { path: 'Projects', uid_validity: '1', special_use: null },
+  ];
   const parsed = uid => ({ uid, messageId: '<self@example.com>', subject: 'Self mail',
     fromEmail: 'me@example.com', to: [], cc: [], replyTo: [], date: new Date('2026-09-01'),
     isRead: true, flags: ['\\Seen'], parsedHeaders: {} });
@@ -3167,6 +3182,11 @@ describe('Gmail label memberships (#418)', () => {
     query.mockImplementation(async (sql, params = []) => {
       const local = rows.filter(r => r.folder === params[1]);
       if (sql.includes('SELECT * FROM email_accounts') || sql.includes('SELECT id FROM email_accounts')) return { rows: [acct] };
+      // The identity fence re-reads real folder rows under SHARE locks. A
+      // missing row is an unsafe locator, not permission to bypass the fence.
+      if (sql.includes('SELECT path,uid_validity,special_use')) {
+        return { rows: params[0] === acct.id ? folderRows.filter(row => params[1].includes(row.path)) : [] };
+      }
       if (sql.includes('SELECT uid_validity, total_count')) return { rows: [{ uid_validity: 1, total_count: local.length }] };
       if (sql.includes('SELECT uid_validity')) return { rows: [{ uid_validity: 1 }] };
       if (sql.includes('COUNT(*) as count')) return { rows: [{ count: local.length, max_uid: Math.max(0, ...local.map(r => r.uid)) }] };
@@ -3192,6 +3212,7 @@ describe('Gmail label memberships (#418)', () => {
   });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
   const manager = () => ({ backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {}, _secondaryConnectBlocked: () => null, _noteSecondaryRefusal: vi.fn(),
+    _isArchiveFolder: ImapManager.prototype._isArchiveFolder,
     // A re-sync of cached rows now routes flags through the bulk path (#495) instead of
     // re-upserting each row, so the bare-object manager needs the real method.
     _applyFlagUpdates: ImapManager.prototype._applyFlagUpdates });
