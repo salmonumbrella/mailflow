@@ -85,9 +85,9 @@ export async function readGmailIdentities(account) {
     } else {
       token = decrypt(account.oauth_access_token);
     }
-  } catch {
+  } catch (error) {
     // refreshGoogleToken can throw the provider's error_description verbatim.
-    return unavailable('provider_unavailable');
+    return unavailable(error?.code === 'OAUTH_RECONNECT_REQUIRED' ? 'credentials_missing' : 'provider_unavailable');
   }
   if (typeof token !== 'string' || !token || /[\r\n]/.test(token)) return unavailable('credentials_missing');
 

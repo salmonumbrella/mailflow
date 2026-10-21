@@ -94,6 +94,28 @@ describe('readGmailIdentities', () => {
     } finally { log.mockRestore(); warn.mockRestore(); }
   });
 
+  it('reports a typed permanent refresh failure as missing credentials without exposing provider text', async () => {
+    refreshGoogleToken.mockRejectedValue(Object.assign(new Error(`private ${SECRET}`), {
+      code: 'OAUTH_RECONNECT_REQUIRED',
+    }));
+    const result = await readGmailIdentities(account({ oauth_token_expiry: null }));
+    expect(result).toMatchObject({ identityStatus: 'unknown', reason: 'credentials_missing', identities: [] });
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+    expect(safeFetch).not.toHaveBeenCalled();
+    expect(refreshGoogleToken).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['ETIMEDOUT', 'ECONNRESET', 'unexpected_provider_code'])(
+    'keeps refresh failure %s transient instead of inferring reconnect from its message', async code => {
+      refreshGoogleToken.mockRejectedValue(Object.assign(new Error(`invalid_grant reconnect ${SECRET}`), { code }));
+      const result = await readGmailIdentities(account({ oauth_token_expiry: null }));
+      expect(result).toMatchObject({ identityStatus: 'unknown', reason: 'provider_unavailable', identities: [] });
+      expect(JSON.stringify(result)).not.toContain(SECRET);
+      expect(safeFetch).not.toHaveBeenCalled();
+      expect(refreshGoogleToken).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each([
     [401, {}, 'credentials_missing'],
     [403, { error: { errors: [{ reason: 'accessNotConfigured', message: SECRET }] } }, 'api_not_enabled'],
