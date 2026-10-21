@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
-vi.mock('./db.js', () => ({ query: vi.fn() }));
-import { query } from './db.js';
+vi.mock('./db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
+import { query, withTransaction } from './db.js';
 import { bootstrapGmailIdentity, getGmailArchiveFolder, isIdentityBootstrapComplete } from './archiveCoverage.js';
 import { createBackgroundBudget } from './backgroundDownloadBudget.js';
 
@@ -13,19 +13,27 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('Gmail identity bootstr
   let db, peer;
   const schema = `archive_identity_${process.pid}`;
   beforeAll(async () => {
+    if (decodeURIComponent(new URL(process.env.MAILFLOW_TEST_DATABASE_URL).pathname) !== '/mailflow_svtw') {
+      throw new Error('Core compatibility tests require the dedicated mailflow_svtw database');
+    }
     db = new pg.Client({ connectionString: process.env.MAILFLOW_TEST_DATABASE_URL });
     await db.connect();
-    await db.query(`CREATE SCHEMA ${schema}; SET search_path TO ${schema};
+    await db.query(`CREATE SCHEMA ${schema}; SET search_path TO ${schema}; SET statement_timeout='5s';
       CREATE TABLE email_accounts(id uuid PRIMARY KEY, enabled boolean DEFAULT true);
       CREATE TABLE folders(account_id uuid REFERENCES email_accounts ON DELETE CASCADE, path text,
         special_use text, no_select boolean DEFAULT false, uid_validity bigint, PRIMARY KEY(account_id,path));
       CREATE TABLE messages(account_id uuid REFERENCES email_accounts ON DELETE CASCADE, folder text,
-        uid bigint, message_id text, UNIQUE(account_id,folder,uid));`);
+        uid bigint, message_id text, is_deleted boolean DEFAULT false, UNIQUE(account_id,folder,uid));`);
     await db.query(readFileSync(new URL('../../migrations/0069_gmail_archive_coverage.sql', import.meta.url), 'utf8'));
     peer = new pg.Client({ connectionString: process.env.MAILFLOW_TEST_DATABASE_URL });
     await peer.connect();
-    await peer.query(`SET search_path TO ${schema}`);
+    await peer.query(`SET search_path TO ${schema}; SET statement_timeout='5s'`);
     query.mockImplementation((sql, args) => db.query(sql, args));
+    withTransaction.mockImplementation(async fn => {
+      await db.query('BEGIN');
+      try { const result = await fn(db); await db.query('COMMIT'); return result; }
+      catch (error) { await db.query('ROLLBACK'); throw error; }
+    });
   });
   afterAll(async () => { await peer?.end(); if (db) { await db.query(`DROP SCHEMA ${schema} CASCADE`); await db.end(); } });
   beforeEach(async () => {

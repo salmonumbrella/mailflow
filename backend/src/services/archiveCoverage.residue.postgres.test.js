@@ -20,7 +20,7 @@ vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }
 
 import { query, withTransaction } from './db.js';
 import { admitArchiveMetadata, runArchiveCoverageBatch } from './archiveCoverage.js';
-import { ImapManager } from './imapManager.js';
+import { ImapManager, insertCopiedSibling, prepareArchiveRecord } from './imapManager.js';
 
 const accountId = '11111111-1111-4111-8111-111111111111';
 const otherId = '22222222-2222-4222-8222-222222222222';
@@ -40,7 +40,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
   const normalWrite = (client, uid, manual = false) => context.run({ client, manual }, () =>
     ImapManager.prototype.upsertSentMessageRecord.call({}, {
       id: accountId, imap_host: 'imap.gmail.com', email_address: 'owner@example.test',
-    }, 'Sent', uid, { providerMsgid: identity, subject: 'Synthetic sent fixture', fromEmail: 'owner@example.test' }));
+    }, 'Sent', uid, { providerMsgid: identity, uidValidity: '8', subject: 'Synthetic sent fixture', fromEmail: 'owner@example.test' }));
   const rows = async () => (await db.query(`SELECT account_id,folder,uid::text,provider_msgid,is_archive_residue
     FROM messages ORDER BY account_id,folder,uid`)).rows;
   const waitForBlock = async (observer, waiter) => {
@@ -67,7 +67,14 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
         uid_validity bigint,special_use text,no_select boolean DEFAULT false,PRIMARY KEY(account_id,path))`);
     const baseline = await readFile(new URL('../../migrations/0001_baseline.sql', import.meta.url), 'utf8');
     await db.query(baseline.match(/CREATE TABLE IF NOT EXISTS messages \([\s\S]*?\n\);/)[0]);
-    await db.query('ALTER TABLE messages ADD COLUMN bcc_addresses jsonb');
+    await db.query(`ALTER TABLE messages ADD COLUMN bcc_addresses jsonb,
+      ADD COLUMN is_bulk boolean, ADD COLUMN normalized_subject text, ADD COLUMN spam_score_sa real,
+      ADD COLUMN spam_score_ml real, ADD COLUMN spam_verdict text, ADD COLUMN spam_analyzed_at timestamptz,
+      ADD COLUMN spam_details jsonb, ADD COLUMN spam_user_override text, ADD COLUMN category text,
+      ADD COLUMN list_unsubscribe text, ADD COLUMN list_unsubscribe_post text, ADD COLUMN unsubscribed_at timestamptz,
+      ADD COLUMN delivery_addresses jsonb, ADD COLUMN sender_name text, ADD COLUMN sender_email text,
+      ADD COLUMN forwarded_from_name text, ADD COLUMN forwarded_from_email text, ADD COLUMN forwarded_via text,
+      ADD COLUMN plugin_annotations jsonb`);
     await db.query(await readFile(new URL('../../migrations/0069_gmail_archive_coverage.sql', import.meta.url), 'utf8'));
     const indexes = await readFile(new URL('../../migrations/0070_archive_identity_indexes.sql', import.meta.url), 'utf8');
     for (const statement of indexes.replace(/--[^\n]*/g, '').split(';').map(sql => sql.trim()).filter(Boolean)) await db.query(statement);
@@ -151,6 +158,39 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
     expect(await rows()).toHaveLength(2);
   });
 
+  it('retains residue and requests reconciliation for absent or changed normal destination epochs', async () => {
+    await db.query('BEGIN'); await admit(db); await db.query('COMMIT');
+    const manager = Object.create(ImapManager.prototype);
+    manager.syncFolderOnDemand = vi.fn(async () => {});
+    for (const method of ['upsertSentMessageRecord', 'upsertDraftMessageRecord']) {
+      for (const uidValidity of [undefined, '7']) {
+        expect(await manager[method]({ id: accountId, imap_host: 'imap.gmail.com' }, 'Sent', 21,
+          { providerMsgid: identity, uidValidity, subject: 'Uncertain locator' })).toMatchObject({ pending: true });
+        expect(await rows()).toEqual([{ account_id: accountId, folder, uid: '1', provider_msgid: identity, is_archive_residue: true }]);
+      }
+    }
+    expect(manager.syncFolderOnDemand).toHaveBeenCalledTimes(4);
+    expect(manager.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: accountId }), 'Sent');
+  });
+
+  it('does not project a replacement COPY source under the captured provider identity lock', async () => {
+    const replacement = '9007199254740994';
+    await db.query('BEGIN'); await admit(db, [record(2, replacement)]); await db.query('COMMIT');
+    await db.query("INSERT INTO messages(account_id,folder,uid,provider_msgid) VALUES($1,'INBOX',31,$2)", [accountId, identity]);
+    await peer.query('BEGIN');
+    await peer.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [JSON.stringify([accountId, identity])]);
+    const copy = insertCopiedSibling(accountId, 31, 'INBOX', 'Sent', 41, {
+      providerMsgid: identity, sourceUidValidity: '9', destinationUidValidity: '8', labelStore: true,
+    });
+    try {
+      await waitForBlock(peer, db);
+      await peer.query("UPDATE messages SET provider_msgid=$2 WHERE account_id=$1 AND folder='INBOX' AND uid=31", [accountId, replacement]);
+    } finally { await peer.query('COMMIT'); }
+    expect(await copy).toBeNull();
+    expect((await rows()).filter(row => row.folder === 'Sent')).toEqual([]);
+    expect((await rows()).find(row => row.is_archive_residue)?.provider_msgid).toBe(replacement);
+  });
+
   it.each(['unresolved', 'bootstrap', 'epoch', 'disabled', 'paused'])('refuses %s state without admitting records', async kind => {
     if (kind === 'unresolved') await db.query("INSERT INTO messages(account_id,folder,uid) VALUES($1,'INBOX',31)", [accountId]);
     if (kind === 'bootstrap') await db.query("UPDATE archive_coverage SET bootstrap_complete=false WHERE account_id=$1 AND folder='INBOX'", [accountId]);
@@ -223,6 +263,29 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
     for (const name of ['messageMove', 'messageCopy', 'messageDelete', 'messageFlagsAdd', 'messageFlagsRemove', 'append', 'send']) {
       expect(client[name]).not.toHaveBeenCalled();
     }
+  });
+
+  it('sanitizes NUL provider text through production preparation and commits the whole batch', async () => {
+    const client = provider();
+    const fetch = client.fetch;
+    client.fetch = async function* (...args) {
+      for await (const raw of fetch.call(this, ...args)) {
+        if (args[1].envelope && raw.uid === 2) raw.envelope = {
+          ...raw.envelope, messageId: '<nul\0@example.test>', subject: 'Archive\0 text',
+          from: [{ name: 'Syn\0thetic', address: 'sender@example.test' }],
+          to: [{ name: 'Reci\0pient', address: 'owner@example.test' }],
+        };
+        yield raw;
+      }
+    };
+    expect(await scan(client, { prepareRecord: raw => prepareArchiveRecord({ id: accountId,
+      imap_host: 'imap.gmail.com', email_address: 'owner@example.test' }, raw, folder) }))
+      .toEqual({ stored: 3, suppressed: 0, pending: 0 });
+    expect((await db.query('SELECT message_id,subject,from_name,to_addresses FROM messages WHERE uid=2')).rows[0])
+      .toMatchObject({ message_id: '<nul@example.test>', subject: 'Archive text', from_name: 'Synthetic',
+        to_addresses: [{ name: 'Recipient', email: 'owner@example.test' }] });
+    expect((await db.query('SELECT scan_cursor FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0].scan_cursor).toBe('0');
+    expect(await rows()).toHaveLength(3);
   });
 
   it('bounds requests to 500 and resumes the descending cursor without an age limit', async () => {

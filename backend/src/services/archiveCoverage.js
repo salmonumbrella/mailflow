@@ -1,22 +1,50 @@
 import { query, withTransaction } from './db.js';
 import { reserveBackgroundBudget } from './backgroundDownloadBudget.js';
 import { parseMessage } from './messageParser.js';
+import { sanitizeStr } from '../utils/sanitizeStr.js';
+
+export function sanitizeArchiveMetadata(record) {
+  const clean = value => {
+    if (typeof value === 'string') return sanitizeStr(value);
+    if (Array.isArray(value)) return value.map(clean);
+    if (value && Object.getPrototypeOf(value) === Object.prototype) {
+      return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, clean(field)]));
+    }
+    return value;
+  };
+  // Provider identity is exact opaque data, never a text header to normalize.
+  return { ...clean(record), providerMsgid: record.providerMsgid };
+}
 
 // All normal writers and residue admission use the same account/provider key.
 // The callback is SQL only: provider reads must finish before entering here.
-export async function withGmailIdentityWrite(accountId, providerIds, write, { client, folder, uidValidity, normalWrite = true } = {}) {
+export async function withGmailIdentityWrite(accountId, providerIds, write, { client, folder, uidValidity, source, normalWrite = true } = {}) {
   const identities = [...new Set(providerIds.filter(id => typeof id === 'string' && id))].sort();
   if (!identities.length) return write(client || { query });
+  const incomplete = () => ({ rows: [], rowCount: 0, pending: true });
+  const knownEpoch = value => value != null && /^[1-9]\d*$/.test(String(value));
+  if (normalWrite && (!folder || !knownEpoch(uidValidity))) return incomplete();
+  if (source && (!knownEpoch(source.uidValidity) || !identities.includes(source.providerMsgid))) return incomplete();
   const run = async db => {
     const { rows: accounts } = await db.query('SELECT id FROM email_accounts WHERE id=$1 AND enabled FOR SHARE', [accountId]);
-    if (!accounts.length) return { rows: [], rowCount: 0 };
+    if (!accounts.length) return incomplete();
     if (folder) {
-      const { rows } = await db.query('SELECT uid_validity,special_use FROM folders WHERE account_id=$1 AND path=$2 FOR SHARE', [accountId, folder]);
-      if (normalWrite && rows[0]?.special_use === '\\All') throw new Error('All Mail writes require archive admission');
-      if (uidValidity != null && String(rows[0]?.uid_validity) !== String(uidValidity)) return { rows: [], rowCount: 0 };
+      const paths = [...new Set([folder, source?.folder].filter(Boolean))].sort();
+      const { rows } = await db.query(`SELECT path,uid_validity,special_use FROM folders
+        WHERE account_id=$1 AND path=ANY($2::text[]) ORDER BY path FOR SHARE`, [accountId, paths]);
+      const destination = rows.find(row => row.path === folder);
+      if (normalWrite && destination?.special_use === '\\All') throw new Error('All Mail writes require archive admission');
+      if (uidValidity != null && String(destination?.uid_validity) !== String(uidValidity)) return incomplete();
+      if (source && String(rows.find(row => row.path === source.folder)?.uid_validity) !== String(source.uidValidity)) return incomplete();
     }
     for (const identity of identities) {
       await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [JSON.stringify([accountId, identity])]);
+    }
+    if (source) {
+      const { rows: [row] } = await db.query(`SELECT provider_msgid FROM messages
+        WHERE account_id=$1 AND folder=$2 AND uid=$3 AND NOT is_deleted AND NOT is_archive_residue FOR SHARE`,
+      [accountId, source.folder, source.uid]);
+      if (row?.provider_msgid !== source.providerMsgid) return incomplete();
     }
     const result = await write(db);
     // A verified normal write wins. Physical normal duplicates remain distinct.
@@ -26,7 +54,7 @@ export async function withGmailIdentityWrite(accountId, providerIds, write, { cl
         WHERE n.account_id=r.account_id AND n.provider_msgid=r.provider_msgid
           AND NOT n.is_archive_residue AND NOT n.is_deleted AND NOT f.no_select
           AND f.special_use IS DISTINCT FROM $3)`, [accountId, identities, '\\All']);
-    return result;
+    return normalWrite && result.rowCount === 0 ? { ...result, pending: true } : result;
   };
   return client ? run(client) : withTransaction(run);
 }
@@ -44,6 +72,7 @@ export async function assertNoArchiveResidue(accountId, folder, uids = null) {
 // client is a PostgreSQL transaction client, not the ImapFlow client used by
 // bootstrap. records are parsed metadata plus live normal-copy observations.
 export async function admitArchiveMetadata(client, { accountId, folder, uidValidity, records, profile, normalEpochs }) {
+  records = records.map(sanitizeArchiveMetadata);
   const result = { stored: 0, suppressed: 0, pending: records.length };
   if (!profile?.labelStore || !normalEpochs || records.length > 500) return result;
   const { rows: [account] } = await client.query('SELECT id FROM email_accounts WHERE id=$1 AND enabled FOR SHARE', [accountId]);

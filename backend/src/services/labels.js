@@ -13,6 +13,16 @@ import { fanOutReadToSiblings } from '../utils/mailUtils.js';
 // imapManager is injected (callers pass their handle) so the DB/IMAP logic is unit-testable
 // without a live connection pool — matching the pattern gtdTransitions/gtdSections already use.
 
+// Defense for callers holding a full message row only. Projected thread/label
+// candidates omit this field and rely on the All Mail-only residue invariant.
+function assertWritableSource(message) {
+  if (message.is_archive_residue !== true) return;
+  const error = new Error('This action is not supported for archive residue');
+  error.status = 409;
+  error.code = 'archive-residue-read-only';
+  throw error;
+}
+
 // Resolve the uid of the message's copy that lives in `folder` for its account, or null. The
 // acted row is used directly when it already lives there; otherwise the shared RFC Message-ID
 // (an IMAP COPY duplicates it verbatim) joins to the sibling copy. A message with no
@@ -31,6 +41,7 @@ export async function resolveLabelCopyUid(message, folder) {
 // original in place). imapManager.copyMessage also emits the section-refresh event. No-op when
 // the message already lives in the label folder. `message` needs { uid, folder }.
 export async function applyLabel(imapManager, account, message, labelFolder, { forceCopy = false } = {}) {
+  assertWritableSource(message);
   if (message.folder === labelFolder) {
     return { applied: false, uid: message.uid, reason: 'already-there' };
   }
@@ -48,6 +59,7 @@ export async function applyLabel(imapManager, account, message, labelFolder, { f
 // forged UID cannot remove a different message's label copy. Without a Message-ID there is no
 // stable identity shared by the source and copied rows, so no inverse is advertised.
 export async function removeExactLabelCopy(imapManager, message, labelFolder, uid) {
+  assertWritableSource(message);
   if (!message.message_id) return { removed: false };
   const { rows } = await query(
     `SELECT uid FROM messages
@@ -65,6 +77,7 @@ export async function removeExactLabelCopy(imapManager, message, labelFolder, ui
 // other labels intact. No-op when no such copy exists. `message` needs { account_id, uid,
 // folder, message_id }.
 export async function removeLabel(imapManager, message, labelFolder) {
+  assertWritableSource(message);
   const uid = await resolveLabelCopyUid(message, labelFolder);
   if (uid == null) return { removed: false };
   await imapManager.removeMessageCopy(message.account_id, uid, labelFolder);

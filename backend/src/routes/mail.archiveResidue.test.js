@@ -1,5 +1,5 @@
-// Preflight authoring only: UNRUN. Logical 4b must reject residue source actions
-// before side effects; slice 5 will add supported Gmail label semantics later.
+// Logical 4b rejects residue source actions before side effects; slice 5 will
+// add supported Gmail label semantics later. All fixtures here are synthetic.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
@@ -24,6 +24,7 @@ import { imapManager } from '../index.js';
 import { safeFetch } from '../services/safeFetch.js';
 import { updateIncrementalForUser } from '../services/spamModelStore.js';
 import { pluginRegistry } from '../plugins/registry.js';
+import { ImapManager } from '../services/imapManager.js';
 
 const normalId = '11111111-1111-4111-8111-111111111111';
 const residueId = '22222222-2222-4222-8222-222222222222';
@@ -119,28 +120,31 @@ describe('archive residue source guard (4b; no safe-action fallback yet)', () =>
     });
   }
 
-  it('rejects mixed mutations for any valid batch size, residue position and bulk action', async () => {
-    // No dependency install is authorized during preflight. API checked against
-    // hegeldev/hegel-typescript README; dependency/runtime validation is pending.
-    const hegel = await import('@hegeldev/hegel');
-    const gs = await import('@hegeldev/hegel/generators');
-    await hegel.testAsync(async tc => {
-      const count = tc.draw(gs.integers({ minValue: 1, maxValue: 500 }));
-      const residueAt = tc.draw(gs.integers({ minValue: 0, maxValue: count - 1 }));
-      const action = tc.draw(gs.integers({ minValue: 0, maxValue: 2 }));
-      const path = ['/messages/bulk-delete', '/messages/bulk-move', '/messages/bulk-archive'][action];
-      const targets = Array.from({ length: count }, (_, index) => ({
-        ...(index === residueAt ? residue : normal), uid: index + 1,
-        id: `44444444-4444-4444-8444-${String(index + 1).padStart(12, '0')}`,
-      }));
-      // Reset between generated examples so one rejected input cannot mask an
-      // earlier side effect, or inherit another example's provider calls.
-      vi.clearAllMocks();
-      ownedTargets(targets);
-      expectRejectedWithoutEffects(await invoke('post', path, {
-        ids: targets.map(row => row.id), ...(action === 1 ? { folder: 'Projects' } : {}),
-      }));
-    });
+  it('rejects mixed mutations across generated legal sizes, positions and bulk actions', async () => {
+    // Dependency-free generated coverage: every legal size and bulk action,
+    // first/interior/last positions at every size, and every position at the
+    // maximum size. Singleton residue-only and mixed batches share the oracle.
+    // This bounded matrix has 5,982 cases; it is not a full Cartesian product.
+    for (let count = 1; count <= 500; count++) {
+      const positions = count === 500
+        ? Array.from({ length: count }, (_, index) => index)
+        : [...new Set([0, Math.floor(count / 2), count - 1])];
+      for (const residueAt of positions) {
+        for (const [action, path] of ['/messages/bulk-delete', '/messages/bulk-move', '/messages/bulk-archive'].entries()) {
+          const targets = Array.from({ length: count }, (_, index) => ({
+            ...(index === residueAt ? residue : normal), uid: index + 1,
+            id: `44444444-4444-4444-8444-${String(index + 1).padStart(12, '0')}`,
+          }));
+          // Reset each example so a prior rejection cannot mask side effects
+          // or leave provider calls attached to the next generated input.
+          vi.clearAllMocks();
+          ownedTargets(targets);
+          expectRejectedWithoutEffects(await invoke('post', path, {
+            ids: targets.map(row => row.id), ...(action === 1 ? { folder: 'Projects' } : {}),
+          }));
+        }
+      }
+    }
   });
 
   it.each([
@@ -167,6 +171,30 @@ describe('archive residue source guard (4b; no safe-action fallback yet)', () =>
       expect(imapManager[name]).not.toHaveBeenCalled();
     }
     expect(imapManager._enqueueFlagPush).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['patch', '/messages/:id/snooze', { until: new Date(Date.now() + 86400000).toISOString() }],
+    ['post', '/messages/:id/unsnooze', {}],
+  ])('rejects a classified snooze candidate through the real snoozedRows query at %s %s', async (method, path, body) => {
+    query.mockImplementation(async sql => {
+      if (sql.includes('FROM messages m') && sql.includes('JOIN email_accounts')) return { rows: [{ ...normal, folder: 'Snoozed' }] };
+      if (sql.includes('FROM snoozed_messages sm')) {
+        const row = { snooze_id: residueId, account_id: accountId, uid: 23, snoozed_folder: 'Snoozed' };
+        // Return only the classification actually projected by the production
+        // query. A mock must not conceal the missing column behind this guard.
+        if (/\bm\.is_archive_residue\b/.test(sql.slice(0, sql.indexOf('FROM')))) row.is_archive_residue = true;
+        return { rows: [row] };
+      }
+      throw new Error(`Snooze guard must precede writes: ${sql}`);
+    });
+    imapManager.snoozedRows.mockImplementation((...args) => ImapManager.prototype.snoozedRows.call({}, ...args));
+    const response = await invoke(method, path, body, normalId);
+    expect(response.statusCode).toBe(409);
+    expect(response.body.error).toMatch(/archive residue/);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(imapManager.wakeSnoozed).not.toHaveBeenCalled();
+    expect(imapManager.broadcast).not.toHaveBeenCalled();
   });
 
   it('keeps ordinary Gmail Inbox-to-All-Mail archive working', async () => {

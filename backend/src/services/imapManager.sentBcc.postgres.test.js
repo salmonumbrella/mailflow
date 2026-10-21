@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('../index.js', () => ({ imapManager: {} }));
-vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('./db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
 vi.mock('./encryption.js', () => ({ decrypt: vi.fn() }));
@@ -14,7 +14,7 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPin
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./spamPipeline.js', () => ({ classifyAndTagMessage: vi.fn() }));
 vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }));
-import { query } from './db.js';
+import { query, withTransaction } from './db.js';
 import { RELOCATE_INSERT_COLS, RELOCATE_SELECT_COLS } from '../routes/mail.js';
 import { ImapManager, insertCopiedSibling } from './imapManager.js';
 
@@ -33,11 +33,19 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('Sent row Bcc (upsertSe
   const bccOf = async uid => (await database.query('SELECT bcc_addresses FROM messages WHERE uid = $1', [uid])).rows[0].bcc_addresses;
 
   beforeAll(async () => {
+    if (decodeURIComponent(new URL(process.env.MAILFLOW_TEST_DATABASE_URL).pathname) !== '/mailflow_svtw') {
+      throw new Error('Core compatibility tests require the dedicated mailflow_svtw database');
+    }
     database = new pg.Client({ connectionString: process.env.MAILFLOW_TEST_DATABASE_URL });
     await database.connect();
-    await database.query(`CREATE SCHEMA ${schema}; SET search_path TO ${schema};
-      CREATE TABLE email_accounts(id uuid PRIMARY KEY)`);
-    await database.query(`CREATE TEMP TABLE folders(account_id uuid, path text, total_count integer DEFAULT 0, unread_count integer DEFAULT 0);
+    await database.query(`CREATE SCHEMA ${schema}; SET search_path TO ${schema}; SET statement_timeout='5s';
+      CREATE TABLE email_accounts(id uuid PRIMARY KEY,enabled boolean DEFAULT true);
+      INSERT INTO email_accounts(id) VALUES('22222222-2222-4222-8222-222222222222'),('33333333-3333-4333-8333-333333333333')`);
+    await database.query(`CREATE TEMP TABLE folders(account_id uuid, path text, total_count integer DEFAULT 0, unread_count integer DEFAULT 0,
+      uid_validity bigint,special_use text,no_select boolean DEFAULT false);
+      INSERT INTO folders(account_id,path,uid_validity) VALUES
+        ('33333333-3333-4333-8333-333333333333','Sent',8),('33333333-3333-4333-8333-333333333333','Drafts',9),
+        ('33333333-3333-4333-8333-333333333333','Work',10),('33333333-3333-4333-8333-333333333333','Saved',12);
       CREATE TEMP TABLE messages (id serial, account_id uuid, uid bigint, folder text,
       message_id text, subject text, from_name text, from_email text, to_addresses jsonb, cc_addresses jsonb,
       bcc_addresses jsonb, date timestamptz, snippet text, is_read boolean, is_starred boolean,
@@ -52,6 +60,11 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('Sent row Bcc (upsertSe
       UNIQUE (account_id, uid, folder))`);
     await database.query(migration);
     query.mockImplementation((sql, values) => database.query(sql, values));
+    withTransaction.mockImplementation(async fn => {
+      await database.query('BEGIN');
+      try { const result = await fn(database); await database.query('COMMIT'); return result; }
+      catch (error) { await database.query('ROLLBACK'); throw error; }
+    });
   });
   afterAll(async () => { if (database) { await database.query(`DROP SCHEMA ${schema} CASCADE`); await database.end(); } });
   beforeEach(async () => { await database.query('TRUNCATE messages'); });
@@ -69,7 +82,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('Sent row Bcc (upsertSe
       const manager = Object.create(ImapManager.prototype);
       const account = { id: '33333333-3333-4333-8333-333333333333', imap_host: 'imap.gmail.com' };
       for (const messageId of ['<replacement@example.test>', '<same@example.test>']) {
-        await manager[method](account, 'Saved', 70, { messageId: '<same@example.test>', providerMsgid: 'old-provider-id' });
+        await manager[method](account, 'Saved', 70, { messageId: '<same@example.test>', providerMsgid: 'old-provider-id', uidValidity: '12' });
         await manager[method](account, 'Saved', 70, { messageId });
         expect((await database.query('SELECT provider_msgid FROM messages WHERE uid=70')).rows[0].provider_msgid).toBeNull();
       }
@@ -79,12 +92,14 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('Sent row Bcc (upsertSe
   it('preserves provider identity through Sent/Draft upserts, COPY and relocation', async () => {
     const account = { id: '33333333-3333-4333-8333-333333333333', imap_host: 'imap.gmail.com' };
     const manager = Object.create(ImapManager.prototype);
-    const meta = { providerMsgid: '9007199254740993', messageId: '<identity@example.test>' };
+    const meta = { providerMsgid: '9007199254740993', messageId: '<identity@example.test>', uidValidity: '8' };
     await manager.upsertSentMessageRecord(account, 'Sent', 40, meta);
-    await manager.upsertSentMessageRecord(account, 'Sent', 40, { providerMsgid: meta.providerMsgid });
-    await manager.upsertDraftMessageRecord(account, 'Drafts', 41, meta);
-    await manager.upsertDraftMessageRecord(account, 'Drafts', 41, { providerMsgid: meta.providerMsgid });
-    await insertCopiedSibling(account.id, 40, 'Sent', 'Work', 50);
+    await manager.upsertSentMessageRecord(account, 'Sent', 40, { providerMsgid: meta.providerMsgid, uidValidity: '8' });
+    await manager.upsertDraftMessageRecord(account, 'Drafts', 41, { ...meta, uidValidity: '9' });
+    await manager.upsertDraftMessageRecord(account, 'Drafts', 41, { providerMsgid: meta.providerMsgid, uidValidity: '9' });
+    await insertCopiedSibling(account.id, 40, 'Sent', 'Work', 50, {
+      providerMsgid: meta.providerMsgid, sourceUidValidity: '8', destinationUidValidity: '10',
+    });
     // Exercise the same shared relocation projection used by move/archive/trash.
     await database.query(`WITH d AS (DELETE FROM messages WHERE account_id=$1 AND uid=$2 AND folder=$3 RETURNING *),
       u AS (SELECT 60::bigint AS new_uid)
