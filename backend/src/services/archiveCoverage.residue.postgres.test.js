@@ -717,4 +717,155 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
     } finally { queries.mockRestore(); }
   });
 
+  // Source-authored bounded controls for the ARM cursor120010 hazard. These
+  // simulate the real fixture's SIZE quote; no giant body is allocated/fetched.
+  const giantWindow = { tiny: 120009, giant: 120010, rawBytes: 17826102 };
+  const giantIdentity = String(9007199254740992n + BigInt(giantWindow.giant));
+  const phases = ['initial', 'arrival', 'sweep'];
+  const giantState = async () => (await db.query(`SELECT phase,scan_cursor,scan_high_uid,
+    sweep_cursor,label_modseq,sweep_checked_at FROM archive_coverage WHERE account_id=$1 AND folder=$2`,
+  [accountId, folder])).rows[0];
+  async function prepareGiantWindow(phase, normalMode = 'live', messages = [giantWindow.tiny, giantWindow.giant]) {
+    const harness = maintenanceClock(); // Real default120 /10MiB minute /1GiB day budget + SQL debit.
+    if (phase === 'arrival') await db.query(`UPDATE archive_coverage SET phase='scan',scan_cursor=77,
+      scan_high_uid=120008,sweep_cursor=17,label_modseq=19,sweep_checked_at=$3 WHERE account_id=$1 AND folder=$2`,
+    [accountId, folder, new Date(harness.clock.time)]);
+    if (phase === 'sweep') await seedSweep({ high: giantWindow.giant, modseq: '20' });
+    if (normalMode !== 'archive-only') await db.query(`INSERT INTO messages(account_id,folder,uid,provider_msgid)
+      VALUES($1,'INBOX',21,$2),($1,'INBOX',22,$2)`, [accountId, giantIdentity]);
+    // Same identity on another account is never representation for this account.
+    await db.query("INSERT INTO messages(account_id,folder,uid,provider_msgid) VALUES($1,'INBOX',21,$2)", [otherId, giantIdentity]);
+    const normalCopies = new Map(normalMode === 'missing-live' ? [] :
+      [[21, normalMode === 'wrong-provider' ? '9007199254740000' : giantIdentity]]);
+    const { client } = maintenanceProvider({ messages, normalCopies });
+    const originalFetch = client.fetch;
+    client.fetch = async function* (...args) {
+      for await (const raw of originalFetch.call(this, ...args)) {
+        yield this.mailbox.path === folder && raw.uid === giantWindow.giant
+          ? { ...raw, size: giantWindow.rawBytes } : raw;
+      }
+    };
+    return { ...harness, client, before: await giantState() };
+  }
+  const archiveMetadata = client => client.commands.filter(command => command[0] === 'FETCH' &&
+    command[1] === folder && (command[3].size || command[3].envelope));
+  const assertReadOnlyGiantWindow = client => {
+    for (const name of ['messageMove', 'messageCopy', 'messageDelete', 'messageFlagsAdd', 'messageFlagsRemove', 'append', 'send']) {
+      expect(client[name]).not.toHaveBeenCalled();
+    }
+    for (const command of client.commands.filter(item => item[0] === 'FETCH')) {
+      expect(command[3].source).toBeUndefined(); expect(command[3].bodyParts).toBeUndefined();
+    }
+  };
+
+  it.each(phases)('identity-first %s advances past a17MiB live-normal copy using real shared debits and metadata only for missing residue', async phase => {
+    const { client, options, approved, budget, clock } = await prepareGiantWindow(phase);
+    const result = await scanResult(client, options);
+    const attempts = options.reserveBudget.mock.calls.map(([, , debit]) => debit);
+    // Causal old-source RED target for initial/arrival: no >=68MiB quote for an
+    // identity with a live normal copy. Sweep is the unchanged positive control.
+    expect(attempts.filter(debit => debit.bytes >= 4 * giantWindow.rawBytes + 4096)).toEqual([]);
+    expect(result.counts).toEqual({ stored: 1, suppressed: 1, pending: 0 });
+    expect(archiveMetadata(client).filter(command => command[3].size).map(command => command[2])).toEqual([[giantWindow.tiny]]);
+    expect(archiveMetadata(client).filter(command => command[3].envelope).map(command => command[2])).toEqual([[giantWindow.tiny]]);
+    expect(client.commands.filter(command => command[0] === 'FETCH' && command[1] === 'INBOX'))
+      .toEqual([['FETCH', 'INBOX', [21], { uid: true }]]);
+    const span = phase === 'arrival' ? 2 : 62; // Default120 halves500->250->125->62 before provider work.
+    expect(approved).toEqual([
+      { messages: 0, bytes: 1024 }, { messages: span, bytes: 1024 + 256 * span },
+      { messages: 0, bytes: 1024 }, { messages: 0, bytes: 1024 },
+      { messages: 0, bytes: 1024 + 256 }, { messages: 0, bytes: 1024 },
+      { messages: 0, bytes: 1024 }, { messages: 0, bytes: 1024 + 256 },
+      { messages: 0, bytes: 1024 + 4 * 100 + 4096 },
+    ]);
+    const sqlDebit = BigInt((await db.query('SELECT bytes FROM background_download_debits WHERE account_id=$1', [accountId])).rows[0].bytes);
+    expect(sqlDebit).toBe(BigInt(phase === 'arrival' ? 23952 : 39312));
+    expect(sqlDebit).toBe(approved.reduce((sum, debit) => sum + BigInt(debit.bytes + 1024), 0n));
+    expect(approved.reduce((sum, debit) => sum + debit.messages, 0)).toBe(span);
+    const stored = (await peer.query(`SELECT id,uid::text,provider_msgid FROM messages
+      WHERE account_id=$1 AND is_archive_residue`, [accountId])).rows;
+    expect(stored).toHaveLength(1);
+    expect(result.admittedIds).toEqual([stored[0].id]);
+    expect(stored[0]).toMatchObject({ uid: String(giantWindow.tiny), provider_msgid: String(9007199254740992n + BigInt(giantWindow.tiny)) });
+    expect((await rows()).filter(row => row.account_id === accountId && row.provider_msgid === giantIdentity))
+      .toEqual([21, 22].map(uid => ({ account_id: accountId, folder: 'INBOX', uid: String(uid),
+        provider_msgid: giantIdentity, is_archive_residue: false })));
+    const state = await giantState();
+    expect(state.scan_high_uid).toBe('120010');
+    expect(state.scan_cursor).toBe(phase === 'arrival' ? '77' : phase === 'sweep' ? '0' : '119948');
+    expect(state.sweep_cursor).toBe(phase === 'arrival' ? '17' : phase === 'sweep' ? '119948' : null);
+    expect(state.label_modseq).toBe(phase === 'arrival' ? '19' : '20');
+    expect(state.sweep_checked_at).toEqual(phase === 'initial' ? null : new Date(clock.time));
+    expect(await budget.reserve(otherId, 'imap.gmail.test', { messages: 120 - span, bytes: 1 }, clock.time))
+      .toEqual({ allowed: true, deferAt: null });
+    expect(await budget.reserve(otherId, 'imap.gmail.test', { messages: 1, bytes: 1 }, clock.time + 60000))
+      .toEqual({ allowed: true, deferAt: null }); // No skipped giant quote armed pendingOversize.
+    assertReadOnlyGiantWindow(client);
+  });
+
+  it.each(phases.flatMap(phase => ['missing-live', 'wrong-provider'].map(mode => [phase, mode])))
+  ('identity-first %s keeps a cached giant pending for %s membership proof without inventing deletion', async (phase, mode) => {
+    const { client, options, before } = await prepareGiantWindow(phase, mode);
+    const result = await scanResult(client, options);
+    expect(result.counts).toEqual({ stored: 1, suppressed: 0, pending: 1 });
+    expect(result.admittedIds).toHaveLength(1); // Only the tiny actual committed row.
+    expect(await giantState()).toEqual(before);
+    expect(archiveMetadata(client).map(command => command[2])).toEqual([[giantWindow.tiny], [giantWindow.tiny]]);
+    expect((await rows()).filter(row => row.account_id === accountId && row.provider_msgid === giantIdentity))
+      .toEqual([21, 22].map(uid => ({ account_id: accountId, folder: 'INBOX', uid: String(uid),
+        provider_msgid: giantIdentity, is_archive_residue: false })));
+    expect((await peer.query('SELECT id FROM messages WHERE account_id=$1 AND is_archive_residue', [accountId])).rows)
+      .toEqual([{ id: result.admittedIds[0] }]);
+    assertReadOnlyGiantWindow(client);
+  });
+
+  it.each(phases.flatMap(phase => ['normal', 'archive'].map(epoch => [phase, epoch])))
+  ('identity-first %s refuses a changed %s epoch before metadata/admission/checkpoint', async (phase, epoch) => {
+    const { client, options, before } = await prepareGiantWindow(phase);
+    const examine = client.getMailboxLock;
+    let archiveProbes = 0;
+    client.getMailboxLock = async function (...args) {
+      const lock = await examine.call(this, ...args);
+      if (this.mailbox.path === folder) archiveProbes++;
+      if (epoch === 'normal' && this.mailbox.path === 'INBOX') this.mailbox.uidValidity = 10n;
+      if (epoch === 'archive' && this.mailbox.path === folder && archiveProbes === 2) this.mailbox.uidValidity = 8n;
+      return lock;
+    };
+    expect(await scanResult(client, options)).toEqual({ counts: { stored: 0, suppressed: 0, pending: true }, admittedIds: [] });
+    expect(archiveMetadata(client)).toEqual([]);
+    expect(await giantState()).toEqual(before);
+    expect((await rows()).filter(row => row.account_id === accountId)).toHaveLength(2);
+    expect((await rows()).some(row => row.is_archive_residue)).toBe(false);
+    assertReadOnlyGiantWindow(client);
+  });
+
+  it.each(phases)('identity-first %s honors real budget refusal before the first EXAMINE with pristine pending and no writes', async phase => {
+    const { client, options, budget, clock, before } = await prepareGiantWindow(phase);
+    budget.refuse('imap.gmail.test', clock.time);
+    expect(await scanResult(client, options)).toEqual({ counts: { stored: 0, suppressed: 0, pending: true }, admittedIds: [] });
+    expect(client.commands).toEqual([]);
+    expect((await db.query('SELECT bytes FROM background_download_debits WHERE account_id=$1', [accountId])).rows).toEqual([]);
+    expect(await giantState()).toEqual(before);
+    expect((await rows()).filter(row => row.account_id === accountId)).toHaveLength(2);
+    assertReadOnlyGiantWindow(client);
+  });
+
+  it.each(phases)('identity-first %s discloses the unresolved archive-only giant limit instead of bypassing budget or claiming coverage', async phase => {
+    const { client, options, budget, clock, before } = await prepareGiantWindow(phase, 'archive-only', [giantWindow.giant]);
+    const result = await scanResult(client, options);
+    expect(result.counts).toMatchObject({ stored: 0, suppressed: 0, pending: true });
+    expect(result.admittedIds).toEqual([]);
+    expect(result.counts.deferAt).toBe(clock.time + 60000);
+    expect(options.reserveBudget.mock.calls.map(([, , debit]) => debit))
+      .toContainEqual({ messages: 0, bytes: 71309528 }); // +1024 protocol overhead =71310552 quoted.
+    expect(archiveMetadata(client).filter(command => command[3].envelope)).toEqual([]);
+    expect(await giantState()).toEqual(before);
+    expect((await rows()).filter(row => row.account_id === accountId)).toEqual([]);
+    const prefixDebit = BigInt((await db.query('SELECT bytes FROM background_download_debits WHERE account_id=$1', [accountId])).rows[0].bytes);
+    expect(prefixDebit).toBe(BigInt(phase === 'arrival' ? 13056 : 28416)); // No giant quote was charged; daily cap is not exhausted.
+    expect(await budget.reserve(otherId, 'imap.gmail.test', { messages: 0, bytes: 1 }, clock.time + 60000))
+      .toEqual({ allowed: false, deferAt: clock.time + 120000 }); // Honest existing pendingOversize limitation.
+    assertReadOnlyGiantWindow(client);
+  });
+
 });

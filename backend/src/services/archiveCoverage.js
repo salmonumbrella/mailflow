@@ -265,10 +265,9 @@ export async function runArchiveCoverageBatch(account, {
     const loadMetadata = async input => {
       let requested = [...input].sort((a, b) => b - a);
       if (!requested.length) return;
-      if (maintenance) {
-        budget = await reserveBudget(account.id, account.imap_host, { messages: 0, bytes: 1024 + requested.length * 256 });
-        if (!budget.allowed || stopped()) return { counts: { ...pending.counts, deferAt: budget.deferAt }, admittedIds: [] };
-      }
+      // Every phase already fetched IDs; reserve this separate SIZE response.
+      budget = await reserveBudget(account.id, account.imap_host, { messages: 0, bytes: 1024 + requested.length * 256 });
+      if (!budget.allowed || stopped()) return { counts: { ...pending.counts, deferAt: budget.deferAt }, admittedIds: [] };
       const sizes = new Map();
       for await (const msg of fetch(requested.join(','), { uid: true, size: true }, { uid: true })) {
         if (requested.includes(msg.uid) && Number.isSafeInteger(msg.size) && msg.size >= 0) sizes.set(msg.uid, msg.size);
@@ -300,17 +299,14 @@ export async function runArchiveCoverageBatch(account, {
       if (received.size !== requested.length || stopped()) return pending;
       for (const uid of records.keys()) if (uid < lower) records.delete(uid);
     };
-    if (maintenance) {
-      if (uids.length) for await (const raw of fetch([...uids].sort((a, b) => b - a).join(','), { uid: true }, { uid: true })) {
-        if (uids.includes(raw.uid) && typeof raw.emailId === 'string' && raw.emailId) {
-          records.set(raw.uid, { uid: raw.uid, providerMsgid: raw.emailId, identityOnly: true, normalCopies: [] });
-        }
+    // Identify first on initial scans too: a live normal copy needs no
+    // potentially oversized full-metadata quotation from its All Mail copy.
+    if (uids.length) for await (const raw of fetch([...uids].sort((a, b) => b - a).join(','), { uid: true }, { uid: true })) {
+      if (uids.includes(raw.uid) && typeof raw.emailId === 'string' && raw.emailId) {
+        records.set(raw.uid, { uid: raw.uid, providerMsgid: raw.emailId, identityOnly: true, normalCopies: [] });
       }
-      if (records.size !== uids.length || stopped()) return pending;
-    } else {
-      const blocked = await loadMetadata(uids);
-      if (blocked) return blocked;
     }
+    if (records.size !== uids.length || stopped()) return pending;
     selected.lock.release(); selected = null;
     // Idle ticks never select normal mailboxes. Before accounting for any
     // records, cached bootstrap readiness still needs live epoch validation.
@@ -347,7 +343,7 @@ export async function runArchiveCoverageBatch(account, {
     }
     selected = await examine(folder);
     if (!selected || selected.epoch !== epoch || stopped()) return pending;
-    if (maintenance) {
+    {
       const { rows: represented } = await query(`SELECT uid,provider_msgid FROM messages
         WHERE account_id=$1 AND folder=$2 AND uid=ANY($3::bigint[]) AND is_archive_residue AND NOT is_deleted`,
       [account.id, folder, [...records.keys()]]);
