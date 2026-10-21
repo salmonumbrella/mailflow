@@ -1,0 +1,127 @@
+name: Verify reviewed frontend v26
+on:
+  push:
+    branches: [verification/ci-mailflow-frontend-v26]
+permissions:
+  contents: read
+concurrency:
+  group: mailflow-reviewed-frontend-v26
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  verify:
+    if: github.repository == 'salmonumbrella/mailflow' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: salmonumbrella/mailflow
+          ref: 84d56d2ee0ae3e567f71b75d4b5e65962d45a318
+          persist-credentials: false
+      - name: Assert exact reviewed source and focused files
+        id: pin
+        run: |
+          mkdir -p frontend-focused-results
+          python3 - <<'PYPIN'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          expected = '84d56d2ee0ae3e567f71b75d4b5e65962d45a318'
+          actual = subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()
+          tree = subprocess.check_output(['git','rev-parse','HEAD^{tree}'], text=True).strip()
+          assert actual == expected and tree == '1c1e0dc9bc962d2a980783440cae5e24879d7904'
+          assert subprocess.run(['git','config','--local','--get-regexp',r'^http\..*\.extraheader$'], capture_output=True).returncode == 1
+          files = json.loads('["src/components/PageSizeMenu.test.js", "src/components/FastmailAddressIndicator.render.test.js", "src/hooks/useReaderSenderIdentities.test.js", "src/utils/fastmailAddressKind.test.js", "src/components/MessageList.render.test.js", "src/components/MessageList.search.test.js", "src/components/MessagePane.render.test.js", "src/components/ConversationPane.render.test.js", "src/components/ComposeModal.render.test.js", "src/components/Sidebar.render.test.js", "src/utils/markRead.test.js", "src/utils/pendingReads.test.js", "src/utils/readCountScope.test.js", "src/utils/threadActions.test.js", "src/utils/countWriteTracker.test.js", "src/utils/countWriteTracker.accounts.test.js"]')
+          assert len(files) == 16 and all(Path('frontend', f).is_file() for f in files)
+          names = subprocess.check_output(['git','ls-files','-z']).decode().split('\0')[:-1]
+          assert len(names) == 1504
+          hashes = {f: hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in names}
+          Path('frontend-focused-results/source-hashes.json').write_text(json.dumps(hashes, indent=2)+'\n')
+          Path('frontend-focused-results/source-pin.json').write_text(json.dumps(dict(source_sha=actual, tree=tree, tracked_files=len(names), focused_files=files), indent=2)+'\n')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as stream: stream.write('actual_sha='+actual+'\n')
+          print(json.dumps(dict(source_sha=actual, tree=tree, focused_files=files), indent=2))
+          PYPIN
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        id: node
+        with:
+          node-version: '22.23.3'
+          package-manager-cache: false
+          token: ''
+      - name: Frontend install
+        id: frontend_ci
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: frontend
+        run: npm ci 2>&1 | tee ../frontend-focused-results/install.log
+      - name: Frontend lint
+        id: frontend_lint
+        if: ${{ !cancelled() && steps.frontend_ci.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: frontend
+        run: npm run lint 2>&1 | tee ../frontend-focused-results/lint.log
+      - name: Frontend build
+        id: frontend_build
+        if: ${{ !cancelled() && steps.frontend_ci.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: frontend
+        run: npm run build 2>&1 | tee ../frontend-focused-results/build.log
+      - name: Focused new and interacting frontend suites
+        id: frontend_test
+        if: ${{ !cancelled() && steps.frontend_ci.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: frontend
+        run: |
+          node --test --test-reporter=tap --test-concurrency=1 src/components/PageSizeMenu.test.js src/components/FastmailAddressIndicator.render.test.js src/hooks/useReaderSenderIdentities.test.js src/utils/fastmailAddressKind.test.js src/components/MessageList.render.test.js src/components/MessageList.search.test.js src/components/MessagePane.render.test.js src/components/ConversationPane.render.test.js src/components/ComposeModal.render.test.js src/components/Sidebar.render.test.js src/utils/markRead.test.js src/utils/pendingReads.test.js src/utils/readCountScope.test.js src/utils/threadActions.test.js src/utils/countWriteTracker.test.js src/utils/countWriteTracker.accounts.test.js 2>&1 | tee ../frontend-focused-results/tests.tap
+      - name: Enforce raw outcomes, native counts and unchanged source
+        if: always()
+        env:
+          EXPECTED_SHA: 84d56d2ee0ae3e567f71b75d4b5e65962d45a318
+          ACTUAL_SHA: ${{ steps.pin.outputs.actual_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          NODE_VERSION: ${{ steps.node.outputs.node-version }}
+        run: |
+          python3 - <<'PYRESULT'
+          import hashlib, json, os, platform, re
+          from pathlib import Path
+          directory = Path('frontend-focused-results')
+          directory.mkdir(exist_ok=True)
+          steps = json.loads(os.environ['STEPS_JSON'])
+          keys = ['frontend_ci','frontend_lint','frontend_build','frontend_test']
+          outcomes = {k: steps.get(k,{}).get('outcome','missing') for k in keys}
+          counts = {}
+          tap = directory/'tests.tap'
+          if tap.exists():
+              for name in ['tests','pass','fail','cancelled','skipped','todo']:
+                  found = re.findall(r'^# '+name+r' (\d+)\s*$', tap.read_text(), re.M)
+                  if found: counts[name] = int(found[-1])
+          unchanged = False
+          manifest = directory/'source-hashes.json'
+          if manifest.exists():
+              hashes = json.loads(manifest.read_text())
+              unchanged = all(Path(f).is_file() and hashlib.sha256(Path(f).read_bytes()).hexdigest()==h for f,h in hashes.items())
+          passed = (os.environ['ACTUAL_SHA'] == os.environ['EXPECTED_SHA'] and steps.get('pin',{}).get('outcome')=='success'
+                    and steps.get('node',{}).get('outcome')=='success' and all(v=='success' for v in outcomes.values())
+                    and counts.get('tests',0)>0 and counts.get('tests')==counts.get('pass')
+                    and all(counts.get(k)==0 for k in ['fail','cancelled','skipped','todo']) and unchanged)
+          result = dict(source_sha=os.environ['EXPECTED_SHA'],actual_sha=os.environ['ACTUAL_SHA'],workflow_sha=os.environ['WORKFLOW_SHA'],
+                        profile='GitHub ubuntu-latest, Node22.23.3, 16 explicit files, serial file workers, source timeouts unchanged',
+                        node=os.environ['NODE_VERSION'],architecture=platform.machine(),raw_outcomes=outcomes,native_counts=counts,
+                        source_unchanged=unchanged,status='passed' if passed else 'failed_or_incomplete',
+                        limits='Focused frontend only; final assembly broad CI, browser, provider, Mini,108k and performance remain open')
+          (directory/'result.json').write_text(json.dumps(result,indent=2)+'\n')
+          print(json.dumps(result,indent=2))
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary: summary.write('```json\n'+json.dumps(result,indent=2)+'\n```\n')
+          raise SystemExit(0 if passed else 1)
+          PYRESULT
+      - name: Retain focused native reports on every outcome
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mailflow-frontend-v26-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frontend-focused-results/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 14
