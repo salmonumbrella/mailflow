@@ -1,0 +1,88 @@
+{
+  "observedAt": "2026-10-21T14:24:36.838253+00:00",
+  "images": {
+    "node": {
+      "repository": "docker.io/library/node",
+      "tagObserved": "22.23.3-bookworm-slim",
+      "indexDigest": "sha256:3ed98443660ff48413b5af19ecefce3b9d50845a901a43420d47cc63a9fddbe9",
+      "armManifestDigest": "sha256:6be82d4da7e0320cfc2bc5c000d534bf8c0a7eae567dce465b47c77fdd483987",
+      "configDigest": "sha256:ad29f8b705499d940ca3e27ee720168223fb06e0cb15a821039d12d4a42e3e2b",
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux",
+        "variant": "v8"
+      },
+      "versionEnvironment": [
+        "NODE_VERSION=22.23.3"
+      ],
+      "rootfsDiffIds": [
+        "sha256:3b7c7ecdb9b2a2a7651551c07dc748fee9e27902c8b88c25cb3af3fbbc0a4b87",
+        "sha256:8547c4f81bda4a6ffb962f64aa613f10fa015cc231e52114b2453bb890648d10",
+        "sha256:69ab2fd07c0a0fb7f624688e97e4af15aef96c0ce4695de861dcd33ad6bdf5b8",
+        "sha256:b6d2f3e730bffd9da56775c27ccf96f5720c8f38f491e95d7cfe9ed098078ba1",
+        "sha256:261dede9a1cf478232e0b223c6247859b80d7873493d4797953928a9952ce019"
+      ],
+      "pullRef": "docker.io/library/node@sha256:6be82d4da7e0320cfc2bc5c000d534bf8c0a7eae567dce465b47c77fdd483987",
+      "metadataUrl": "https://registry-1.docker.io/v2/library/node/manifests/22.23.3-bookworm-slim"
+    },
+    "postgres": {
+      "repository": "docker.io/library/postgres",
+      "tagObserved": "16.15-bookworm",
+      "indexDigest": "sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0",
+      "armManifestDigest": "sha256:2b429c90204d3dc581371d2ce267ffb0aeeddf4968e176de5003037b4d0de8a9",
+      "configDigest": "sha256:7a453af3765f0df89f869030d70b1aa5d79f68e33ba80ea3a8671d68cb259be0",
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux",
+        "variant": "v8"
+      },
+      "versionEnvironment": [
+        "PG_VERSION=16.15-1.pgdg12+2"
+      ],
+      "rootfsDiffIds": [
+        "sha256:3b7c7ecdb9b2a2a7651551c07dc748fee9e27902c8b88c25cb3af3fbbc0a4b87",
+        "sha256:7906179e7057b3ba64d7990c99f8c27a620abe6c68f9821d99f4cd92b9b70097",
+        "sha256:08b2b5c8ed173d7cc0683a53188a9372b407be47103a5124f17fc69f607cba83",
+        "sha256:3fad204dcb95841cc00916061f7fa569040cd5feea9704953fd9945bd24002c6",
+        "sha256:52f2a45e791394f1b259995f9f16340c189d1099c303642f11fb4433c50ab570",
+        "sha256:e2ff0ffea5ba3c0fa937b208e570eb7c1f388a50f68ca9746d9b1a7be3d34751",
+        "sha256:f063cf4756f91ce909054a3d5302ada5001ac019d930564a2cee84496434da98",
+        "sha256:2c34f87bed48c389d486b072011567c5f80ed14be129f4bb4bd6ca3e4a53638b",
+        "sha256:325b1954e48577c2136648ce09ad369e54004d2042f76948ca2731111281ac2e",
+        "sha256:801c481077e7ad0cb763e68901ecae4df6584b35466c20df2f9cf5767402978e",
+        "sha256:28c48f3c936be8575efe584d7ae8bf03c1cde6073955e184d63dc93aaa1a7771",
+        "sha256:070d004c7f909eddb59fbf14b9e3505d95a57ad07c4388520f017f82602106a9",
+        "sha256:2cbe906e05ee331749f1c1c2e7310f341905f7dba82043404481ab2e53346802",
+        "sha256:991aae50164c372217fc503b9d9c090f635334601819782edb5ec22db83644f1"
+      ],
+      "pullRef": "docker.io/library/postgres@sha256:2b429c90204d3dc581371d2ce267ffb0aeeddf4968e176de5003037b4d0de8a9",
+      "metadataUrl": "https://registry-1.docker.io/v2/library/postgres/manifests/16.15-bookworm"
+    },
+    "redis": {
+      "repository": "docker.io/library/redis",
+      "tagObserved": "7-bookworm",
+      "indexDigest": "sha256:44960b3100c48159a66d28c18b0588c193492e25f7551d60e51dd464fc3eca5b",
+      "armManifestDigest": "sha256:617bd2a7a36d215e3e0c61353a17cb5c856b192664e774455ef8023a60bee6ac",
+      "configDigest": "sha256:52d0098541c3d073213ca1889629da836eef745c2bc525239000cb0dac019f04",
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux",
+        "variant": "v8"
+      },
+      "versionEnvironment": [
+        "REDIS_VERSION=7.4.11"
+      ],
+      "rootfsDiffIds": [
+        "sha256:3b7c7ecdb9b2a2a7651551c07dc748fee9e27902c8b88c25cb3af3fbbc0a4b87",
+        "sha256:a875790f2f08c84b4353954edc4b02f468ef4403f1fc0835e8d7b4b3e6442f76",
+        "sha256:dbe82692a5d2fc191cc5fe7b770bcc21e7e2188cd9558ace8499d991553ec0ce",
+        "sha256:c2031b665645eb1ad350d728e0a4c6ae2cdf106091decde02144c3b57f9af04a",
+        "sha256:3d193ca2be3664307fd8621a99f99d8a18b4a308a0d3045456606f351e420c86",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:5c3fe3f59b55378ab5752ea3b3c0c6bfc7a340ed3ab42906a23b55fbd700fc8c"
+      ],
+      "pullRef": "docker.io/library/redis@sha256:617bd2a7a36d215e3e0c61353a17cb5c856b192664e774455ef8023a60bee6ac",
+      "metadataUrl": "https://registry-1.docker.io/v2/library/redis/manifests/7-bookworm"
+    }
+  }
+}
