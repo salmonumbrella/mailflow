@@ -1,0 +1,289 @@
+{
+  "status": "SOURCE_AUTHORED_CASE_INVENTORY_UNRUN_NOT_EXECUTED_SQL_EVIDENCE",
+  "sourceSha": "e70ea12417f1d6a38eee14f91474879ccdcebc8b",
+  "tree": "69bab1f8f96fa96b850b170f26eb91e918b821dd",
+  "totalCases": 43,
+  "duplicateUnits": 0,
+  "files": [
+    {
+      "id": "01-metadata",
+      "file": "backend/src/services/mailAccess.labelMetadata.postgres.test.js",
+      "sha256": "07732b94bbad1b59c29edec9800cbb1fb1e5033b6e1557a690aced1d60d67edb",
+      "expectedNativeCases": 3,
+      "database": "mailflow_7pv6",
+      "onlySuppliedUrlEnvironment": "DATABASE_URL",
+      "nativeArgv": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/mailAccess.labelMetadata.postgres.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--bail=1",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ],
+      "outerProcessDeadlineSeconds": 360,
+      "sourceTestTimeoutOverride": false,
+      "cases": [
+        {
+          "title": "combines same-thread and same-message copies with oldest dates, within the account",
+          "line": 36
+        },
+        {
+          "title": "ignores deleted and foreign requested targets",
+          "line": 53
+        },
+        {
+          "title": "does not join unrelated headerless messages and preserves unknown dates",
+          "line": 60
+        }
+      ]
+    },
+    {
+      "id": "02-watch-recovery",
+      "file": "backend/src/routes/send.watchRecovery.postgres.test.js",
+      "sha256": "09953ec3b83e50012531c0f7f7386d7cc9468cd84eb96e3ee67bf4b989d1ceb3",
+      "expectedNativeCases": 20,
+      "database": "mailflow_7pv6",
+      "onlySuppliedUrlEnvironment": "MAILFLOW_SENT_WATCH_DATABASE_URL",
+      "nativeArgv": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/routes/send.watchRecovery.postgres.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--bail=1",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ],
+      "outerProcessDeadlineSeconds": 360,
+      "sourceTestTimeoutOverride": false,
+      "cases": [
+        {
+          "title": "C01 persists intent before COPY, syncs exact UID, then exposes Watch through the real route",
+          "line": 412
+        },
+        {
+          "title": "C02 a real destination cache-write failure retains known COPYUID and immediate retry never recopies",
+          "line": 431
+        },
+        {
+          "title": "C03 post-COPY receipt SQL failure versus lost SQL acknowledgement keep their actual durable outcomes",
+          "line": 453
+        },
+        {
+          "title": "C04 failed pre-COPY CAS, changed source epoch and malformed namespace produce no provider COPY",
+          "line": 467
+        },
+        {
+          "title": "C05 lost transport acknowledgement after provider side effect stays pending across immediate retry",
+          "line": 483
+        },
+        {
+          "title": "C06 absent COPYUID, missing UIDVALIDITY and malformed maps cannot become success through similar synced mail",
+          "line": 490
+        },
+        {
+          "title": "C07 source or destination epoch changes invalidate known UID recovery without reusing the locator",
+          "line": 500
+        },
+        {
+          "title": "C08 different destination identity, wrong UID or repeated FETCH result are never accepted as COPY proof",
+          "line": 524
+        },
+        {
+          "title": "C09 receipt copied to another account/source/UID/folder cannot authorize that physical source; foreign user is rejected",
+          "line": 534
+        },
+        {
+          "title": "C10 pre-existing cache label needs exact live proof: verified no-op, ambiguity or stale identity holds (F5)",
+          "line": 551
+        },
+        {
+          "title": "C11 substring SEARCH hit, non-array result or refusal is an absence-gate hold, never last-hit selection",
+          "line": 562
+        },
+        {
+          "title": "C12 missing, malformed, control-containing or mismatched source Message-ID cannot start an intent",
+          "line": 576
+        },
+        {
+          "title": "C13 failed exact source read clears only its own pre-command receipt and never writes provider mail",
+          "line": 588
+        },
+        {
+          "title": "C14 fresh manager after cache failure reads the durable locator and reconciles with no additional COPY",
+          "line": 606
+        },
+        {
+          "title": "C15 independent managers racing real source-receipt CAS admit exactly one COPY and preserve loser conflict",
+          "line": 616
+        },
+        {
+          "title": "C16 only a completed receipt with its known UID provably absent can retire before a new explicit COPY",
+          "line": 648
+        },
+        {
+          "title": "C17 already-there, ordinary, other-state and Gmail calls retain the original label path without receipts",
+          "line": 657
+        },
+        {
+          "title": "C18 forceCopy Watch state-switch retry cannot bypass pending intent or remove the old state",
+          "line": 700
+        },
+        {
+          "title": "C19 real count admission/tracking lifetime and error propagation stay explicit, including uncertain outcomes",
+          "line": 710
+        },
+        {
+          "title": "C20 LIMITATION: source-row purge loses journal; visible candidates hold but a hidden delayed prior COPY can duplicate",
+          "line": 742
+        }
+      ]
+    },
+    {
+      "id": "03-tokens",
+      "file": "backend/src/services/apiTokens.postgres.test.js",
+      "sha256": "4493a5895c526d9c135c129d4ef2529403d8fa911a0269d2a1a23c8b878279ae",
+      "expectedNativeCases": 11,
+      "database": "mailflow_7pv6",
+      "onlySuppliedUrlEnvironment": "MAILFLOW_TEST_DATABASE_URL",
+      "nativeArgv": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/apiTokens.postgres.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--bail=1",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ],
+      "outerProcessDeadlineSeconds": 360,
+      "sourceTestTimeoutOverride": false,
+      "cases": [
+        {
+          "title": "leaves tokens turned off after the migration",
+          "line": 81
+        },
+        {
+          "title": "gives every token an expiry and one of the three confirmations",
+          "line": 85
+        },
+        {
+          "title": "looks a token up by its hash, expired once the database clock has reached its expiry",
+          "line": 97
+        },
+        {
+          "title": "holds a token valid mid-request only while it is unexpired, unrevoked and tokens are on",
+          "line": 106
+        },
+        {
+          "title": "lists only the user's own tokens, newest first, each marked expired or not",
+          "line": 119
+        },
+        {
+          "title": "creates a token storing only its hash, and stops at the limit",
+          "line": 127
+        },
+        {
+          "title": "revokes only the user's own token, and a deleted user takes theirs along",
+          "line": 145
+        },
+        {
+          "title": "keeps one token per hash",
+          "line": 155
+        },
+        {
+          "title": "password sign-in off: leaves only tokens confirmed through single sign-on",
+          "line": 170
+        },
+        {
+          "title": "two-factor required: deletes the tokens confirmed with only a password",
+          "line": 175
+        },
+        {
+          "title": "a provider turned off or deleted: deletes the tokens confirmed through it",
+          "line": 180
+        }
+      ]
+    },
+    {
+      "id": "04-token-guards",
+      "file": "backend/src/middleware/apiTokenGuards.postgres.test.js",
+      "sha256": "b0cede2ef574370738f2298605afdf58727cff1adc60a1dad3cc9bd42c23ac3d",
+      "expectedNativeCases": 9,
+      "database": "mailflow_7pv6",
+      "onlySuppliedUrlEnvironment": "MAILFLOW_TEST_DATABASE_URL",
+      "nativeArgv": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/middleware/apiTokenGuards.postgres.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--bail=1",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ],
+      "outerProcessDeadlineSeconds": 360,
+      "sourceTestTimeoutOverride": false,
+      "cases": [
+        {
+          "title": "moves into ordinary folders, a Trash, Drafts or Snoozed name below the top level included",
+          "line": 86
+        },
+        {
+          "title": "refuses Trash, Drafts, Spam and All Mail by flag or by name, Snoozed, and a folder that holds no mail",
+          "line": 93
+        },
+        {
+          "title": "refuses a folder one of the account's snooze records names, as where a rename took Snoozed",
+          "line": 101
+        },
+        {
+          "title": "refuses the account's mapped Trash, Spam and Drafts",
+          "line": 115
+        },
+        {
+          "title": "refuses a Gmail folder MailFlow does not sync",
+          "line": 122
+        },
+        {
+          "title": "refuses to move or archive a draft, by its flag or by its folder",
+          "line": 126
+        },
+        {
+          "title": "looks only at the user's own messages",
+          "line": 135
+        },
+        {
+          "title": "refuses an archive into Gmail's All Mail, until the account has an archive label or mapping",
+          "line": 139
+        },
+        {
+          "title": "refuses to snooze a draft, or a message whose reply chain takes one along",
+          "line": 153
+        }
+      ]
+    }
+  ],
+  "nativeGuard": "Exactlyonefile perJSON,allassertionspass,exact3/20/11/9counts,zero failed/pending/skipped/todo/cancel/unhandled,exit0/no deadline; incomplete is failure",
+  "controllerProvenance": "PreviouslyexecutedP40managedrunner39613141990;newSQL43notexecuted;baseline385separate",
+  "limits": [
+    "All four suites use connection-local TEMP schema,not full production migrations",
+    "Watch20 requires onlyMAILFLOW_SENT_WATCH_DATABASE_URL andcurrent_database mailflow_7pv6",
+    "Watch C15 uses oneSQLconnection;C20 purge duplicationremainsLIMIT",
+    "N1/N3/N4/C20 andF2LOWs retained"
+  ]
+}

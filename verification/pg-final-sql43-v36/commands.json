@@ -1,0 +1,50 @@
+[
+  {
+    "id": "01-metadata",
+    "file": "backend/src/services/mailAccess.labelMetadata.postgres.test.js",
+    "expected_sql_passes": 3,
+    "expected_duplicate_unit_passes": 0,
+    "database": "mailflow_7pv6",
+    "database_url_environment": "DATABASE_URL",
+    "max_fixture_clients": 2,
+    "deadline_seconds": 360,
+    "startup_options": "-c timezone=UTC",
+    "application_name_prefix": "v34-sql43-"
+  },
+  {
+    "id": "02-watch-recovery",
+    "file": "backend/src/routes/send.watchRecovery.postgres.test.js",
+    "expected_sql_passes": 20,
+    "expected_duplicate_unit_passes": 0,
+    "database": "mailflow_7pv6",
+    "database_url_environment": "MAILFLOW_SENT_WATCH_DATABASE_URL",
+    "max_fixture_clients": 2,
+    "deadline_seconds": 360,
+    "startup_options": "-c timezone=UTC",
+    "application_name_prefix": "v34-sql43-"
+  },
+  {
+    "id": "03-tokens",
+    "file": "backend/src/services/apiTokens.postgres.test.js",
+    "expected_sql_passes": 11,
+    "expected_duplicate_unit_passes": 0,
+    "database": "mailflow_7pv6",
+    "database_url_environment": "MAILFLOW_TEST_DATABASE_URL",
+    "max_fixture_clients": 2,
+    "deadline_seconds": 360,
+    "startup_options": "-c timezone=UTC",
+    "application_name_prefix": "v34-sql43-"
+  },
+  {
+    "id": "04-token-guards",
+    "file": "backend/src/middleware/apiTokenGuards.postgres.test.js",
+    "expected_sql_passes": 9,
+    "expected_duplicate_unit_passes": 0,
+    "database": "mailflow_7pv6",
+    "database_url_environment": "MAILFLOW_TEST_DATABASE_URL",
+    "max_fixture_clients": 2,
+    "deadline_seconds": 360,
+    "startup_options": "-c timezone=UTC",
+    "application_name_prefix": "v34-sql43-"
+  }
+]
