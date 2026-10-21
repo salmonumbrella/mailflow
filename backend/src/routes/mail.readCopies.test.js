@@ -26,13 +26,14 @@ import { pluginRegistry } from '../plugins/registry.js';
 const A = 'a0000000-0000-4000-8000-000000000001', B = 'b0000000-0000-4000-8000-000000000002', C = 'c0000000-0000-4000-8000-000000000003';
 const MID = '<copy@example.test>';
 let account, rows, wire, hold, releaseHold, gtd, labels, failFolder, selectionError, selectionChange, selectionHold, releaseSelection, otherAccounts, events, serial = 0;
+let intentVersion = 0n;
 class Mailbox extends EventEmitter {
   constructor() { super(); this.usable = true; this.capabilities = new Set(['MOVE', 'UIDPLUS']); }
   async connect() {}
   close() { this.usable = false; }
   async logout() { this.close(); }
   async noop() { return true; }
-  async getMailboxLock(folder) { this.mailbox = { path: folder, exists: 3 }; return { release() {} }; }
+  async getMailboxLock(folder) { this.mailbox = { path: folder, exists: 3, uidValidity: 1n }; return { release() {} }; }
   async messageFlagsAdd(uid, flags, options) { return this.store(uid, flags, options, true); }
   async messageFlagsRemove(uid, flags, options) { return this.store(uid, flags, options, false); }
   async store(uid, flags, options, value) {
@@ -59,6 +60,24 @@ class Mailbox extends EventEmitter {
 }
 // SQL projections reflect production RETURNING; fake rows cannot hide missing columns.
 async function database(sql, params = []) {
+  if (sql.includes('nextval(')) return { rows: [{ version: String(++intentVersion) }], rowCount: 1 };
+  if (sql.startsWith('SELECT id, message_id, flag_address_valid')) return { rows: rows.filter(r => r.account_id === params[0] && r.folder === params[1] && Number(r.uid) === Number(params[2]) && !r.is_deleted).map(r => ({ ...r })) };
+  if (sql.includes('THEN NULL ELSE') && sql.includes('UPDATE messages')) {
+    const target = rows.find(r => r.id === params[0]);
+    if (!target || BigInt(target.read_intent_version) > BigInt(params[1])) return { rows: [], rowCount: 0 };
+    if (target.read_changed_at === params[2]) target.read_changed_at = null;
+    target.read_intent_version = params[1]; return { rows: [], rowCount: 1 };
+  }
+  if (sql.includes('UPDATE messages') && sql.includes('read_intent_version')) {
+    const reassert = sql.includes('SET is_read = $1');
+    const target = rows.find(r => r.id === params[reassert ? 1 : 0]);
+    const version = params[reassert ? 3 : 2], marker = params[reassert ? 2 : 1];
+    if (!target || BigInt(target.read_intent_version) > BigInt(version)
+      || (target.read_intent_version === version && target.read_changed_at !== marker)) return { rows: [], rowCount: 0 };
+    target.read_intent_version = version; target.read_changed_at = marker;
+    if (reassert) target.is_read = params[0];
+    return { rows: [{ id: target.id }], rowCount: 1 };
+  }
   if (sql.includes('FROM folders')) return { rows: sql.includes('special_use =') && !sql.includes('LIMIT 1') ? [] : sql.includes('LIMIT 1') ? [{ path: 'Archive' }] : [] };
   if (sql.startsWith('SELECT DISTINCT folder FROM messages')) return { rows: rows.filter(r => !r.is_deleted).map(r => ({ folder: r.folder })) };
   if (sql.startsWith('SELECT uid FROM messages')) return { rows: rows.filter(r => r.account_id === params[0] && r.folder === params[1] && r.message_id === params[2] && !r.is_deleted).map(r => ({ uid: r.uid })) };
@@ -91,13 +110,13 @@ async function database(sql, params = []) {
       : sql.includes('message_id = $3')
       ? rows.filter(r => r.account_id === params[1] && r.message_id === params[2] && r.is_read !== params[0])
       : rows.filter(r => (Array.isArray(params[1]) ? params[1] : [params[1]]).includes(r.id));
-    for (const r of targets) r.is_read = params[0];
+    for (const r of targets) { r.is_read = params[0]; r.read_changed_at = new Date().toISOString(); }
     const returning = sql.split('RETURNING')[1];
     return { rows: returning ? targets.map(r => Object.fromEntries(Object.entries(r).filter(([k]) => new RegExp(`\\b${k}\\b`).test(returning)))) : [] };
   }
   return { rows: [] };
 }
-const row = (id, folder, uid, extra = {}) => ({ id, account_id: account.id, message_id: MID, from_email: 'sender@example.test', date: '2026-10-20T12:00:00.000Z', subject: 'Same copied message', body_text: 'Original copied body', body_html: null, to_addresses: ['reader@example.test'], cc_addresses: [], folder, uid, is_read: false, is_deleted: false, ...extra });
+const row = (id, folder, uid, extra = {}) => ({ id, account_id: account.id, message_id: MID, from_email: 'sender@example.test', date: '2026-10-20T12:00:00.000Z', subject: 'Same copied message', body_text: 'Original copied body', body_html: null, to_addresses: ['reader@example.test'], cc_addresses: [], folder, uid, is_read: false, is_deleted: false, flag_uid_validity: '1', flag_address_valid: true, read_intent_version: '0', read_changed_at: null, ...extra });
 const settle = async () => { for (let n = 0; n < 30; n++) await new Promise(resolve => setImmediate(resolve)); };
 let server, url;
 beforeAll(async () => {
@@ -112,7 +131,7 @@ beforeEach(() => {
   wire = []; events = []; otherAccounts = []; selectionHold = false; releaseSelection = null; hold = null; failFolder = null; selectionError = false; selectionChange = null; releaseHold = null; gtd = true; labels = ['Watch', 'Todo'];
   Object.setPrototypeOf(imapManager, ImapManager.prototype); Object.assign(imapManager, new ImapManager({ clients: new Set() }));
   clearInterval(imapManager._folderStatusTimer);
-  const idle = new Mailbox(); idle.mailbox = { path: 'INBOX', exists: 3 }; imapManager.connections.set(account.id, idle);
+  const idle = new Mailbox(); idle.mailbox = { path: 'INBOX', exists: 3, uidValidity: 1n }; imapManager.connections.set(account.id, idle);
   ImapFlow.mockImplementation(function () { return new Mailbox(); });
   pluginRegistry.hasActiveAsync.mockImplementation(async () => gtd);
   pluginRegistry.collectHook.mockImplementation(async () => [labels]); pluginRegistry.runHook.mockResolvedValue([]);
@@ -122,6 +141,28 @@ afterEach(async () => { hold = null; selectionHold = false; releaseHold?.(); rel
 const read = (id, value) => fetch(`${url}/${id}/read`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ read: value }) });
 const bulk = (ids, value) => fetch(`${url}/bulk-read`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, read: value }) });
 describe('read-copy production routes and IMAP', () => {
+  it('preserves a newer queued retry when the real legacy route STORE is superseded', async () => {
+    gtd = false;
+    let entered, release;
+    const paused = new Promise(resolve => { entered = resolve; });
+    const resume = new Promise(resolve => { release = resolve; });
+    let once = false;
+    query.mockImplementation(async (sql,args) => {
+      if (!once && sql.startsWith('SELECT id, message_id, flag_address_valid')) {
+        once = true; entered(); await resume;
+      }
+      return database(sql,args);
+    });
+    const request = read(A,true); await paused;
+    rows[0].is_read = false;
+    const newer = imapManager._enqueueFlagPush(account.id,A,'\\Seen',false);
+    await imapManager._protectFlagMarker(imapManager._pendingFlagPush.get(account.id).get(`${A}:\\Seen`));
+    release(); expect((await request).status).toBe(200);
+    expect(imapManager._pendingFlagPush.get(account.id)?.get(`${A}:\\Seen`)?.intent).toBe(newer);
+    expect(imapManager._isFlagIntentCurrent(newer)).toBe(true);
+    expect(rows[0].read_changed_at).toBe(newer.marker);
+    expect(wire).toEqual([]);
+  });
   for (const fromLabel of [false, true]) for (const value of [false, true]) {
     it(`pushes read=${value} from ${fromLabel ? 'label' : 'ordinary'} copy to both copies`, async () => {
       rows = [row(A, 'Sent', 11, { is_read: !value }), row(B, 'Watch', 42, { is_read: !value })];
