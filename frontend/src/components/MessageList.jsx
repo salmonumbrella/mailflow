@@ -403,15 +403,26 @@ export default function MessageList() {
     setExpandedThreadId(null);
   }, [messagesRefreshToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const normalGenerationRef = useRef(0);
+  const [normalListRetry, setNormalListRetry] = useState(false);
+  const normalContinuation = accountsReady && (hasMoreMessages || normalListRetry || (messages.length === 0 && messagesTotal > 0));
+
   // Reset and load fresh when account/folder/filter changes
   useEffect(() => {
     let cancelled = false;
+    normalGenerationRef.current += 1;
     const run = async () => {
       // Don't attempt to load until we know which accounts exist.
       // Without this guard, the unified inbox query fires before getAccounts()
       // resolves, finds no account IDs, and returns empty — causing the blank
       // "All Inboxes" on first load.
       if (!accountsReady) return;
+      if (searchQuery.trim()) {
+        setLoadingMessages(false);
+        setFolderSyncing(false);
+        return;
+      }
+      setNormalListRetry(false);
       setLoadingMessages(true);
       setMessagesOffset(0);
       setHasMoreMessages(true);
@@ -427,7 +438,9 @@ export default function MessageList() {
           (data) => {
             if (cancelled) return;
             setMessagesTotal(data.total);
-            setMessages(applyReadGuard(data.messages));
+            const guarded = applyReadGuard(data.messages);
+            setMessages(guarded);
+            setNormalListRetry(guarded.length < data.messages.length);
             setMessagesOffset(data.messages.length);
             setHasMoreMessages(data.messages.length < data.total);
 
@@ -456,43 +469,85 @@ export default function MessageList() {
           },
         );
       } catch (err) {
+        if (cancelled) return;
         console.error('Failed to load messages:', err);
+        setNormalListRetry(true);
         setFolderSyncing(false);
       } finally {
         if (!cancelled) setLoadingMessages(false);
       }
     };
     run();
-    return () => { cancelled = true; };
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+    return () => {
+      cancelled = true;
+      normalGenerationRef.current += 1;
+      refreshRequestRef.current.invalidate();
+    };
+  }, [selectedAccountId, selectedFolder, searchQuery, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Load next page (called by scroll or button)
   const loadMore = useCallback(async () => {
-    if (loadingMessages || !hasMoreMessages) return;
+    if (useStore.getState().loadingMessages || !normalContinuation || searchQuery.trim()) return;
+    const generation = ++normalGenerationRef.current;
     setLoadingMessages(true);
     try {
       // Read current offset directly from store to avoid stale closure
-      const currentOffset = useStore.getState().messagesOffset;
-      const params = { limit: pageSize, offset: currentOffset };
+      const state = useStore.getState();
+      // A guard-filled or exhausted snapshot must retry from the beginning.
+      const currentOffset = state.messagesOffset >= state.messagesTotal ? 0 : state.messagesOffset;
+      const params = { limit: currentOffset === 0 && state.scrollMode === 'infinite' ? Math.min(Math.max(pageSize, state.messagesOffset), 500) : pageSize, offset: currentOffset };
       scopeListParams(params, selectedAccountId, selectedFolder);
       if (unreadOnly) params.unreadOnly = 'true';
-      if (useStore.getState().threadedView) params.threaded = 'true';
+      if (threadedView) params.threaded = 'true';
       if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
-      const data = await api.getMessages(params);
-      appendMessages(applyReadGuard(data.messages));
-      setMessagesOffset(currentOffset + data.messages.length);
-      setHasMoreMessages(currentOffset + data.messages.length < data.total);
+      await refreshRequestRef.current.run(
+        async () => {
+          let data = await api.getMessages(params);
+          // A provider commit can shift rows before its refresh token arrives.
+          // Reconcile a shrinking forward snapshot with one bounded page-zero load.
+          if (params.offset > 0 && data.total < state.messagesTotal && generation === normalGenerationRef.current) {
+            params.offset = 0;
+            data = await api.getMessages(params);
+          }
+          return data;
+        },
+        (data) => {
+          if (generation !== normalGenerationRef.current) return;
+          const guarded = applyReadGuard(data.messages);
+          if (params.offset === 0) {
+            const latest = useStore.getState();
+            const activeId = latest.selectedMessageId;
+            const kept = unreadOnly && activeId && !guarded.some(m => m.id === activeId)
+              ? latest.messages.find(m => m.id === activeId) : null;
+            const accountInScope = kept && (selectedAccountId ? kept.account_id === selectedAccountId
+              : latest.accounts.some(a => a.id === kept.account_id && (selectedFolder === SNOOZED_FOLDER || isAccountInUnifiedInbox(a))));
+            const folderInScope = kept && (selectedFolder === SNOOZED_FOLDER ? !!kept.snooze_until
+              : kept.folder === (selectedAccountId ? selectedFolder : 'INBOX'));
+            const sameScope = latest.selectedAccountId === selectedAccountId && latest.selectedFolder === selectedFolder;
+            setMessages(sameScope && accountInScope && folderInScope ? [...applyDeleteGuard([kept]), ...guarded] : guarded);
+          } else appendMessages(guarded);
+          setMessagesTotal(data.total);
+          setNormalListRetry(guarded.length < data.messages.length);
+          setMessagesOffset(data.messages.length === 0 ? 0 : params.offset + data.messages.length);
+          setHasMoreMessages(params.offset + data.messages.length < data.total);
+        },
+      );
     } catch (err) {
+      if (generation !== normalGenerationRef.current) return;
       console.error('Failed to load more messages:', err);
+      setNormalListRetry(true);
     } finally {
-      setLoadingMessages(false);
+      if (generation === normalGenerationRef.current) setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
+  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, normalContinuation, searchQuery, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset, setMessagesTotal, setMessages]);
 
   // Listen for background refresh events from WebSocket. If a message was just
   // opened, give its body request a brief head start before reloading the full list.
   useEffect(() => {
+    let cancelled = false;
     const run = async () => {
+      if (cancelled || useStore.getState().loadingMessages) return;
+      const generation = ++normalGenerationRef.current;
       try {
         const state = useStore.getState();
         const ps = state.pageSize;
@@ -508,15 +563,27 @@ export default function MessageList() {
         }
         scopeListParams(params, selectedAccountId, selectedFolder);
         if (unreadOnly) params.unreadOnly = 'true';
-        if (state.threadedView) params.threaded = 'true';
+        if (threadedView) params.threaded = 'true';
         if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
         await refreshRequestRef.current.run(
-          () => api.getMessages(params),
+          async () => {
+            let data = await api.getMessages(params);
+            if (sm === 'paginated') {
+              const lastPage = Math.max(1, Math.ceil(data.total / ps));
+              if (params.offset >= lastPage * ps && !cancelled && generation === normalGenerationRef.current) {
+                params.offset = (lastPage - 1) * ps;
+                data = await api.getMessages(params);
+              }
+            }
+            return data;
+          },
           (data) => {
+            if (cancelled) return;
             setMessagesTotal(data.total);
             // If the unread filter is on and the currently open message was just marked
             // read, the server won't return it — preserve it so the user can keep reading.
             let msgs = applyReadGuard(data.messages);
+            setNormalListRetry(msgs.length < data.messages.length || (data.messages.length === 0 && data.total > 0));
             const activeId = useStore.getState().selectedMessageId;
             if (unreadOnly && activeId && !msgs.some(m => m.id === activeId)) {
               const kept = useStore.getState().messages.find(m => m.id === activeId);
@@ -524,6 +591,8 @@ export default function MessageList() {
             }
             setMessages(msgs);
             if (sm === 'paginated') {
+              setCurrentPage(Math.min(Math.floor(params.offset / ps) + 1, Math.max(1, Math.ceil(data.total / ps))));
+              setMessagesOffset(params.offset + data.messages.length);
               setHasMoreMessages(false);
             } else {
               setMessagesOffset(data.messages.length);
@@ -531,7 +600,11 @@ export default function MessageList() {
             }
           },
         );
-      } catch { /* intentional */ }
+      } catch {
+        if (!cancelled && generation === normalGenerationRef.current) {
+          setNormalListRetry(true);
+        }
+      }
     };
 
     const handler = () => {
@@ -547,10 +620,11 @@ export default function MessageList() {
     };
     window.addEventListener('mailflow:refresh', handler);
     return () => {
+      cancelled = true;
       window.removeEventListener('mailflow:refresh', handler);
       clearTimeout(deferredRefreshTimerRef.current);
     };
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, threadedView, pageSize, scrollMode, messagesRefreshToken, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Search
   useEffect(() => {
@@ -660,7 +734,9 @@ export default function MessageList() {
 
   // Load a specific page (paginated mode)
   const loadPage = useCallback(async (pageNum) => {
-    if (loadingMessages) return;
+    if (useStore.getState().loadingMessages) return;
+    const generation = ++normalGenerationRef.current;
+    pageNum = Math.max(1, Math.min(pageNum, Math.ceil(messagesTotal / pageSize) || 1));
     setLoadingMessages(true);
     setCurrentPage(pageNum);
     try {
@@ -670,10 +746,22 @@ export default function MessageList() {
       if (threadedView) params.threaded = 'true';
       if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
       await refreshRequestRef.current.run(
-        () => api.getMessages(params),
+        async () => {
+          let data = await api.getMessages(params);
+          const lastPage = Math.max(1, Math.ceil(data.total / pageSize));
+          if (pageNum > lastPage && generation === normalGenerationRef.current) {
+            pageNum = lastPage;
+            params.offset = (pageNum - 1) * pageSize;
+            data = await api.getMessages(params);
+          }
+          return data;
+        },
         (data) => {
           setMessagesTotal(data.total);
-          setMessages(applyReadGuard(data.messages));
+          const guarded = applyReadGuard(data.messages);
+          setMessages(guarded);
+          setNormalListRetry(guarded.length < data.messages.length || (data.messages.length === 0 && data.total > 0));
+          setCurrentPage(Math.min(pageNum, Math.max(1, Math.ceil(data.total / pageSize))));
           setMessagesOffset((pageNum - 1) * pageSize + data.messages.length);
           setHasMoreMessages(false);
           setExpandedThreadId(null);
@@ -681,11 +769,13 @@ export default function MessageList() {
         },
       );
     } catch (err) {
+      if (generation !== normalGenerationRef.current) return;
       console.error('Failed to load page:', err);
+      setNormalListRetry(true);
     } finally {
-      setLoadingMessages(false);
+      if (generation === normalGenerationRef.current) setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, messagesTotal, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   const handleSync = async () => {
     if (syncing) return;
@@ -3583,7 +3673,7 @@ export default function MessageList() {
           </div>
         )}
 
-        {!loadingMessages && displayMessages.length === 0 && (
+        {!loadingMessages && displayMessages.length === 0 && (searchQuery.trim() || !normalContinuation) && (
           <EmptyState
             folderSyncing={folderSyncing}
             searchQuery={searchQuery}
@@ -4084,7 +4174,7 @@ export default function MessageList() {
                 <div>{t('common.loading')}</div>
               </div>
             )}
-            {!loadingMessages && hasMoreMessages && displayMessages.length > 0 && (
+            {!loadingMessages && normalContinuation && (
               <div style={{ padding: '12px 16px', textAlign: 'center' }}>
                 <button
                   onClick={loadMore}
@@ -4101,13 +4191,17 @@ export default function MessageList() {
                 </button>
               </div>
             )}
-            {!loadingMessages && !hasMoreMessages && displayMessages.length > 0 && (
+            {!loadingMessages && !normalContinuation && displayMessages.length > 0 && (
               <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 11 }}>
                 {t('messageList.noMoreMessages')}
               </div>
             )}
           </>)}
         </>)}
+
+        {scrollMode === 'paginated' && !searchQuery.trim() && !loadingMessages && normalContinuation && (displayMessages.length === 0 || normalListRetry) && (
+          <button onClick={() => loadPage(currentPage)}>{t('messageList.loadMore')}</button>
+        )}
 
         {/* Pagination footer */}
         {scrollMode === 'paginated' && !searchQuery.trim() && !loadingMessages && messagesTotal > 0 && (() => {
