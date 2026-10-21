@@ -4104,7 +4104,10 @@ export class ImapManager {
   }
 
   async _refreshObservedFolder(account, path, observed) {
-    if (await this._isArchiveFolder(account, path)) return this.runArchiveCoverageBatch(account);
+    if (await this._isArchiveFolder(account, path)) {
+      const result = await this.runArchiveCoverageBatch(account);
+      return result != null;
+    }
     let complete = false;
     let missing = false;
     let expired = false;

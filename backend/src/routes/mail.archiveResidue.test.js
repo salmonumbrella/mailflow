@@ -120,32 +120,35 @@ describe('archive residue source guard (4b; no safe-action fallback yet)', () =>
     });
   }
 
-  it('rejects mixed mutations across generated legal sizes, positions and bulk actions', async () => {
-    // Dependency-free generated coverage: every legal size and bulk action,
-    // first/interior/last positions at every size, and every position at the
-    // maximum size. Singleton residue-only and mixed batches share the oracle.
-    // This bounded matrix has 5,982 cases; it is not a full Cartesian product.
-    for (let count = 1; count <= 500; count++) {
-      const positions = count === 500
-        ? Array.from({ length: count }, (_, index) => index)
-        : [...new Set([0, Math.floor(count / 2), count - 1])];
-      for (const residueAt of positions) {
-        for (const [action, path] of ['/messages/bulk-delete', '/messages/bulk-move', '/messages/bulk-archive'].entries()) {
-          const targets = Array.from({ length: count }, (_, index) => ({
-            ...(index === residueAt ? residue : normal), uid: index + 1,
-            id: `44444444-4444-4444-8444-${String(index + 1).padStart(12, '0')}`,
-          }));
-          // Reset each example so a prior rejection cannot mask side effects
-          // or leave provider calls attached to the next generated input.
-          vi.clearAllMocks();
-          ownedTargets(targets);
-          expectRejectedWithoutEffects(await invoke('post', path, {
-            ids: targets.map(row => row.id), ...(action === 1 ? { folder: 'Projects' } : {}),
-          }));
+  // Dependency-free generated coverage: all 5,982 original input/action/oracle
+  // classes remain. Each test covers at most 16 residue positions at one size.
+  // The size-500 band's 1,500 cases are spread across 32 tests.
+  // No test invokes more than 48 cases; the default timeout is unchanged.
+  for (let count = 1; count <= 500; count++) {
+    const positions = count === 500
+      ? Array.from({ length: count }, (_, index) => index)
+      : [...new Set([0, Math.floor(count / 2), count - 1])];
+    for (let first = 0; first < positions.length; first += 16) {
+      const bucket = positions.slice(first, first + 16);
+      it(`rejects mixed mutations across generated legal sizes, positions and bulk actions: size ${count}, positions ${bucket[0]}..${bucket.at(-1)}`, async () => {
+        for (const residueAt of bucket) {
+          for (const [action, path] of ['/messages/bulk-delete', '/messages/bulk-move', '/messages/bulk-archive'].entries()) {
+            const targets = Array.from({ length: count }, (_, index) => ({
+              ...(index === residueAt ? residue : normal), uid: index + 1,
+              id: `44444444-4444-4444-8444-${String(index + 1).padStart(12, '0')}`,
+            }));
+            // Reset each example so a prior rejection cannot mask side effects
+            // or leave provider calls attached to the next generated input.
+            vi.clearAllMocks();
+            ownedTargets(targets);
+            expectRejectedWithoutEffects(await invoke('post', path, {
+              ids: targets.map(row => row.id), ...(action === 1 ? { folder: 'Projects' } : {}),
+            }));
+          }
         }
-      }
+      });
     }
-  });
+  }
 
   it.each([
     ['/messages/:id/read', { read: true }, '\\Seen'],
