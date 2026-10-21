@@ -345,6 +345,10 @@
     }
   },
   "messageList": {
+    "expandConversation_one": "Unterhaltung aufklappen ({{count}} Nachricht)",
+    "expandConversation_other": "Unterhaltung aufklappen ({{count}} Nachrichten)",
+    "collapseConversation_one": "Unterhaltung zuklappen ({{count}} Nachricht)",
+    "collapseConversation_other": "Unterhaltung zuklappen ({{count}} Nachrichten)",
     "replyDraftChanged": "Der Antwortentwurf wurde geändert. Öffne ihn erneut.",
     "replyDraftKeepCurrent": "Speichere die aktuelle Nachricht und kläre ihre Anhänge, bevor du diesen Entwurf öffnest.",
     "replyDraftUnavailable": "Dieser Antwortentwurf ist nicht mehr verfügbar.",

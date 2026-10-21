@@ -345,6 +345,14 @@
     }
   },
   "messageList": {
+    "expandConversation_one": "Развернуть переписку ({{count}} сообщение)",
+    "expandConversation_few": "Развернуть переписку ({{count}} сообщения)",
+    "expandConversation_many": "Развернуть переписку ({{count}} сообщений)",
+    "expandConversation_other": "Развернуть переписку ({{count}} сообщения)",
+    "collapseConversation_one": "Свернуть переписку ({{count}} сообщение)",
+    "collapseConversation_few": "Свернуть переписку ({{count}} сообщения)",
+    "collapseConversation_many": "Свернуть переписку ({{count}} сообщений)",
+    "collapseConversation_other": "Свернуть переписку ({{count}} сообщения)",
     "replyDraftChanged": "Черновик ответа изменился. Попробуйте открыть его снова.",
     "replyDraftKeepCurrent": "Сохраните текущее сообщение и разберитесь с вложениями перед открытием этого черновика.",
     "replyDraftUnavailable": "Этот черновик ответа больше недоступен.",

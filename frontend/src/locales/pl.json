@@ -347,6 +347,14 @@
     }
   },
   "messageList": {
+    "expandConversation_one": "Rozwiń konwersację ({{count}} wiadomość)",
+    "expandConversation_few": "Rozwiń konwersację ({{count}} wiadomości)",
+    "expandConversation_many": "Rozwiń konwersację ({{count}} wiadomości)",
+    "expandConversation_other": "Rozwiń konwersację ({{count}} wiadomości)",
+    "collapseConversation_one": "Zwiń konwersację ({{count}} wiadomość)",
+    "collapseConversation_few": "Zwiń konwersację ({{count}} wiadomości)",
+    "collapseConversation_many": "Zwiń konwersację ({{count}} wiadomości)",
+    "collapseConversation_other": "Zwiń konwersację ({{count}} wiadomości)",
     "replyDraftChanged": "Szkic odpowiedzi się zmienił. Spróbuj otworzyć go ponownie.",
     "replyDraftKeepCurrent": "Zapisz bieżącą wiadomość i rozwiąż problemy z jej załącznikami przed otwarciem tego szkicu.",
     "replyDraftUnavailable": "Ten szkic odpowiedzi nie jest już dostępny.",
