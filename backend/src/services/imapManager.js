@@ -2,6 +2,7 @@ import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
 import { extractImapError } from './imapError.js';
 import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
 import { ImapFlow } from 'imapflow';
+import { normalizeMessageId, uniqueMessageUid, uniqueMessageUids } from './imapIdentity.js';
 import { query } from './db.js';
 import { parseMessage, parseMailboxList, snippetFromBody, detectBulkFromParsedHeaders, ALIAS_FORWARDER_HEADERS, parseHeadersInput, headersToRawString, decodeMimeWords, enrichParsedMetadata, renderCalendarInvite } from './messageParser.js';
 import { headerIds, searchReplyDraftUids, draftFolderPaths } from './replyDraftLookup.js';
@@ -7212,18 +7213,12 @@ export class ImapManager {
   // Message-ID, checked under the same mailbox lock. A uid names a place in the folder, so one
   // read from a stale row, or looked up in the wrong account, would otherwise expunge whatever
   // sits there. Resolves false, having deleted nothing, when it does not match.
-  async permanentDeleteMessage(account, uid, folder, { expectMessageId } = {}) {
+  async permanentDeleteMessage(account, uid, folder, options = {}) {
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
-        if (expectMessageId !== undefined) {
-          const bare = id => String(id ?? '').replace(/[<>]/g, '').trim();
-          let found = '';
-          for await (const msg of client.fetch(String(uid), { uid: true, envelope: true }, { uid: true })) {
-            if (msg.uid === Number(uid)) found = bare(msg.envelope?.messageId);
-          }
-          if (!found || found !== bare(expectMessageId)) return false;
-        }
+        if (Object.hasOwn(options, 'expectMessageId') &&
+            await uniqueMessageUid(client, options.expectMessageId) !== Number(uid)) return false;
         if (!(await expungeUids(client, String(uid)))) throw new Error('messageDelete returned false — server did not confirm deletion');
         return true;
       } finally {
@@ -7462,27 +7457,44 @@ export class ImapManager {
   // Without UIDPLUS: plain EXPUNGE removes ALL \Deleted messages in the mailbox.
   // To prevent collateral damage, we temporarily unflag any other \Deleted messages
   // before expunging, then restore them in a finally block.
-  async bulkPermanentDelete(account, uids, folder) {
+  async bulkPermanentDelete(account, uids, folder, options = {}) {
     if (!uids.length) return { succeeded: [], failed: [] };
+    let attempted = [];
+    const unverified = [];
+    const result = succeeded => ({ succeeded, failed: uids.filter(uid => !succeeded.includes(uid)),
+      ...(unverified.length ? { unverified } : {}) });
     try {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(folder);
         try {
-          if (!(await expungeUids(client, uids.map(String).join(',')))) {
+          const verified = [];
+          const guarded = Object.hasOwn(options, 'expectMessageIds');
+          const proof = guarded ? await uniqueMessageUids(client, uids.map(uid => options.expectMessageIds?.get(Number(uid)))) : null;
+          for (const uid of uids) {
+            if (!guarded || proof.get(normalizeMessageId(options.expectMessageIds?.get(Number(uid)))) === Number(uid)) {
+              verified.push(uid);
+            } else {
+              unverified.push(uid);
+            }
+          }
+          if (!verified.length) return;
+          attempted = verified;
+          if (!(await expungeUids(client, attempted.map(String).join(',')))) {
             throw new Error('bulk messageDelete returned false — server did not confirm deletion');
           }
         } finally {
           lock.release();
         }
       });
-      return { succeeded: uids, failed: [] };
+      return result(attempted);
     } catch (err) {
+      if (!attempted.length) return result([]);
       console.warn(`bulkPermanentDelete ${folder}: batch failed (${err.message}), verifying via UID SEARCH`);
       try {
         const remaining = await withFreshClient(account, async (client) => {
           const lock = await client.getMailboxLock(folder);
           try {
-            return await client.search({ uid: uids.join(',') }, { uid: true });
+            return await client.search({ uid: attempted.join(',') }, { uid: true });
           } finally {
             lock.release();
           }
@@ -7494,15 +7506,14 @@ export class ImapManager {
           throw new Error(`verification SEARCH returned ${remaining}`, { cause: err });
         }
         const remainingSet = new Set(remaining.map(Number));
-        const succeeded = uids.filter(uid => !remainingSet.has(Number(uid)));
-        const failed    = uids.filter(uid =>  remainingSet.has(Number(uid)));
+        const succeeded = attempted.filter(uid => !remainingSet.has(Number(uid)));
         if (succeeded.length) {
           console.log(`bulkPermanentDelete: ${succeeded.length}/${uids.length} messages confirmed deleted via UID SEARCH`);
         }
-        return { succeeded, failed };
+        return result(succeeded);
       } catch (searchErr) {
         console.error(`bulkPermanentDelete: UID SEARCH verification failed: ${searchErr.message}`);
-        return { succeeded: [], failed: uids };
+        return result([]);
       }
     }
   }
