@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Endereço de e-mail mascarado",
+    "alias": "Alias de e-mail"
+  },
   "common": {
     "cancel": "Cancelar",
     "save": "Salvar",
@@ -1913,6 +1917,7 @@
     "show": "Mostrar barra lateral direita"
   },
   "gtd": {
+    "oldestLabeledAge": "{{state}}: idade da mensagem mais antiga com esta etiqueta (dias): {{count}}",
     "title": "GTD",
     "inbox": "Entrada",
     "waiting": "Aguardando",

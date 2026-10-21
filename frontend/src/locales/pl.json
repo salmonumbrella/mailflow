@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Maskowany adres e-mail",
+    "alias": "Alias e-mail"
+  },
   "common": {
     "cancel": "Anuluj",
     "save": "Zapisz",
@@ -1932,6 +1936,7 @@
     "show": "Pokaż prawy pasek boczny"
   },
   "gtd": {
+    "oldestLabeledAge": "{{state}}: wiek najstarszej wiadomości z tą etykietą (dni): {{count}}",
     "title": "GTD",
     "inbox": "Odebrane",
     "waiting": "Oczekujące",

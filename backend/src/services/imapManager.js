@@ -7591,7 +7591,7 @@ export class ImapManager {
   // Post-copy notification/re-evaluation is a plugin concern: the generic `afterLabelCopy`
   // hook lets the owning plugin (GTD) broadcast its refresh event and, on the deferred path,
   // reconcile once the sibling lands. copyMessage itself stays label-feature-agnostic.
-  async copyMessage(accountId, uid, fromFolder, toFolder) {
+  async copyMessage(accountId, uid, fromFolder, toFolder, { copyIntent = null } = {}) {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
     if (!account) throw new Error(`copyMessage: account ${accountId} not found`);
@@ -7599,6 +7599,213 @@ export class ImapManager {
     if (await this._isArchiveFolder(account, toFolder)) throw Object.assign(new Error('Archive residue must be admitted through archive coverage'), { status: 409, code: 'archive-residue-read-only' });
 
     const labelStore = providerProfile(account).labelStore;
+    if (copyIntent && !labelStore) {
+      // A durable receipt precedes the non-idempotent command. An unknown result
+      // survives a manager restart and may never fall through to another COPY.
+      const unconfirmed = (reason = 'Label copy outcome is not confirmed. Refresh before retrying.') =>
+        Object.assign(new Error(reason), { status: 409, code: 'label-copy-unconfirmed', retryable: true });
+      try {
+        const messageId = value => {
+          if (typeof value !== 'string') return null;
+          const match = value.trim().match(/^(?:<([^<>\s\x00-\x1f\x7f]+)>|([^<>\s\x00-\x1f\x7f]+))$/);
+          const bare = match?.[1] || match?.[2];
+          return bare && /^[^@]+@[^@]+$/.test(bare) ? bare : null;
+        };
+        const epoch = value => value != null && /^[1-9]\d*$/.test(String(value))
+          && BigInt(value) <= 4294967295n ? String(value) : null;
+        const physicalUid = Number(uid);
+        if (!Number.isInteger(physicalUid) || physicalUid <= 0 || physicalUid > 4294967295) throw unconfirmed();
+        const { rows: [snapshot] } = await query(`SELECT m.id,m.message_id,m.provider_msgid,
+            f.uid_validity,m.plugin_annotations->'_mailflow_label_copy'->$4 AS receipt
+          FROM messages m JOIN folders f ON f.account_id=m.account_id AND f.path=m.folder
+          WHERE m.account_id=$1 AND m.folder=$2 AND m.uid=$3
+            AND NOT m.is_deleted AND NOT m.is_archive_residue`, [accountId, fromFolder, uid, toFolder]);
+        const expectedId = messageId(copyIntent.messageId);
+        if (!snapshot || snapshot.id !== copyIntent.sourceId || !expectedId
+            || messageId(snapshot.message_id) !== expectedId || !epoch(snapshot.uid_validity)) {
+          throw unconfirmed('Label source identity changed or cannot be verified. Refresh before retrying.');
+        }
+        const sourceEpoch = epoch(snapshot.uid_validity);
+        // Only this namespace/key changes. The source row and epoch fence keep a
+        // receipt copied as metadata to another physical message from authorizing it.
+        const storeReceipt = async (value, previousOperation = null) => {
+          const saved = await query(`UPDATE messages m SET plugin_annotations=jsonb_set(
+              COALESCE(m.plugin_annotations,'{}'::jsonb),'{_mailflow_label_copy}',
+              CASE WHEN $5::jsonb IS NULL THEN COALESCE(m.plugin_annotations->'_mailflow_label_copy','{}'::jsonb)-$4::text
+                ELSE COALESCE(m.plugin_annotations->'_mailflow_label_copy','{}'::jsonb)
+                  || jsonb_build_object($4::text,$5::jsonb) END)
+            WHERE m.id=$6 AND m.account_id=$1 AND m.folder=$2 AND m.uid=$3
+              AND m.message_id IS NOT DISTINCT FROM $7 AND m.provider_msgid IS NOT DISTINCT FROM $8
+              AND NOT m.is_deleted AND NOT m.is_archive_residue
+              AND jsonb_typeof(COALESCE(m.plugin_annotations,'{}'::jsonb))='object'
+              AND (m.plugin_annotations->'_mailflow_label_copy' IS NULL
+                OR jsonb_typeof(m.plugin_annotations->'_mailflow_label_copy')='object')
+              AND EXISTS(SELECT 1 FROM folders f WHERE f.account_id=m.account_id
+                AND f.path=m.folder AND f.uid_validity=$9)
+              AND (($10::text IS NULL AND NOT (COALESCE(m.plugin_annotations->'_mailflow_label_copy','{}'::jsonb)?$4::text))
+                OR ($10::text IS NOT NULL AND m.plugin_annotations->'_mailflow_label_copy'->$4->>'operation'=$10))
+            RETURNING m.id`, [accountId, fromFolder, uid, toFolder, value == null ? null : JSON.stringify(value),
+            snapshot.id, snapshot.message_id, snapshot.provider_msgid, sourceEpoch, previousOperation]);
+          if (saved.rowCount !== 1) throw unconfirmed();
+        };
+        const readSelected = async (client, selectedUid, selectedEpoch) => {
+          if (epoch(client.mailbox?.uidValidity) !== selectedEpoch) throw unconfirmed();
+          let found = false;
+          for await (const item of client.fetch(String(selectedUid), { uid: true, envelope: true }, { uid: true })) {
+            if (Number(item.uid) !== Number(selectedUid) || found || messageId(item.envelope?.messageId) !== expectedId) {
+              throw unconfirmed('Label copy identity is ambiguous. Refresh before retrying.');
+            }
+            found = true;
+          }
+          if (epoch(client.mailbox?.uidValidity) !== selectedEpoch) throw unconfirmed();
+          return found;
+        };
+        const liveCopy = (folder, selectedUid, selectedEpoch) => withFreshClient(account, async client => {
+          const lock = await client.getMailboxLock(folder);
+          try { return await readSelected(client, selectedUid, selectedEpoch); }
+          finally { lock.release(); }
+        });
+        const recover = async (receipt, applied) => {
+          const inherited = receipt?.sourceId !== snapshot.id;
+          if (receipt?.accountId !== accountId || !['copied', 'complete'].includes(receipt.state)
+              || typeof receipt.sourceId !== 'string' || !receipt.sourceId
+              || typeof receipt.sourceFolder !== 'string' || !receipt.sourceFolder
+              || !Number.isInteger(receipt.sourceUid) || receipt.sourceUid <= 0 || receipt.sourceUid > 4294967295
+              || !epoch(receipt.sourceEpoch)
+              || (!inherited && (receipt.sourceEpoch !== sourceEpoch || receipt.sourceFolder !== fromFolder
+                || receipt.sourceUid !== physicalUid))
+              || typeof receipt.operation !== 'string' || receipt.messageId !== expectedId || receipt.destinationFolder !== toFolder
+              || !epoch(receipt.destinationEpoch) || !Number.isInteger(receipt.destinationUid)
+              || receipt.destinationUid <= 0 || receipt.destinationUid > 4294967295) throw unconfirmed();
+          // Normal COPY/relocation may clone a known receipt onto a new row id.
+          // It cannot authorize COPY, but exact live source+target proof permits
+          // a no-op. A foreign `sending` receipt remains unknown and blocked.
+          if (!await liveCopy(fromFolder, physicalUid, sourceEpoch)) throw unconfirmed();
+          const destination = await withFreshClient(account, async client => {
+            const lock = await client.getMailboxLock(toFolder);
+            try {
+              const currentEpoch = epoch(client.mailbox?.uidValidity);
+              if (!currentEpoch) throw unconfirmed();
+              return { epoch: currentEpoch, exists: currentEpoch === receipt.destinationEpoch
+                ? await readSelected(client, receipt.destinationUid, receipt.destinationEpoch) : false };
+            } finally { lock.release(); }
+          });
+          if (destination.epoch !== receipt.destinationEpoch) {
+            // The completed command's old locator is invalid in a new mailbox
+            // generation. Refresh its cache epoch before retiring to the normal
+            // cache+SEARCH gates. A skipped/failed sync leaves the receipt intact.
+            await this.syncFolderOnDemand(account, toFolder);
+            const { rows: [folder] } = await query('SELECT uid_validity FROM folders WHERE account_id=$1 AND path=$2', [accountId, toFolder]);
+            if (epoch(folder?.uid_validity) !== destination.epoch) throw unconfirmed();
+          }
+          if (!destination.exists) {
+            if (destination.epoch === receipt.destinationEpoch && !inherited && receipt.state !== 'complete') throw unconfirmed();
+            // Known completed foreign receipts, a completed explicit clear, or
+            // an invalidated destination epoch can retire by operation CAS.
+            // Sending/unknown receipts never reach this branch.
+            await storeReceipt(null, receipt.operation);
+            return null;
+          }
+          const cachedCopy = async () => (await query(`SELECT m.id FROM messages m
+            JOIN folders f ON f.account_id=m.account_id AND f.path=m.folder
+            WHERE m.account_id=$1 AND m.folder=$2 AND m.uid=$3 AND f.uid_validity=$4
+              AND m.message_id=ANY($5::text[]) AND m.provider_msgid IS NOT DISTINCT FROM $6
+              AND NOT m.is_deleted AND NOT m.is_archive_residue`,
+          [accountId, toFolder, receipt.destinationUid, receipt.destinationEpoch,
+            [snapshot.message_id, expectedId, `<${expectedId}>`], snapshot.provider_msgid])).rows[0];
+          if (!await cachedCopy()) {
+            // This can fail or skip a concurrently syncing folder. A missing cache
+            // row remains unconfirmed, never permission to reissue the command.
+            await this.syncFolderOnDemand(account, toFolder);
+            if (!await cachedCopy()) throw unconfirmed();
+          }
+          if (!await liveCopy(toFolder, receipt.destinationUid, receipt.destinationEpoch)) throw unconfirmed();
+          await storeReceipt({ ...receipt, state: 'complete' }, receipt.operation);
+          await pluginRegistry.runHook('afterLabelCopy', { mgr: this.pluginFacade, account,
+            toFolder, fromFolder, srcUid: uid, newUid: receipt.destinationUid });
+          return { applied, uid: receipt.destinationUid };
+        };
+        if (snapshot.receipt) {
+          const recovered = await recover(snapshot.receipt, false);
+          if (recovered) return recovered;
+        }
+        // A cache-only Message-ID match cannot identify a physical copy belonging to
+        // this operation. In particular, never select the last substring SEARCH hit.
+        const { rows: candidates } = await query(`SELECT m.uid,f.uid_validity,m.provider_msgid FROM messages m
+          JOIN folders f ON f.account_id=m.account_id AND f.path=m.folder
+          WHERE m.account_id=$1 AND m.folder=$2 AND m.message_id=ANY($3::text[])
+            AND NOT m.is_deleted AND NOT m.is_archive_residue ORDER BY m.uid LIMIT 2`,
+        [accountId, toFolder, [snapshot.message_id, expectedId, `<${expectedId}>`]]);
+        if (candidates.length) {
+          // Pre-deploy or external labels have no operation receipt. Preserve the
+          // old no-op only after exact live proof; never infer COPY success from
+          // a cache row or choose between ambiguous physical copies.
+          const candidate = candidates[0];
+          const candidateUid = Number(candidate.uid);
+          if (candidates.length !== 1 || candidate.provider_msgid !== snapshot.provider_msgid
+              || !Number.isInteger(candidateUid) || candidateUid <= 0 || candidateUid > 4294967295
+              || !epoch(candidate.uid_validity)
+              || !await liveCopy(fromFolder, physicalUid, sourceEpoch)
+              || !await liveCopy(toFolder, candidateUid, epoch(candidate.uid_validity))) throw unconfirmed();
+          return { applied: false, uid: candidateUid, reason: 'already-labelled' };
+        }
+        const destinationEpoch = await withFreshClient(account, async client => {
+          const lock = await client.getMailboxLock(toFolder);
+          try {
+            // SEARCH is only an absence gate, never proof authorizing a selected
+            // hit. Even a substring/ambiguous hit blocks a new non-idempotent COPY.
+            const matches = await client.search({ header: { 'Message-ID': expectedId } }, { uid: true });
+            if (!Array.isArray(matches) || matches.length) throw unconfirmed('A possible Label copy already exists. Refresh before retrying.');
+            return epoch(client.mailbox?.uidValidity);
+          } finally { lock.release(); }
+        });
+        if (!destinationEpoch) throw unconfirmed();
+        let receipt = { operation: randomUUID(), state: 'sending', sourceId: snapshot.id,
+          accountId, sourceFolder: fromFolder, sourceUid: physicalUid, sourceEpoch, messageId: expectedId, destinationFolder: toFolder, destinationEpoch };
+        await storeReceipt(receipt);
+        let result;
+        let commandAttempted = false;
+        try {
+          result = await withFreshClient(account, async client => {
+            const lock = await client.getMailboxLock(fromFolder);
+            try {
+              if (!await readSelected(client, physicalUid, sourceEpoch)) throw unconfirmed();
+              commandAttempted = true;
+              return await client.messageCopy(String(uid), toFolder, { uid: true });
+            } finally { lock.release(); }
+          });
+        } catch {
+          if (!commandAttempted) await storeReceipt(null, receipt.operation);
+          // Transport exceptions do not prove the server did nothing. Keep the
+          // pre-command receipt, including when its acknowledgement was lost.
+          throw unconfirmed();
+        }
+        const destinationUid = result?.uidMap?.get(physicalUid);
+        if (!Number.isInteger(destinationUid) || destinationUid <= 0 || destinationUid > 4294967295
+            || epoch(result.uidValidity) !== destinationEpoch) {
+          // COPYUID-less or malformed acknowledgements stay fail-closed even if a
+          // later sync finds similar Message-IDs. They have no exact target proof.
+          await pluginRegistry.runHook('afterLabelCopy', { mgr: this.pluginFacade, account,
+            toFolder, fromFolder, srcUid: uid, newUid: null });
+          throw unconfirmed();
+        }
+        receipt = { ...receipt, state: 'copied', destinationUid };
+        await storeReceipt(receipt, receipt.operation);
+        // The safe per-copy path ingests the provider's destination metadata instead
+        // of cloning a source row across a possible folder-epoch change. The normal
+        // insertCopiedSibling implementation and the label-store path stay intact.
+        const recovered = await recover(receipt, true);
+        if (!recovered) throw unconfirmed();
+        return recovered;
+      } catch (error) {
+        if (error.code?.startsWith('count-') || error.code === 'label-copy-unconfirmed') throw error;
+        // Do not hide unexpected programming/storage failures behind the public
+        // uncertain-copy response. No credentials or message headers are logged.
+        console.warn('Label copy could not be confirmed:', error.code || error.name);
+        throw unconfirmed();
+      }
+    }
+
     const source = labelStore ? (await query(`SELECT m.provider_msgid,f.uid_validity FROM messages m
       JOIN folders f ON f.account_id=m.account_id AND f.path=m.folder
       WHERE m.account_id=$1 AND m.folder=$2 AND m.uid=$3 AND NOT m.is_deleted AND NOT m.is_archive_residue`,

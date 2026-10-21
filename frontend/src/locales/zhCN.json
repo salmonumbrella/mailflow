@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "隐藏电子邮件地址",
+    "alias": "电子邮件别名"
+  },
   "common": {
     "cancel": "取消",
     "save": "保存",
@@ -1913,6 +1917,7 @@
     "show": "显示右侧边栏"
   },
   "gtd": {
+    "oldestLabeledAge": "{{state}}：带此标签的最早邮件距今的天数：{{count}}",
     "title": "GTD",
     "inbox": "收件箱",
     "waiting": "等待中",

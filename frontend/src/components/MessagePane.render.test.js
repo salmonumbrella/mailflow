@@ -1112,3 +1112,206 @@ describe('the arrows on a phone', () => {
     }
   });
 });
+
+// Feature 6b: render the real recipient mounts; the send-as warning is separate.
+for (const phone of [false, true]) test(`Fastmail recipient icons (${phone ? 'mobile' : 'desktop'})`, async () => {
+  const prior = useStore.getState(), oldGet = api.getSenderIdentities, width = window.innerWidth;
+  const own = { id: 'icon-account', enabled: true, email_address: 'primary@synthetic.test',
+    fastmail_config_revision: 'icon-revision', fastmail_verification_supported: true,
+    aliases: [{ email: 'alias@synthetic.test' }] };
+  const inventory = { accountId: own.id, configRevision: 'icon-revision', provider: 'fastmail',
+    identityStatus: 'ready', maskedStatus: 'ready', identities: [], maskedEmails: [{ email: 'mask@synthetic.test' }] };
+  let requests = 0;
+  api.getSenderIdentities = async (...args) => { requests++; assert.deepEqual(args, [own.id]); return inventory; };
+  const rows = Array.from({ length: 10 }, (_, i) => ({ ...MSG_A, id: `icon-message-${i}`, account_id: own.id,
+    to_addresses: [{ name: 'Mask recipient', email: 'mask@synthetic.test' }, { email: 'primary@synthetic.test' }, { email: 'external@synthetic.test' }],
+    cc_addresses: [{ name: 'Alias recipient', email: 'alias@synthetic.test' }], bcc_addresses: [] }));
+  try {
+    window.innerWidth = phone ? 375 : 1024;
+    // Retire the previous test's reader before changing identity. A memo belongs to
+    // one mounted view; updating the old view and then replacing its key can issue
+    // one request in each lifetime, which is not same-view navigation.
+    await React.act(async () => root.render(null));
+    await React.act(async () => {
+      useStore.getState().setUser({ id: 'icon-user' });
+      useStore.getState().setLocked(false);
+      useStore.setState({ accounts: [own], messages: rows,
+        searchQuery: '', selectedMessageId: rows[0].id, threadMessages: {} });
+    });
+    const generation = useStore.getState().countGeneration;
+    await React.act(async () => root.render(React.createElement(MessagePane, { key: `icons-${phone}` })));
+    const labels = () => [...document.querySelectorAll('[role="img"][aria-label^="addressIndicator."]')].map(el => el.getAttribute('aria-label'));
+    assert.deepEqual(labels(), ['addressIndicator.masked', 'addressIndicator.alias']);
+    assert.equal(requests, 1, 'one fresh reader performs one initial lookup');
+    for (const row of rows.slice(1)) await React.act(async () => useStore.setState({ selectedMessageId: row.id }));
+    assert.equal(useStore.getState().countGeneration, generation, 'j/k navigation stays in the established session');
+    assert.equal(requests, 1, 'same-account j/k navigation reuses display evidence');
+    await React.act(async () => useStore.setState({ accounts: [{ ...own, name: 'Renamed' }] }));
+    assert.equal(requests, 1, 'polling the account object does not refetch');
+    await React.act(async () => useStore.getState().setLocked(true));
+    assert.deepEqual(labels(), [], 'locking synchronously removes address evidence');
+  } finally {
+    await React.act(async () => { root.render(null); useStore.setState(prior); });
+    api.getSenderIdentities = oldGet;
+    window.innerWidth = width;
+  }
+});
+
+
+// This acknowledgement means a local request was accepted, never provider success.
+// Use the actual pane, notification renderer, shared read protocol and HTTP admission.
+describe('explicit unread acknowledgement', () => {
+  for (const [position, status] of [['accepted request', 200], ['known refusal', 400], ['uncertain response', 500], ['already unread', null]]) {
+    test(`explicit unread acknowledgement: ${position}`, async t => {
+      const NotificationToasts = (await import('./NotificationToasts.jsx')).default;
+      const { setImmediate: flush } = await import('node:timers/promises');
+      const originalFetch = globalThis.fetch;
+      const preferences = { markReadBehavior: useStore.getState().markReadBehavior, markReadDelay: useStore.getState().markReadDelay };
+      const message = { ...MSG_A, id: `unread-feedback-${status}`, is_read: status !== null, category: 'primary' };
+      const writes = [];
+      let respond;
+      let releaseObservation;
+      t.after(async () => {
+        await React.act(async () => {
+          respond?.({ ok: false, status: 400, json: async () => ({ error: 'fixture cleanup refusal' }) });
+          respond = null;
+          await flush();
+          root.render(null);
+          useStore.getState().setLocked(true);
+          releaseObservation?.();
+          releaseObservation = null;
+          useStore.setState({ notifications: [], ...preferences });
+        });
+        globalThis.fetch = originalFetch;
+      });
+      globalThis.fetch = async (url, options = {}) => {
+        const metadata = countMetadataResponse(url);
+        if (metadata && String(url).includes('/mail/unread-counts') && writes.length) {
+          // Admission stays UNKNOWN. Hold the later binder observation so the
+          // rollback is asserted before a new UNKNOWN snapshot replaces truth.
+          return new Promise(resolve => { releaseObservation = () => resolve(metadata); });
+        }
+        if (metadata) return metadata; // opaque lease, UNKNOWN observations, never fake certification
+        if (String(url).includes('/messages/bulk-read')) {
+          writes.push({ body: JSON.parse(options.body), op: options.headers?.['X-Count-Op'] });
+          return new Promise(resolve => { respond = resolve; });
+        }
+        return { ok: true, status: 200, json: async () => ({ html: '', text: 'Unread feedback body', attachments: [] }), text: async () => '' };
+      };
+      await React.act(async () => {
+        const state = useStore.getState();
+        state.setUser({ id: `feedback-${position}` });
+        state.setLocked(false);
+        state.setAccounts([{ id: 'acct', enabled: true, email_address: 'x@y.z' }]);
+        state.setSelectedAccount('acct');
+        useStore.setState({ markReadBehavior: 'delay', markReadDelay: 10, notifications: [], threadMessages: {}, searchResults: [], searchQuery: '' });
+        state.setUnreadCounts({ total: 1, byAccount: { acct: 1 }, snapshots: { acct: {
+          totalCount: 5, revision: '10', attemptRevision: '10', known: true, stale: false, observedAt: new Date().toISOString(),
+        } } });
+        state.setMessages([message]);
+        state.setSelectedMessage(message.id);
+        root.render(React.createElement(React.Fragment, null, React.createElement(MessagePane), React.createElement(NotificationToasts)));
+        await flush();
+      });
+      assert.equal(useStore.getState().markReadDelay, 10, 'the observed preference is retained');
+      const button = document.querySelector('button[title="contextMenu.markUnread"]');
+      const notices = () => useStore.getState().notifications;
+      const acknowledgements = () => notices().filter(n => n.title === 'message.unreadRequested');
+      if (status === null) {
+        assert.equal(button, null, 'an already-unread pane does not offer the read-to-unread control');
+        assert.equal(writes.length, 0, 'already-unread is a real no-op');
+        assert.equal(acknowledgements().length, 0, 'do not invent another request or success');
+        return;
+      }
+      assert.ok(button, 'the actual pane unread control is available');
+      await React.act(async () => { button.click(); await flush(); });
+      assert.equal(useStore.getState().messages[0].is_read, false, 'the actual row changes immediately');
+      assert.deepEqual(writes.map(write => write.body), [{ ids: [message.id], read: false }]);
+      assert.ok(writes[0].op, 'the actual write uses count admission');
+      assert.equal(acknowledgements().length, 1, 'one local request acknowledgement');
+      assert.equal(acknowledgements()[0].type, 'info', 'not a provider-success toast');
+      assert.ok(document.getElementById('root').textContent.includes('message.unreadRequested'), 'actual NotificationToasts renders the acknowledgement while HTTP is held');
+      assert.equal(useStore.getState().unreadCounts.byAccount.acct, 2, 'the sidebar input increments immediately for the physical INBOX row');
+      const originIds = Object.keys(useStore.getState().countOperations.operations).sort();
+      assert.equal(originIds.length, 2, 'the action owns one account and one category origin');
+      assert.equal(releaseObservation, undefined, 'no observation can publish while the write is held');
+      await React.act(async () => {
+        respond({ ok: status === 200, status, json: async () => status === 200 ? { ok: true } : { error: `mutation ${status}` } });
+        respond = null;
+        await flush();
+      });
+      assert.equal(writes.length, 1, 'no duplicate write or automatic read');
+      assert.equal(acknowledgements().length, 1, 'completion does not add a success confirmation');
+      assert.equal(notices().some(n => n.type === 'success'), false);
+      assert.equal(notices().filter(n => n.type === 'error').length, status === 200 ? 0 : 1, 'failure stays visible after successful admission');
+      assert.equal(useStore.getState().messages[0].is_read, status === 400, 'only a known refusal rolls the flag back');
+      assert.equal(useStore.getState().unreadCounts.byAccount.acct, status === 400 ? 1 : 2, 'known refusal restores the seed; other results keep the live charge before observation');
+      assert.deepEqual(Object.keys(useStore.getState().countOperations.operations).sort(), status === 400 ? [] : originIds, 'refusal removes only the original origins; uncertainty never creates an inverse');
+      assert.equal(typeof releaseObservation, 'function', 'the real binder requested a post-write observation');
+      await React.act(async () => { releaseObservation(); releaseObservation = null; await flush(); });
+      assert.equal(useStore.getState().serverUnreadCounts.byAccount.acct, undefined, 'the actual UNKNOWN response replaces the seeded server count');
+      assert.equal(useStore.getState().serverUnreadCounts.snapshots.acct, undefined, 'UNKNOWN supplies no trusted account snapshot');
+      assert.equal(useStore.getState().unreadCounts.byAccount.acct, status === 400 ? undefined : 2, 'no trusted 1 is invented after UNKNOWN; only live origins retain their projection');
+      assert.deepEqual(Object.keys(useStore.getState().countOperations.operations).sort(), status === 400 ? [] : originIds, 'UNKNOWN neither revives refused origins nor retires live ones');
+      assert.equal(useStore.getState().countObservationNeeded, true, 'UNKNOWN cannot certify or acknowledge the cohort');
+      assert.equal(useStore.getState().selectedMessageId, message.id, 'desktop selection stays in place');
+    });
+  }
+});
+
+// Feature 2 appended after all current source oracles; fixtures are session-isolated.
+test('GTD header chips sit beside a long subject and preserve message facts', async t => {
+  await import('../plugins/gtd/index.jsx');
+  const { patchGtdMetadata, clearGtdMetadata } = await import('../plugins/gtd/metadataStore.js');
+  const { bodyCache } = await import('../utils/bodyCache.js');
+  const { formatMessageDateTime } = await import('../utils/formatDate.js');
+  const original = useStore.getState();
+  const host = document.body.appendChild(document.createElement('div'));
+  const detachedHost = document.body.appendChild(document.createElement('div'));
+  const pane = createRoot(host), detached = createRoot(detachedHost);
+  const message = { ...MSG_A, id: 'header-message', subject: 'LongSubject'.repeat(30), account_name: 'Example account' };
+  t.mock.method(api, 'getMessageBody', async () => ({ text: 'fixture', trackersBlocked: 7 }));
+  bodyCache.clear();
+  try {
+    await React.act(async () => {
+      root.render(null);
+      useStore.getState().setUser({ id: 'header-fixture@synthetic.test' });
+      useStore.getState().setLocked(false);
+      // Public session reset precedes seeding, as in the current unread/reader fixtures.
+      useStore.setState({ enabledPlugins: ['gtd'], markReadBehavior: 'manual',
+        accounts: [{ id: 'acct', enabled: true, gtd_enabled: true }],
+        messages: [message], threadMessages: {}, searchResults: [], searchQuery: '',
+        selectedAccountId: 'acct', selectedMessageId: message.id });
+      patchGtdMetadata(message, 'todo');
+      pane.render(React.createElement(MessagePane));
+    });
+    const chip = host.querySelector('[aria-label="gtd.state.todo"]');
+    assert.ok(chip, 'the reading header exposes GTD metadata');
+    assert.ok(chip.parentElement.parentElement.textContent.includes(message.subject), 'same subject row');
+    for (const fact of [message.from_name, message.account_name, formatMessageDateTime(message.date, { withYear: true }), 'message.trackersBlocked']) {
+      assert.ok(host.textContent.includes(fact), fact);
+    }
+    const other = { ...message, id: 'detached-header', account_id: 'other', subject: 'Detached fixture' };
+    await React.act(async () => {
+      useStore.setState({ accounts: [...useStore.getState().accounts, { id: 'other', enabled: true, gtd_enabled: true }],
+        threadMessages: { __dl_detached: [other] } });
+      patchGtdMetadata(other, 'watch');
+      detached.render(React.createElement(MessagePane, { windowMessageId: other.id }));
+    });
+    assert.ok(detachedHost.querySelector('[aria-label="gtd.state.watch"]'));
+    assert.equal(detachedHost.querySelector('[aria-label="gtd.state.todo"]'), null);
+    assert.ok(host.querySelector('[aria-label="gtd.state.todo"]'), 'global pane stays independent');
+  } finally {
+    await React.act(async () => {
+      pane.unmount(); detached.unmount(); clearGtdMetadata();
+      useStore.getState().setLocked(true);
+      useStore.getState().setUser(original.user);
+      useStore.getState().setLocked(original.isLocked);
+      useStore.setState({ enabledPlugins: original.enabledPlugins, markReadBehavior: original.markReadBehavior,
+        accounts: original.accounts, messages: original.messages, threadMessages: original.threadMessages,
+        searchResults: original.searchResults, searchQuery: original.searchQuery,
+        selectedAccountId: original.selectedAccountId, selectedMessageId: original.selectedMessageId });
+    });
+    host.remove(); detachedHost.remove();
+  }
+});

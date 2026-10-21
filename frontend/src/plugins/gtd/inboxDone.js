@@ -1,8 +1,10 @@
+import { getGtdMetadataSessionGeneration, refreshGtdMetadata } from './metadataStore.js';
 // The main-list checkmark and keyboard shortcut use the same optimistic action.
 export async function doneInboxGtdMessage(message, {
   advance, remove, restore, decrementUnread, incrementUnread, gtdDone, notify, t,
 }) {
   if (!message) return null;
+  const metadataSession = getGtdMetadataSessionGeneration();
   advance(message.id);
   remove(message.id);
   const unreadCount = Number.parseInt(message.unread_count, 10);
@@ -19,5 +21,7 @@ export async function doneInboxGtdMessage(message, {
     if (unreadDelta > 0) incrementUnread(message.account_id, unreadDelta);
     notify({ title: t('gtd.doneFailed'), body: message.subject || t('common.noSubject') });
     return null;
+  } finally {
+    refreshGtdMetadata(message, metadataSession);
   }
 }

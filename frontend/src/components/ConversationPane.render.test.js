@@ -1327,3 +1327,55 @@ describe('search pane issued read token', () => {
     assert.equal(showsRead(), false, 'fresh issued thread token admits remote unread before rendering');
   });
 });
+
+// Feature 2 appended after all current source oracles; fixtures are session-isolated.
+test('GTD conversation header uses the displayed account on desktop and mobile', async t => {
+  await import('../plugins/gtd/index.jsx');
+  const { patchGtdMetadata, clearGtdMetadata } = await import('../plugins/gtd/metadataStore.js');
+  const original = useStore.getState(), width = dom.window.innerWidth;
+  const host = document.body.appendChild(document.createElement('div'));
+  const pane = createRoot(host);
+  const selected = { ...THREAD[0], id: 'header-selection', account_id: 'other' };
+  t.mock.method(api, 'getThread', async () => ({ messages: THREAD }));
+  t.mock.method(api, 'getMessageBody', async () => ({ text: 'header fixture', attachments: [] }));
+  const settleHeader = () => React.act(async () => { await new Promise(resolve => setImmediate(resolve)); });
+  try {
+    await React.act(async () => {
+      root.render(null);
+      useStore.getState().setUser({ id: 'conversation-header-fixture@synthetic.test' });
+      useStore.getState().setLocked(false);
+      useStore.setState({ enabledPlugins: ['gtd'], markReadBehavior: 'manual',
+        accounts: [{ id: 'acct', enabled: true, gtd_enabled: false }, { id: 'other', enabled: true, gtd_enabled: true }],
+        messages: [selected], searchResults: [], threadMessages: {}, searchQuery: '',
+        selectedMessageId: selected.id, selectedAccountId: 'acct' });
+      patchGtdMetadata(selected, 'watch');
+    });
+    for (const fixtureWidth of [1024, 375]) {
+      dom.window.innerWidth = fixtureWidth;
+      await React.act(async () => pane.render(React.createElement(ConversationPane, {
+        key: fixtureWidth, threadId: 'header-thread', folder: 'Sent', accountId: 'acct', selectedMessageId: selected.id,
+      })));
+      await settleHeader();
+      assert.equal(host.querySelectorAll('[aria-label="gtd.state.watch"]').length, 1, `one header at ${fixtureWidth}`);
+    }
+    await React.act(async () => {
+      useStore.setState({ messages: [], threadMessages: {}, selectedMessageId: null });
+      pane.render(React.createElement(ConversationPane, { threadId: 'header-thread', folder: 'Sent', accountId: 'acct' }));
+    });
+    await settleHeader();
+    assert.equal(host.querySelector('[aria-label="gtd.state.watch"]'), null, 'local fallback cannot borrow selected metadata');
+  } finally {
+    dom.window.innerWidth = width;
+    await React.act(async () => {
+      pane.unmount(); clearGtdMetadata();
+      useStore.getState().setLocked(true);
+      useStore.getState().setUser(original.user);
+      useStore.getState().setLocked(original.isLocked);
+      useStore.setState({ enabledPlugins: original.enabledPlugins, markReadBehavior: original.markReadBehavior,
+        accounts: original.accounts, messages: original.messages, threadMessages: original.threadMessages,
+        searchResults: original.searchResults, searchQuery: original.searchQuery,
+        selectedAccountId: original.selectedAccountId, selectedMessageId: original.selectedMessageId });
+    });
+    host.remove();
+  }
+});

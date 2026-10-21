@@ -40,10 +40,18 @@ export async function resolveLabelCopyUid(message, folder) {
 // Apply a label: ensure the label folder exists, then COPY the message into it (leaving the
 // original in place). imapManager.copyMessage also emits the section-refresh event. No-op when
 // the message already lives in the label folder. `message` needs { uid, folder }.
-export async function applyLabel(imapManager, account, message, labelFolder, { forceCopy = false } = {}) {
+export async function applyLabel(imapManager, account, message, labelFolder, { forceCopy = false, recoverableCopy = false } = {}) {
   assertWritableSource(message);
   if (message.folder === labelFolder) {
     return { applied: false, uid: message.uid, reason: 'already-there' };
+  }
+  if (recoverableCopy && !imapManager.isLabelStore(account)) {
+    // A cached destination alone cannot settle an earlier uncertain provider COPY.
+    // Core checks its durable receipt before deciding whether any new COPY is safe.
+    await imapManager.ensureFolder(account, labelFolder);
+    return imapManager.copyMessage(account.id, message.uid, message.folder, labelFolder, {
+      copyIntent: { sourceId: message.id, messageId: message.message_id },
+    });
   }
   const existingUid = forceCopy ? null : await resolveLabelCopyUid(message, labelFolder);
   if (existingUid != null) {

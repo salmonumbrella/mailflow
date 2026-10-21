@@ -1,3 +1,4 @@
+import { getGtdMetadataSessionGeneration, refreshGtdMetadata } from '../plugins/gtd/metadataStore.js';
 import { captureReadRequest, reconcileReadState } from './pendingReads.js';
 import { applyDeleteGuard } from './pendingDeletes.js';
 
@@ -690,7 +691,8 @@ export function pickThreadMessage(messages, messageId, accountId = null) {
     (new Date(m.date || 0) >= new Date(newest.date || 0) ? m : newest), pool[0]);
 }
 
-export async function unclassifyThread(id, state, { gtdUnclassify, addNotification, scheduleGtdSectionsFetch, t }) {
+export async function unclassifyThread(id, state, { gtdUnclassify, addNotification, scheduleGtdSectionsFetch, t, message }) {
+  const metadataSession = getGtdMetadataSessionGeneration();
   try {
     await gtdUnclassify(id, state);
     scheduleGtdSectionsFetch();
@@ -699,6 +701,8 @@ export async function unclassifyThread(id, state, { gtdUnclassify, addNotificati
     console.error('GTD unclassify failed:', err.message);
     // 409: the GTD folder holds the message's only copy, so removing the label would delete it.
     addNotification({ title: t('gtd.removeFailed'), body: err.status === 409 ? t('gtd.onlyCopy') : t(`gtd.state.${state}`) });
+  } finally {
+    refreshGtdMetadata(message || id, metadataSession);
   }
 }
 

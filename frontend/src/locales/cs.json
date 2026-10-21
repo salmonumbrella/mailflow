@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Maskovaná e-mailová adresa",
+    "alias": "E-mailový alias"
+  },
   "common": {
     "cancel": "Zrušit",
     "save": "Uložit",
@@ -675,6 +679,7 @@
     }
   },
   "gtd": {
+    "oldestLabeledAge": "{{state}}: stáří nejstarší zprávy s tímto štítkem (dny): {{count}}",
     "title": "GTD",
     "inbox": "Doručené",
     "waiting": "Čeká se",

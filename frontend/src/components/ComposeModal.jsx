@@ -36,6 +36,7 @@ import { frameGeometry } from '../utils/frameGeometry.js';
 import { AI_MESSAGE_MAX_CHARS } from '../aiActions.js';
 import { stripTags } from '../utils/stripTags.js';
 import { useSenderValidation } from '../hooks/useSenderValidation.js';
+import FastmailAddressIndicator from './FastmailAddressIndicator.jsx';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -311,7 +312,7 @@ export default function ComposeModal() {
   const fromAlias = fromResolved.aliasId
     ? fromAccount?.aliases?.find(al => al.id === fromResolved.aliasId)
     : null;
-  useSenderValidation(fromAccount, fromAlias, fromResolved.aliasId);
+  const senderInventory = useSenderValidation(fromAccount, fromAlias, fromResolved.aliasId);
   const fromSignature = fromAlias
     ? (fromAlias.signature !== null && fromAlias.signature !== undefined ? fromAlias.signature : fromAccount?.signature || null)
     : (fromAccount?.signature || null);
@@ -1685,7 +1686,7 @@ export default function ComposeModal() {
             <select
               value={fromValue}
               onChange={e => chooseFrom(e.target.value)}
-              style={{ ...mobileInputStyle, cursor: 'pointer' }}
+              style={{ ...mobileInputStyle, minWidth: 0, cursor: 'pointer' }}
             >
               {unsupportedSenderRef.current && <option value="" disabled>{t('compose.selectAccount')}</option>}
               {accounts.map(a => {
@@ -1712,6 +1713,9 @@ export default function ComposeModal() {
                 );
               })}
             </select>
+            <FastmailAddressIndicator account={fromAccount}
+              email={fromResolved.aliasId ? fromAlias?.email : fromAccount?.email_address}
+              inventory={senderInventory} />
           </div>
 
           {/* To */}
@@ -2349,7 +2353,7 @@ export default function ComposeModal() {
           <select
             value={fromValue}
             onChange={e => chooseFrom(e.target.value)}
-            style={{ flex: 1, padding: '8px 4px', background: 'transparent', border: 'none', color: 'var(--text-primary)', fontSize: 13, outline: 'none', cursor: 'pointer' }}
+            style={{ flex: 1, minWidth: 0, padding: '8px 4px', background: 'transparent', border: 'none', color: 'var(--text-primary)', fontSize: 13, outline: 'none', cursor: 'pointer' }}
           >
             {unsupportedSenderRef.current && <option value="" disabled>{t('compose.selectAccount')}</option>}
             {accounts.map(a => {
@@ -2376,6 +2380,9 @@ export default function ComposeModal() {
               );
             })}
           </select>
+          <FastmailAddressIndicator account={fromAccount}
+            email={fromResolved.aliasId ? fromAlias?.email : fromAccount?.email_address}
+            inventory={senderInventory} />
         </div>
 
         {/* To */}

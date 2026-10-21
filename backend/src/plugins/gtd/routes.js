@@ -2,10 +2,11 @@ import { countMutation } from '../api.js';
 import { Router } from 'express';
 import { requireAuth } from '../api.js';
 import { getGtdSections } from './gtdSections.js';
+import { tryAcquireWatchClassification } from './gtdWatchClassification.js';
 import { queueGistGeneration } from './gtdGist.js';
 import { importPet, decodeUploadedSheet, getPetMeta, getPetSheet, parsePetSlug, customPetSlug } from './gtdPet.js';
 import { getGtdConfig, resolveGtdStateFolder, sanitizeGtdFolders, sanitizeGtdFoldersDetailed, DEFAULT_GTD_FOLDERS, planGtdFolderPersist, invalidateGtdConfigCache } from './gtdConfig.js';
-import { applyLabel, hasMessageCopy, resolveLabelCopyUid, removeExactLabelCopy, removeLabel, markThreadRead, markCopySeen, getMessageReadCopies, pushReadCopies, isLabelStoreAccount, ensureLabelFolders, archiveInboxCopy, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getMessagesByThreadKeys, getAccountConfig, setAccountConfig, resolveAllDraftsPaths, resolveAllTrashPaths, resolveAllSpamPaths } from '../api.js';
+import { applyLabel, hasMessageCopy, resolveLabelCopyUid, removeExactLabelCopy, removeLabel, markThreadRead, markCopySeen, getMessageReadCopies, pushReadCopies, isLabelStoreAccount, ensureLabelFolders, archiveInboxCopy, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getLabelMetadata, getMessagesByThreadKeys, getAccountConfig, setAccountConfig, resolveAllDraftsPaths, resolveAllTrashPaths, resolveAllSpamPaths } from '../api.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -19,6 +20,7 @@ function rejectArchiveResidue(res, message) {
 // Message/account ids are always UUIDs; pre-validate before any DB lookup so a malformed
 // id is a clean 400 rather than a parametrized query that just finds nothing (404) or a
 // driver cast error. Same idiom + regex as mail.js.
+const METADATA_STATE_ORDER = ['todo', 'watch', 'delegated', 'reference', 'someday'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Shared classify precondition: an account must have GTD enabled and the request's
@@ -86,6 +88,56 @@ router.get('/sections', async (req, res) => {
     userId: req.session.userId,
     broadcast,
   }).catch(err => console.warn('GTD gist generation error:', err.message));
+});
+
+// Bounded, plugin-owned metadata for ordinary message rows. Core supplies only the neutral row
+// slot; GTD resolves its configured label folders here without coupling the message-list query to
+// any plugin schema or state.
+router.post('/metadata', async (req, res) => {
+  const { accountId, messageIds } = req.body || {};
+  if (typeof accountId !== 'string' || !UUID_RE.test(accountId)) {
+    return res.status(400).json({ error: 'Invalid account id' });
+  }
+  if (!Array.isArray(messageIds) || messageIds.length < 1 || messageIds.length > 100) {
+    return res.status(400).json({ error: 'messageIds must contain 1–100 ids' });
+  }
+  if (messageIds.some(id => typeof id !== 'string' || !UUID_RE.test(id))) {
+    return res.status(400).json({ error: 'Invalid message id' });
+  }
+
+  const ids = [...new Set(messageIds)];
+  const account = await getOwnedAccount(req.session.userId, accountId);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
+
+  const { enabled, folders } = await getGtdConfig(accountId);
+  if (!enabled) return res.json({ messages: {} });
+
+  const statesByFolder = new Map();
+  for (const state of METADATA_STATE_ORDER) {
+    const folder = folders?.[state];
+    if (!folder) continue;
+    const states = statesByFolder.get(folder) || [];
+    states.push(state);
+    statesByFolder.set(folder, states);
+  }
+  const rows = await getLabelMetadata(accountId, ids, [...statesByFolder.keys()]);
+  const messages = {};
+  for (const row of rows) {
+    const states = statesByFolder.get(row.folder);
+    if (!states) continue;
+    if (!messages[row.messageId]) messages[row.messageId] = { states: [], dates: {}, date: null };
+    const entry = messages[row.messageId];
+    for (const state of states) {
+      if (!entry.states.includes(state)) entry.states.push(state);
+      entry.dates[state] = row.date;
+    }
+    if (row.date && (!entry.date || new Date(row.date) < new Date(entry.date))) entry.date = row.date;
+  }
+  for (const entry of Object.values(messages)) {
+    entry.states.sort((a, b) => METADATA_STATE_ORDER.indexOf(a) - METADATA_STATE_ORDER.indexOf(b));
+    entry.dates = Object.fromEntries(entry.states.map(state => [state, entry.dates[state] ?? null]));
+  }
+  return res.json({ messages });
 });
 
 // ── GTD Inbox-Zero pet ────────────────────────────────────────────────────────
@@ -164,6 +216,11 @@ router.post('/classify', countMutation(async (req, res) => {
 
   const account = await getOwnedAccount(req.session.userId, msg.account_id);
 
+  const releaseWatch = state === 'watch' ? tryAcquireWatchClassification(msg) : null;
+  if (state === 'watch' && !releaseWatch) {
+    return res.status(409).json({ error: 'Watch classification is already in progress. Refresh before retrying.' });
+  }
+
   let result;
   let oldCopies = [];
   let sourceRemoved = false;
@@ -205,7 +262,7 @@ router.post('/classify', countMutation(async (req, res) => {
       ...oldCopies.filter(isSelectedCopy),
     ];
 
-    result = await applyLabel(account, msg, toFolder, { forceCopy: oldCopies.length > 0 });
+    result = await applyLabel(account, msg, toFolder, { forceCopy: oldCopies.length > 0, recoverableCopy: state === 'watch' });
     // A cache-only destination can already be gone on IMAP. Confirm a fresh
     // COPY for each email before expunging any old state, accepting duplicates.
     // An arbitrary stored Message-ID must not collide with a headerless source.
@@ -225,13 +282,13 @@ router.post('/classify', countMutation(async (req, res) => {
     // COPYUID confirms a physical copy, but cached Message-ID metadata may be
     // stale. Reusing that copy for another source requires live identity proof
     // on both sides; unavailable proof falls back to copying each source.
-    if (oldCopies.length && result.applied && result.uid != null && await confirmsIdentity(msg, result.uid, toFolder)) {
+    if (oldCopies.length && (state === 'watch' || result.applied) && result.uid != null && await confirmsIdentity(msg, result.uid, toFolder)) {
       preserved.add(identity(msg));
     }
     for (const copy of oldCopies) {
       const key = identity(copy.message);
       if (preserved.has(key) && await confirmsIdentity(copy.message, copy.message.uid, copy.folder)) continue;
-      const copied = await applyLabel(account, copy.message, toFolder, { forceCopy: true });
+      const copied = await applyLabel(account, copy.message, toFolder, { forceCopy: true, recoverableCopy: state === 'watch' });
       // Without COPYUID, an OK response may have copied no stale source UID.
       // Copy each physical sibling unless this request confirmed a destination.
       if (copied.uid != null && await confirmsIdentity(copy.message, copied.uid, toFolder)) preserved.add(key);
@@ -243,8 +300,13 @@ router.post('/classify', countMutation(async (req, res) => {
       if (removed && isSelectedCopy(copy)) sourceRemoved = true;
     }
   } catch (err) {
+    if (state === 'watch' && err.code === 'label-copy-unconfirmed') {
+      return res.status(409).json({ error: err.message, code: err.code, retryable: true });
+    }
     console.error(`GTD classify failed for message ${messageId} -> ${toFolder}:`, err.message);
     return res.status(500).json({ error: 'Failed to apply GTD label' });
+  } finally {
+    releaseWatch?.();
   }
 
   // The existing undo token can only remove the new copy. A state switch also
