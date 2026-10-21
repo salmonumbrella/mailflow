@@ -57,8 +57,8 @@ export async function removeExactLabelCopy(imapManager, message, labelFolder, ui
     [message.account_id, labelFolder, uid, message.message_id]
   );
   if (!rows[0]) return { removed: false };
-  await imapManager.removeMessageCopy(message.account_id, uid, labelFolder);
-  return { removed: true };
+  const removed = await imapManager.removeMessageCopy(message.account_id, uid, labelFolder, { expectMessageId: message.message_id });
+  return { removed: removed > 0 };
 }
 
 // Remove a label: delete the message's copy living in the label folder, leaving INBOX and any
@@ -67,8 +67,8 @@ export async function removeExactLabelCopy(imapManager, message, labelFolder, ui
 export async function removeLabel(imapManager, message, labelFolder) {
   const uid = await resolveLabelCopyUid(message, labelFolder);
   if (uid == null) return { removed: false };
-  await imapManager.removeMessageCopy(message.account_id, uid, labelFolder);
-  return { removed: true };
+  const removed = await imapManager.removeMessageCopy(message.account_id, uid, labelFolder, { expectMessageId: message.message_id });
+  return { removed: removed > 0 };
 }
 
 // Ensure a set of label folders exist on the IMAP server, resolving each to its REAL server

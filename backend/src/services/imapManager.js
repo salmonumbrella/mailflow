@@ -1523,11 +1523,13 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
 // DB half of removeMessageCopy: delete exactly one folder's copy of a message. Scoped
 // to (account_id, uid, folder) — the messages unique key — so sibling rows in other
 // folders are never touched. Decrements that folder's counts off the removed row's
-// read state. Returns the number of rows removed (0 if it was already gone).
-export async function deleteMessageCopyRow(accountId, uid, folder) {
+// read state. An optional captured row prevents deleting a replacement at the same address.
+// Returns the number of rows removed (0 if it was already gone or changed).
+export async function deleteMessageCopyRow(accountId, uid, folder, expectedRow) {
+  const guarded = expectedRow !== undefined;
   const res = await query(
-    'DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 RETURNING is_read',
-    [accountId, uid, folder]
+    `DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3${guarded ? ' AND id = $4 AND message_id = $5 AND is_deleted = false' : ''} RETURNING is_read`,
+    guarded ? [accountId, uid, folder, expectedRow?.id ?? null, expectedRow?.message_id ?? null] : [accountId, uid, folder]
   );
   const row = res.rows[0];
   if (row) {
@@ -7285,18 +7287,28 @@ export class ImapManager {
   // Remove a single label = delete ONE folder's copy of the message, leaving the other
   // sibling rows intact. IMAP delete/expunge mechanics reuse permanentDeleteMessage (which
   // locks the folder and deletes that uid); the DB delete is scoped to that one folder's row.
-  // If the IMAP delete throws, the DB row is left in place so the two never silently diverge.
+  // Prove the captured cache identity on the selected server session before deletion.
+  // Refusal or failure leaves the DB row intact; a replacement cache UUID also survives.
   // Post-remove notification is a plugin concern (generic `afterLabelRemove` hook), so this
   // stays label-feature-agnostic.
-  async removeMessageCopy(accountId, uid, folder) {
+  async removeMessageCopy(accountId, uid, folder, options = {}) {
+    if (!['number', 'string'].includes(typeof uid) || !/^[1-9]\d{0,9}$/.test(String(uid)) || Number(uid) > 4294967295) return 0;
+    const { rows: [row] } = await query(
+      'SELECT id, message_id FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 AND is_deleted = false',
+      [accountId, uid, folder]
+    );
+    const expected = Object.hasOwn(options, 'expectMessageId') ? options.expectMessageId : row?.message_id;
+    const identity = normalizeMessageId(expected);
+    if (!row?.id || !identity || identity !== normalizeMessageId(row.message_id)) return 0;
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
     if (!account) throw new Error(`removeMessageCopy: account ${accountId} not found`);
 
-    await this.permanentDeleteMessage(account, uid, folder);
-    const result = await deleteMessageCopyRow(accountId, uid, folder);
-    // Removing a label copy changes label-feed data — let plugins broadcast their refresh.
-    await pluginRegistry.runHook('afterLabelRemove', { mgr: this.pluginFacade, account, folder, uid });
+    if (await this.permanentDeleteMessage(account, uid, folder, { expectMessageId: expected }) !== true) return 0;
+    const result = await deleteMessageCopyRow(accountId, uid, folder, row);
+    if (result > 0) {
+      await pluginRegistry.runHook('afterLabelRemove', { mgr: this.pluginFacade, account, folder, uid });
+    }
     return result;
   }
 

@@ -22,7 +22,7 @@ import { resolveAllDraftsPaths } from '../../utils/mailUtils.js';
 const DEFAULT_FOLDERS = { todo: 'Todo', watch: 'Watch', delegated: 'Delegated', someday: 'Someday', reference: 'Reference' };
 const account = { id: 'acct-1', user_id: 'user-1', email_address: 'me@example.com', folder_mappings: {} };
 
-const fakeManager = () => ({ hasMessageCopy: vi.fn().mockResolvedValue(true), removeMessageCopy: vi.fn().mockResolvedValue({}), broadcast: vi.fn() });
+const fakeManager = () => ({ hasMessageCopy: vi.fn().mockResolvedValue(true), removeMessageCopy: vi.fn().mockResolvedValue(1), broadcast: vi.fn() });
 
 // One switchboard for the queries the engine issues: the sent-message Message-ID lookup
 // (recognised by message_id = ANY), the owner-address UNION (account_aliases), and the
@@ -106,8 +106,8 @@ describe('runGtdTransitions', () => {
     ] });
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 11, 'Todo');
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 12, 'Someday');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 11, 'Todo', { expectMessageId: '<original@example.test>' });
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 12, 'Someday', { expectMessageId: '<original@example.test>' });
     expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 13, 'Watch');
     expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 14, 'Delegated');
     expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' }, 'user-1');
@@ -240,7 +240,7 @@ describe('runGtdTransitions', () => {
     });
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 31, 'Todo');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 31, 'Todo', { expectMessageId: '<original@example.test>' });
   });
 
   it('keeps Watch when the newest message is from a configured Fastmail masked alias', async () => {
@@ -355,7 +355,17 @@ describe('runGtdTransitions', () => {
     expect(mgr.broadcast).not.toHaveBeenCalled();
   });
 
-  it('tolerates a removeMessageCopy rejection (concurrent external strip) as success', async () => {
+  it('does not advertise a refused identity or zero-row removal', async () => {
+    mockQuery({ rows: [
+      { message_id: '<original@example.test>', thread_key: 't1', uid: 70, folder: 'INBOX', from_email: 'me@example.com', date: '2026-07-09T10:00:00Z', id: 'r1' },
+      { message_id: '<original@example.test>', thread_key: 't1', uid: 71, folder: 'Todo', from_email: 'me@example.com', date: '2026-07-09T10:00:00Z', id: 'r2' },
+    ] });
+    const mgr = fakeManager(); mgr.removeMessageCopy.mockResolvedValue(0);
+    await runGtdTransitions(mgr, account, ['t1']);
+    expect(mgr.removeMessageCopy).toHaveBeenCalledTimes(1); expect(mgr.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('tolerates a failed removal without advertising a confirmed strip', async () => {
     mockQuery({ rows: [
       { message_id: '<original@example.test>', thread_key: 't1', uid: 70, folder: 'INBOX', from_email: 'me@example.com', date: '2026-07-09T10:00:00Z', id: 'r1' },
       { message_id: '<original@example.test>', thread_key: 't1', uid: 71, folder: 'Todo',  from_email: 'me@example.com', date: '2026-07-09T10:00:00Z', id: 'r2' },
@@ -363,8 +373,8 @@ describe('runGtdTransitions', () => {
     const mgr = fakeManager();
     mgr.removeMessageCopy.mockRejectedValue(new Error('NO [TRYCREATE] no such UID'));
     await expect(runGtdTransitions(mgr, account, ['t1'])).resolves.toBeUndefined();
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 71, 'Todo');
-    expect(mgr.broadcast).toHaveBeenCalledTimes(1);
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 71, 'Todo', { expectMessageId: '<original@example.test>' });
+    expect(mgr.broadcast).not.toHaveBeenCalled();
   });
 });
 
@@ -407,8 +417,8 @@ describe('runTransitionsForSentMessage', () => {
 
     const midCall = query.mock.calls.find(([sql]) => sql.includes('message_id = ANY'));
     expect(midCall[1]).toEqual(['acct-1', ['abc@example.com', '<abc@example.com>']]);
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 81, 'Todo');
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 82, 'Someday');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 81, 'Todo', { expectMessageId: '<original@example.test>' });
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 82, 'Someday', { expectMessageId: '<original@example.test>' });
     expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 83, 'Watch');
     expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 84, 'Delegated');
     expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' }, 'user-1');
