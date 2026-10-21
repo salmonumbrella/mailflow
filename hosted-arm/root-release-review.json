@@ -1,0 +1,27 @@
+{
+  "status": "ROOT_REVIEWED_RELEASE_FOR_ONE_HOSTED_SMALL_ATTEMPT_NOT_EXECUTED",
+  "baseAuthorManifestSha256": "ec4958fce50f3a3281c6939971606b4a5506222e516312ee9b58d1aeb1edeccb",
+  "sourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+  "sourceTree": "726385949110b2d1eef6168fa5765942136b955e",
+  "originalBundleSha256": "9c232c1726aa500a2c36f6f91aa78a17f1683cad46f593ec502a32b45b1941a4",
+  "all34403RegularFilesAnd85LinksVerified": true,
+  "allThreeOfficialImageMetadataChainsVerified": true,
+  "sourceV4DriverWireAndBundleBytesUnchanged": true,
+  "hostedRunnerSha256": "f4853d937a07d75e0471c79ae14cb3f333c6988c11ca9d3626c0b896aa6c0eae",
+  "workflowSha256": "60e9d67998efa43b8ee39535a033da14f535817d0e3f28380d9f2628d32c6f44",
+  "releasePolicySha256": "4da12eb2d8dfdb80cbc29ec997d653f510cfaff99f9443344ae41351942c75b4",
+  "rootChanges": [
+    "Release one dedicated ARM4CPU/16GiB small400+400 development-mode attempt under observed profile/1800second lease",
+    "Fetch original five size/hash-pinned chunks from dedicated release assets, keep payload out of Git history",
+    "Invoke original orchestrator through private verified copy using python-B",
+    "Retain only narrowly selected failure excerpts after full generated-secret/encoded/cookie/UUID/private-path redaction; omit on redaction error"
+  ],
+  "checks": {
+    "PythonAst": true,
+    "actionlint": true,
+    "YamlParsed": true,
+    "IsolatedDiagnosticRedactionAndFailureOmission": true
+  },
+  "runtimeExecuted": false,
+  "MiniProductionProviderBrowser108kPerformanceAccepted": false
+}

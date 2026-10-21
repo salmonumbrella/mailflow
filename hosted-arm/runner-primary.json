@@ -1,0 +1,10 @@
+{
+  "url": "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+  "sha256": "86cbda1622bf213040f63cb52206c9ab9e45e18b146eb92e28bf4c5e8be0f65a",
+  "label": "ubuntu-24.04-arm",
+  "officialPublicStandard": true,
+  "expectedLinuxArch": "aarch64",
+  "documentedCpus": 4,
+  "documentedMemoryGiB": 16,
+  "documentedDiskGiB": 14
+}

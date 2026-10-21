@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:52d0098541c3d073213ca1889629da836eef745c2bc525239000cb0dac019f04",
+    "size": 5736
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:41b2195c355367079ebad200f9591fe3c2cb886c3b1e67abaaf2090dc11c04d9",
+      "size": 28138425
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:faf78435acad52e8a30d9dff9aaf7b1726b106dacf26b8f278302319f18f985a",
+      "size": 1100
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:f96b697119f4e22b96949ec2e5dd7c326ea44ae0c45bd98f80f934e21238932e",
+      "size": 876
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:775b59399a9972b469218e05fa0e3e15bfe0070a029eca03e9ef47a3654a39c6",
+      "size": 15358618
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:d72d5565d4e386d3efb2563fa32beb52c2a6d11c853e7516416c36244929725f",
+      "size": 96
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+      "size": 32
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:45a9b245ffc486d6961869749df17ea6f1ad36383023c3d3ceb9a298bf66d802",
+      "size": 600
+    }
+  ],
+  "annotations": {
+    "com.docker.official-images.bashbrew.arch": "arm64v8",
+    "org.opencontainers.image.base.digest": "sha256:991827bb788d78bbc130dcb851913beecff43296360f48838aca7cbdfae4375c",
+    "org.opencontainers.image.base.name": "debian:bookworm-slim",
+    "org.opencontainers.image.created": "2026-10-21T00:42:13Z",
+    "org.opencontainers.image.revision": "74654c612ee06275377d483dc4e134e57b463e9e",
+    "org.opencontainers.image.source": "https://github.com/redis/docker-library-redis.git#74654c612ee06275377d483dc4e134e57b463e9e:debian",
+    "org.opencontainers.image.url": "https://hub.docker.com/_/redis",
+    "org.opencontainers.image.version": "7.4.11"
+  }
+}

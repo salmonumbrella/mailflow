@@ -1,0 +1,25 @@
+{
+  "task": "vault#qw4m",
+  "runtimeReleased": true,
+  "mode": "small",
+  "sourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+  "sourceTree": "726385949110b2d1eef6168fa5765942136b955e",
+  "orchestratorManifestSha256": "c879682f8a39984dc7a97d4215c48589c3aa49db5d867c3b406cb5a7e545cfd1",
+  "driverSourceVerificationSha256": "1120a40957c99f02b81eefb2f0d559fe98f7237d6a8c62458d883cb72ea513ba",
+  "leaseSeconds": 1800,
+  "deadlineMs": 1200000,
+  "limits": {
+    "nodeCpus": 2,
+    "pgCpus": 1,
+    "redisCpus": 0.25,
+    "maxTotalCpus": 3.25,
+    "nodeMemoryMiB": 6144,
+    "pgMemoryMiB": 2048,
+    "redisMemoryMiB": 256,
+    "fixtureHeapMiB": 512,
+    "tmpMiB": 512,
+    "minimumFreeDiskBytes": 4294967296
+  },
+  "acceptance": "Supplemental Linux ARM development-mode same-app component proof only. Mini108k, production, provider, browser and performance remain open.",
+  "rootReview": "Root reviewed exact packet/source-v4, bundle closure, official ARM image chains and dedicated resource profile; authorize one small synthetic hosted attempt only."
+}

@@ -1,0 +1,69 @@
+{
+  "files": {
+    "README.md": "f416d9f2f3940884e2bfea68c9ae39cafe1c901758d39bc653ce5bd41720faab",
+    "actions-primary.json": "f60ab8af39605de4caf5b0242dd523a711d2c2ebd108e2ea58c825346a12229c",
+    "build-bundle.py": "e20c5c001817b72770908a191ebaf7614a45b0d2a685094d4e69379a77359482",
+    "bundle-index.json": "079b39bea149c6c560d0cf702456e89fff38e46d360a42fa86e03136b3186cc5",
+    "bundle-receipt.json": "1d19110918e9793b892c5c0986c16db25bfbb06632d4e0e9367c3d1bc4a0c452",
+    "bundle.part-000": "ece9022012617171e1b653c42ff72b78438ee387537b12222ac0dd0418a6e670",
+    "bundle.part-001": "b99d7d111a311c7a29bd13427ed4e8201e842a418cca2b916d9eff8eae738969",
+    "bundle.part-002": "f14de69e54e2815dff9f39eb9bf982942c3b5175b1d3cd3bb3a6c6ee35cb69e3",
+    "bundle.part-003": "c4e9b4ca588af59efa9ab2b6a7911da3a1b51082764c3b3a69e7a2e76f8f81a3",
+    "bundle.part-004": "96232d1cfc2aaf288e1bcd85b265a98dbc0e734dac22c31cd359ebb21003add7",
+    "commands.json": "7a20d6bd5bac71e60f8128299df20e6131a496fd721deb0d2f751305e93fb15c",
+    "hosted.py": "f4853d937a07d75e0471c79ae14cb3f333c6988c11ca9d3626c0b896aa6c0eae",
+    "images.json": "2e8d94aa521bcbce83f4b7645aeeec90ac3abc0d6881fe72a58ca62f0720ba55",
+    "locks.json": "ad552bad03d2c48194f87a0a2ce02b0ff61e9bcb75bb7d62ab75a00b3fed073e",
+    "locks/backend/package-lock.json": "6543e04c27b0168917d04559d173d2e3efb5e1d955e760894600d6b80f0f1d70",
+    "locks/backend/package.json": "ee5966801ff9638cb1ccc21147094ee3e932318b7fdd1b737afdab1392680cc0",
+    "locks/frontend/package-lock.json": "7182f198528206e3ac4ef3727bcd8b3e9e1c5972317ac7c3a014ff50d3ebad99",
+    "locks/frontend/package.json": "8fd36b6fe066fa953757a9509844086c8140e79d5015ec786cd76be1cbee08c0",
+    "locks/mime-tools/package-lock.json": "2db5a385d2d2ad83099e83d9710bd599e942c3b829bf7e678268200ca8a12a95",
+    "locks/mime-tools/package.json": "0d7c90a3ac6dbf5b361e32b146f983dab8db6a07023daacf25e8f3f3713b1fe1",
+    "locks/protocol/package-lock.json": "0d11c4976bac3107db6b8ce8fdc67f91b5c727597687859ba3f9ec9383ac281c",
+    "locks/protocol/package.json": "3dbcf90564dbc39508c2a2d91df65e5d60313fa8af5b8ee1e39e07cfff5d5c91",
+    "node-arm-manifest.json": "6be82d4da7e0320cfc2bc5c000d534bf8c0a7eae567dce465b47c77fdd483987",
+    "node-config.json": "ad29f8b705499d940ca3e27ee720168223fb06e0cb15a821039d12d4a42e3e2b",
+    "node-index.json": "3ed98443660ff48413b5af19ecefce3b9d50845a901a43420d47cc63a9fddbe9",
+    "postgres-arm-manifest.json": "2b429c90204d3dc581371d2ce267ffb0aeeddf4968e176de5003037b4d0de8a9",
+    "postgres-config.json": "7a453af3765f0df89f869030d70b1aa5d79f68e33ba80ea3a8671d68cb259be0",
+    "postgres-index.json": "d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0",
+    "redis-arm-manifest.json": "617bd2a7a36d215e3e0c61353a17cb5c856b192664e774455ef8023a60bee6ac",
+    "redis-config.json": "52d0098541c3d073213ca1889629da836eef745c2bc525239000cb0dac019f04",
+    "redis-index.json": "44960b3100c48159a66d28c18b0588c193492e25f7551d60e51dd464fc3eca5b",
+    "release-policy.json": "4da12eb2d8dfdb80cbc29ec997d653f510cfaff99f9443344ae41351942c75b4",
+    "runner-primary.html": "86cbda1622bf213040f63cb52206c9ab9e45e18b146eb92e28bf4c5e8be0f65a",
+    "runner-primary.json": "8efa02d49d805ae81702d8f9bf94eb08970ed50ff68693f7eed42f0179bd2855",
+    "workflow.yml": "60e9d67998efa43b8ee39535a033da14f535817d0e3f28380d9f2628d32c6f44",
+    "root-release-review.json": "1a29bf71526723520dc0eff7ad4f57fd5011e08139742931f7cc3f62fcc5819e"
+  },
+  "frozenBundleReceiptSha256": "1d19110918e9793b892c5c0986c16db25bfbb06632d4e0e9367c3d1bc4a0c452",
+  "localOnlyExcluded": [
+    "bundle.tar.gz",
+    "handoff.json",
+    "history/",
+    "static-check.py",
+    "static-validation.json",
+    "workflow-parsed.json",
+    "file-only-preflight.json"
+  ],
+  "publicationLayout": {
+    "files": "hosted-arm/ for all manifest files except publicationLayout.externalAssets.names; download these assets before packet_guard",
+    "workflow": "workflow.yml copied to .github/workflows/ci-mailflow-arm-v4.yml",
+    "externalAssets": {
+      "releaseTag": "verification-arm-inputs-2026-10-21-v4",
+      "targetSourceCommit": "76146779946849581b5b26dd35933ebd00fe847d",
+      "names": [
+        "bundle.part-000",
+        "bundle.part-001",
+        "bundle.part-002",
+        "bundle.part-003",
+        "bundle.part-004"
+      ],
+      "excludeFromGit": true
+    }
+  },
+  "schema": "mailflow-hosted-arm-packet-v1",
+  "status": "ROOT_REVIEWED_RUNTIME_RELEASED_SINGLE_HOSTED_ATTEMPT_UNRUN",
+  "task": "vault#qw4m"
+}

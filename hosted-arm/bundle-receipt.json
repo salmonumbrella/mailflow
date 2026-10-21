@@ -1,0 +1,40 @@
+{
+  "bundleSha256": "9c232c1726aa500a2c36f6f91aa78a17f1683cad46f593ec502a32b45b1941a4",
+  "bundleBytes": 195410597,
+  "indexSha256": "079b39bea149c6c560d0cf702456e89fff38e46d360a42fa86e03136b3186cc5",
+  "chunks": {
+    "bundle.part-000": {
+      "sha256": "ece9022012617171e1b653c42ff72b78438ee387537b12222ac0dd0418a6e670",
+      "bytes": 41943040
+    },
+    "bundle.part-001": {
+      "sha256": "b99d7d111a311c7a29bd13427ed4e8201e842a418cca2b916d9eff8eae738969",
+      "bytes": 41943040
+    },
+    "bundle.part-002": {
+      "sha256": "f14de69e54e2815dff9f39eb9bf982942c3b5175b1d3cd3bb3a6c6ee35cb69e3",
+      "bytes": 41943040
+    },
+    "bundle.part-003": {
+      "sha256": "c4e9b4ca588af59efa9ab2b6a7911da3a1b51082764c3b3a69e7a2e76f8f81a3",
+      "bytes": 41943040
+    },
+    "bundle.part-004": {
+      "sha256": "96232d1cfc2aaf288e1bcd85b265a98dbc0e734dac22c31cd359ebb21003add7",
+      "bytes": 27638437
+    }
+  },
+  "counts": {
+    "appCheckoutFiles": 1496,
+    "driver": 10,
+    "wire": 25,
+    "pgAuditInputs": 147,
+    "driverDependencyFiles": 33049,
+    "driverDependencyLinks": 83,
+    "fixtureDependencyFiles": 1141,
+    "fixtureDependencyLinks": 2
+  },
+  "regularFiles": 34403,
+  "links": 85,
+  "runtimeExecuted": false
+}

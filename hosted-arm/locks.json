@@ -1,0 +1,14 @@
+{
+  "files": {
+    "locks/frontend/package.json": "8fd36b6fe066fa953757a9509844086c8140e79d5015ec786cd76be1cbee08c0",
+    "locks/frontend/package-lock.json": "7182f198528206e3ac4ef3727bcd8b3e9e1c5972317ac7c3a014ff50d3ebad99",
+    "locks/backend/package.json": "ee5966801ff9638cb1ccc21147094ee3e932318b7fdd1b737afdab1392680cc0",
+    "locks/backend/package-lock.json": "6543e04c27b0168917d04559d173d2e3efb5e1d955e760894600d6b80f0f1d70",
+    "locks/mime-tools/package.json": "0d7c90a3ac6dbf5b361e32b146f983dab8db6a07023daacf25e8f3f3713b1fe1",
+    "locks/mime-tools/package-lock.json": "2db5a385d2d2ad83099e83d9710bd599e942c3b829bf7e678268200ca8a12a95",
+    "locks/protocol/package.json": "3dbcf90564dbc39508c2a2d91df65e5d60313fa8af5b8ee1e39e07cfff5d5c91",
+    "locks/protocol/package-lock.json": "0d11c4976bac3107db6b8ce8fdc67f91b5c727597687859ba3f9ec9383ac281c"
+  },
+  "frontendInstalledManifestDifference": "Existing accepted workspace omits only engines metadata from package.json and the root lock entry. All other package/lock JSON equals public source; public source remains unchanged. Exact installed graph bytes are reused, not reinstalled.",
+  "runtimeExecuted": false
+}
