@@ -29,6 +29,8 @@ const RELOCATE_EXCLUDED = new Set([
   // The destination has a new physical UID/folder. Keep coverage unverified
   // until the search worker publishes for that locator and folder epoch.
   'search_generation_id',
+  // The destination INSERT trigger supplies a fresh top-level transaction stamp.
+  'search_changed_xid',
 ]);
 
 const TABLE_CONSTRAINT = /^(constraint|primary|unique|check|foreign|exclude)$/i;
