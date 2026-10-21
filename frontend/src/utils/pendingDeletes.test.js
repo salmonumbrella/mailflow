@@ -119,3 +119,16 @@ describe('pendingDeletes guard', () => {
     clearDeleteGuard(threadGuard);
   });
 });
+
+it('keeps 111 archive-owned guards through a long write while ordinary delete guards expire', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const rows = Array.from({ length: 111 }, (_, n) => ({ id: `archive-${n}`, account_id: 'a', folder: 'INBOX' }));
+  try {
+    for (const row of rows) setPendingDelete(row.id, { archive: true });
+    setPendingDelete('ordinary');
+    t.mock.timers.tick(600000);
+    assert.deepEqual(applyDeleteGuard([...rows, { id: 'ordinary' }]), [{ id: 'ordinary' }]);
+    clearDeleteGuard(rows[40].id); // Undo/known failure owns only its own row
+    assert.deepEqual(applyDeleteGuard(rows).map(row => row.id), ['archive-40']);
+  } finally { [...rows.map(row => row.id), 'ordinary'].forEach(clearDeleteGuard); }
+});

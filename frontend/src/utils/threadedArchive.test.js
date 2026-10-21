@@ -267,3 +267,12 @@ describe('archiveInChunks', () => {
     assert.equal(call, 2);
   });
 });
+
+it('archiveInChunks preserves explicit uncertain HTTP200 members and actual targets within each chunk', async () => {
+  const result = await threadedArchive.archiveInChunks(['confirmed', 'uncertain'], async () => ({
+    archived: ['confirmed', 'foreign'], countTargets: [{ id: 'confirmed', folder: 'Sent' }, { id: 'foreign' }], unconfirmed: ['uncertain', 'foreign'],
+  }));
+  assert.deepEqual(result.archived, ['confirmed']);
+  assert.deepEqual(result.unconfirmed, ['uncertain']);
+  assert.deepEqual(result.countTargets, [{ id: 'confirmed', folder: 'Sent' }]);
+});

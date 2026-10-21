@@ -602,7 +602,9 @@ async function doRefreshGoogleToken(account) {
   const { clientId, clientSecret } = getGoogleConfig();
 
   const storedRefreshToken = decrypt(account.oauth_refresh_token);
-  if (!storedRefreshToken) throw new Error('OAuth refresh token is missing or corrupted — please reconnect your account');
+  if (!storedRefreshToken) throw Object.assign(new Error('OAuth refresh token is missing or corrupted — please reconnect your account'), {
+    code: 'OAUTH_RECONNECT_REQUIRED',
+  });
 
   const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
     method: 'POST',
@@ -621,7 +623,9 @@ async function doRefreshGoogleToken(account) {
     // invalid_grant means the user revoked access, changed password, or the token
     // expired from disuse. No retry will fix it — the account must be reconnected.
     if (tokens.error === 'invalid_grant') {
-      throw new Error('Google access was revoked or expired — please reconnect this account');
+      throw Object.assign(new Error('Google access was revoked or expired — please reconnect this account'), {
+        code: 'OAUTH_RECONNECT_REQUIRED',
+      });
     }
     throw new Error(tokens.error_description || tokens.error || 'Token refresh failed');
   }

@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Masked email address",
+    "alias": "Email alias"
+  },
   "common": {
     "cancel": "Cancel",
     "save": "Save",
@@ -201,9 +205,15 @@
     "recipientMenu": {
       "copy": "Copy address",
       "copyAll": "Copy all in this field"
+    },
+    "senderValidation": {
+      "unavailable": "Fastmail does not list this address as a sending identity.",
+      "unknown": "Could not verify this sender with Fastmail.",
+      "missing": "The selected sender is no longer available. Select a sender again."
     }
   },
   "message": {
+    "unreadRequested": "Unread change requested",
     "find": {
       "title": "Search",
       "close": "Close search",
@@ -996,7 +1006,13 @@
       "trustedAuthservDetected": "Seen on your recent mail (click to use):",
       "trustedAuthservDetectedNone": "No data yet — messages are inspected once antispam is enabled for this account.",
       "trustedAuthservWarn": "Only trust an ID you recognize as your mail provider's receiving server.",
-      "enabledGlobally": "Enabled globally"
+      "enabledGlobally": "Enabled globally",
+      "fastmailVerification": {
+        "token": "Fastmail API token",
+        "help": "Use a token limited to Email submission (identities) and, optionally, Masked Email access. Do not grant full access. Leave untouched to keep the saved token.",
+        "configured": "A token is saved.",
+        "clear": "Remove saved token"
+      }
     },
     "folderMappings": {
       "title": "Folder mappings",
@@ -1902,6 +1918,7 @@
     "show": "Show right sidebar"
   },
   "gtd": {
+    "oldestLabeledAge": "{{state}}: oldest labeled message age (days): {{count}}",
     "title": "GTD",
     "inbox": "Inbox",
     "waiting": "Waiting",
@@ -1923,6 +1940,7 @@
     "done": "Mark done",
     "doneFailed": "Couldn't mark done",
     "doneArchiveFailed": "Marked done, but archiving failed — still in your Inbox",
+    "doneThreadRemains": "Some messages in this conversation couldn't be cleared, so it stays in its GTD section",
     "state": {
       "todo": "Todo",
       "watch": "Watch",

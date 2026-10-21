@@ -26,6 +26,11 @@ const RELOCATE_EXCLUDED = new Set([
   // Snippet indexer bookkeeping, also never carried. Resetting it costs at most one more
   // snippet fetch for a moved row that has none.
   'snippet_attempted_at',
+  // The destination has a new physical UID/folder. Keep coverage unverified
+  // until the search worker publishes for that locator and folder epoch.
+  'search_generation_id',
+  // The destination INSERT trigger supplies a fresh top-level transaction stamp.
+  'search_changed_xid',
 ]);
 
 const TABLE_CONSTRAINT = /^(constraint|primary|unique|check|foreign|exclude)$/i;
@@ -112,7 +117,9 @@ describe('label copy column list', () => {
     query.mockReset();
     query.mockResolvedValue({ rows: [] });
     await insertCopiedSibling('acct', 1, 'INBOX', 'Todo', 2);
-    const sql = query.mock.calls[0][0];
+    const insertCalls = query.mock.calls.filter(([sql]) => /^\s*INSERT INTO messages\s*\(/i.test(sql));
+    expect(insertCalls).toHaveLength(1);
+    const sql = insertCalls[0][0];
     const labelCols = sql.slice(sql.indexOf('(') + 1, sql.indexOf(')')).split(',').map(s => s.trim());
     const relocateCols = RELOCATE_INSERT_COLS.split(',').map(s => s.trim());
     expect([...labelCols].sort()).toEqual([...relocateCols].sort());

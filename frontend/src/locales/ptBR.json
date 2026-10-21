@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Endereço de e-mail mascarado",
+    "alias": "Alias de e-mail"
+  },
   "common": {
     "cancel": "Cancelar",
     "save": "Salvar",
@@ -201,9 +205,15 @@
     "recipientMenu": {
       "copy": "Copiar endereço",
       "copyAll": "Copiar todos deste campo"
+    },
+    "senderValidation": {
+      "unavailable": "O Fastmail não lista este endereço como identidade de envio.",
+      "unknown": "Não foi possível verificar este remetente no Fastmail.",
+      "missing": "O remetente selecionado não está mais disponível. Selecione um remetente novamente."
     }
   },
   "message": {
+    "unreadRequested": "Solicitada marcação como não lida",
     "find": {
       "title": "Pesquisar",
       "close": "Fechar pesquisa",
@@ -996,7 +1006,13 @@
       "trustedAuthservDetected": "Visto nos seus e-mails recentes (clique para usar):",
       "trustedAuthservDetectedNone": "Sem dados ainda — as mensagens são inspecionadas assim que o antispam for ativado para esta conta.",
       "trustedAuthservWarn": "Confie apenas em um ID que você reconheça como o servidor de recebimento do seu provedor de e-mail.",
-      "enabledGlobally": "Ativado globalmente"
+      "enabledGlobally": "Ativado globalmente",
+      "fastmailVerification": {
+        "token": "Token da API do Fastmail",
+        "help": "Limite o token ao envio de e-mails (identidades) e, opcionalmente, a e-mails mascarados. Não conceda acesso completo. Deixe sem alterações para manter o token salvo.",
+        "configured": "Há um token salvo.",
+        "clear": "Remover token salvo"
+      }
     },
     "folderMappings": {
       "title": "Mapeamento de pastas",
@@ -1902,6 +1918,7 @@
     "show": "Mostrar barra lateral direita"
   },
   "gtd": {
+    "oldestLabeledAge": "{{state}}: idade da mensagem mais antiga com esta etiqueta (dias): {{count}}",
     "title": "GTD",
     "inbox": "Entrada",
     "waiting": "Aguardando",
@@ -1923,6 +1940,7 @@
     "done": "Marcar como concluída",
     "doneFailed": "Não foi possível marcar como concluída",
     "doneArchiveFailed": "Marcada como concluída, mas o arquivamento falhou — ainda está na sua Caixa de entrada",
+    "doneThreadRemains": "Algumas mensagens desta conversa não puderam ser removidas, então ela continua na sua seção do GTD",
     "state": {
       "todo": "A fazer",
       "watch": "Acompanhar",

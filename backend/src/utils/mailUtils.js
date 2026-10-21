@@ -1,3 +1,4 @@
+import { pluginRegistry } from '../plugins/registry.js';
 import { query } from '../services/db.js';
 import { recordSyncSignal } from '../services/diagnosticsRing.js';
 
@@ -32,6 +33,9 @@ const TRASH_FOLDER_SQL = `(special_use = '\\Trash'
   OR (lower(name) IN ('trash', 'deleted', 'deleted items', 'deleted messages') AND ${TOP_LEVEL_FOLDER_SQL}))`;
 const DRAFTS_FOLDER_SQL = `(special_use = '\\Drafts'
   OR (lower(name) IN ('drafts', 'draft') AND ${TOP_LEVEL_FOLDER_SQL}))`;
+// Spam has no top-level rule: providers file it under many localized names (see resolveSpamFolder).
+const SPAM_FOLDER_SQL = `(special_use = '\\Junk'
+  OR lower(name) ~ '(spam|junk|bulk|indesiderata|spamverdacht|courrier ind|posta indesiderata)')`;
 
 // True for a draft, in a query over messages aliased `m`: flagged \Draft, or held in the account's
 // mapped Drafts folder or a folder the Drafts rules above match. The thread badge leaves drafts out
@@ -140,8 +144,7 @@ export async function resolveSpamFolder(accountId, folderMappings) {
   if (mapped) return mapped;
   const result = await query(
     `SELECT path FROM folders WHERE account_id = $1
-     AND (special_use = '\\Junk'
-          OR lower(name) ~ '(spam|junk|bulk|indesiderata|spamverdacht|courrier ind|posta indesiderata)')
+     AND ${SPAM_FOLDER_SQL}
      ORDER BY (CASE WHEN special_use = '\\Junk' THEN 0 ELSE 1 END)
      LIMIT 1`,
     [accountId]
@@ -157,11 +160,47 @@ export async function resolveAllSpamPaths(accountId, folderMappings) {
   if (mapped) return new Set([mapped]);
   const result = await query(
     `SELECT path FROM folders WHERE account_id = $1
-     AND (special_use = '\\Junk'
-          OR lower(name) ~ '(spam|junk|bulk|indesiderata|spamverdacht|courrier ind|posta indesiderata)')`,
+     AND ${SPAM_FOLDER_SQL}`,
     [accountId]
   );
   return new Set(result.rows.map(r => r.path));
+}
+
+// The roles one folder of an account plays, by the same rules as the resolvers above: whether
+// the Trash, Drafts and Spam rules match it, and whether the account's mappings name it as one
+// of those. Unlike the resolvers this ignores whether a mapping is usable and unions every rule,
+// so it answers "could MailFlow treat this folder as Trash, Drafts or Spam?". Null when the
+// account has no folder at that path.
+//
+// It also says whether the folder is where MailFlow snoozes mail. Snoozing creates 'Snoozed',
+// which an INBOX. namespace prefix puts at INBOX.Snoozed (imapManager.js ensureMailbox), so the
+// name counts where the stock Trash and Drafts names do. A folder one of the account's snooze
+// records names counts too, which finds Snoozed under any other prefix, or where a rename took
+// it, while mail waits there.
+export async function folderRoles(accountId, path) {
+  const mapped = role => `COALESCE(path = (SELECT ea.folder_mappings->>'${role}' FROM email_accounts ea WHERE ea.id = $1), false)`;
+  const { rows: [row] } = await query(
+    `SELECT no_select, special_use,
+            COALESCE(${TRASH_FOLDER_SQL}, false) AS trash_rule,
+            COALESCE(${DRAFTS_FOLDER_SQL}, false) AS drafts_rule,
+            COALESCE(${SPAM_FOLDER_SQL}, false) AS spam_rule,
+            ${mapped('trash')} AS mapped_trash,
+            ${mapped('drafts')} AS mapped_drafts,
+            ${mapped('spam')} AS mapped_spam,
+            COALESCE(lower(name) = 'snoozed' AND ${TOP_LEVEL_FOLDER_SQL}, false) AS snoozed_rule,
+            EXISTS (SELECT 1 FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.snoozed_folder = $2) AS snooze_record
+       FROM folders WHERE account_id = $1 AND path = $2`,
+    [accountId, path]
+  );
+  if (!row) return null;
+  return {
+    noSelect: row.no_select === true,
+    specialUse: row.special_use || null,
+    trash: row.trash_rule === true || row.mapped_trash === true,
+    drafts: row.drafts_rule === true || row.mapped_drafts === true,
+    spam: row.spam_rule === true || row.mapped_spam === true,
+    snoozed: row.snoozed_rule === true || row.snooze_record === true,
+  };
 }
 
 // Resolve the canonical Sent folder path for an account (APPEND target for sent copies).
@@ -215,16 +254,17 @@ export function adjustFolderCounts(accountId, path, totalDelta, unreadDelta) {
 // each returned folder gets its unread count adjusted. Callers gate on the message
 // actually having siblings, so a plain single-folder message never reaches here.
 export async function fanOutReadToSiblings(accountId, messageId, read) {
-  if (!messageId) return; // no shared header → no siblings to fan out to
+  if (!messageId) return []; // no shared header → no siblings to fan out to
   const res = await query(
     `UPDATE messages SET is_read = $1, read_changed_at = NOW()
       WHERE account_id = $2 AND message_id = $3 AND is_read <> $1
-      RETURNING folder`,
+      RETURNING id, account_id, uid, folder, message_id, is_deleted`,
     [read, accountId, messageId]
   );
   for (const row of res.rows) {
     adjustFolderCounts(accountId, row.folder, 0, read ? -1 : 1);
   }
+  return res.rows;
 }
 
 // Star fan-out counterpart. Stars never contribute to folder unread counts (the star
@@ -246,7 +286,7 @@ export async function fanOutStarToSiblings(accountId, messageId, starred) {
 // single array param so the statement composes with the route's 500-id cap without
 // per-id placeholder expansion.
 export async function fanOutBulkReadToSiblings(actedIds, read) {
-  if (!actedIds.length) return;
+  if (!actedIds.length) return [];
   const res = await query(
     `UPDATE messages m SET is_read = $1, read_changed_at = NOW()
        FROM (
@@ -258,7 +298,7 @@ export async function fanOutBulkReadToSiblings(actedIds, read) {
         AND m.message_id = acted.message_id
         AND m.is_read <> $1
         AND m.id <> ALL($2::uuid[])
-      RETURNING m.account_id, m.folder`,
+      RETURNING m.id, m.account_id, m.uid, m.folder, m.message_id, m.is_deleted`,
     [read, actedIds]
   );
   const deltas = {};
@@ -270,6 +310,51 @@ export async function fanOutBulkReadToSiblings(actedIds, read) {
   for (const { accountId, folder, unread } of Object.values(deltas)) {
     adjustFolderCounts(accountId, folder, 0, unread);
   }
+  return res.rows;
+}
+
+// Header identity and a configured label relationship are conservative copy evidence.
+// Check every live row, not just flipped rows, and require an unchanged acted witness.
+// Display bodies are mutable caches, so their representation cannot disprove a copy.
+export async function readCopyTargets(accountId, messageId, actedRows) {
+  if (typeof messageId !== 'string') return [];
+  const bare = messageId.trim().replace(/^<([^<>]+)>$/, '$1');
+  if (!/^[^<>\s@]+@[^<>\s@]+$/.test(bare)) return [];
+  const folders = new Set((await pluginRegistry.collectHook('relocateExemptFolders', { accountId })).flat());
+  if (!folders.size) return [];
+  const { rows } = await query(
+    `SELECT id, account_id, uid, folder, message_id, is_deleted, is_read, from_email, date, subject,
+            to_addresses, cc_addresses
+       FROM messages WHERE account_id = $1 AND message_id = $2 AND is_deleted = false LIMIT 65`,
+    [accountId, messageId]
+  );
+  if (rows.length < 2 || rows.length > 64 || new Set(rows.map(r => r.folder)).size !== rows.length) return [];
+  if (!rows.some(r => folders.has(r.folder))) return [];
+  const witnesses = Array.isArray(actedRows) ? actedRows : [actedRows];
+  if (!witnesses.some(w => w && !w.is_deleted && rows.some(r => r.id === w.id && r.folder === w.folder && Number(r.uid) === Number(w.uid)))) return [];
+  if (rows.some(r => !r.from_email || !r.date || !Number.isSafeInteger(Number(r.uid)) || Number(r.uid) <= 0)) return [];
+  for (const field of ['from_email', 'date', 'subject', 'to_addresses', 'cc_addresses']) {
+    if (new Set(rows.map(r => JSON.stringify(r[field] ?? null))).size > 1) return [];
+  }
+  return rows;
+}
+
+// The caller may detach added-copy work after its clicked write. A failed copy enters the
+// existing retry queue; successful IDs describe confirmed STOREs only.
+export async function pushSeen(manager, account, accountId, rows, read) {
+  const unique = [...new Map(rows.filter(r => !r.is_deleted && r.is_read === read && Number(r.uid) > 0).map(r => [r.id, r])).values()];
+  const pushedIds = [];
+  await Promise.all(unique.map(async row => {
+    try {
+      await manager.setFlag(account, row.uid, row.folder, '\\Seen', read);
+      manager._resolveFlagPush(accountId, row.id, '\\Seen');
+      pushedIds.push(row.id);
+    } catch (err) {
+      console.warn(`Read-copy push failed for ${row.id}:`, err.message);
+      manager._enqueueFlagPush(accountId, row.id, '\\Seen', read);
+    }
+  }));
+  return pushedIds;
 }
 
 // Determine what action to take when deleting a message.

@@ -160,10 +160,12 @@ async function userIds() {
 }
 
 async function quiesceImap() {
-  for (const id of await userIds()) await imapManager.disconnectUser(id);
+  await imapManager.quiesceSearchIndex();
+  for (const id of await userIds()) await imapManager.disconnectUser(id, { strict: true });
 }
 
 function resumeImap() {
+  imapManager.resumeSearchIndexScheduling();
   userIds()
     .then(ids => Promise.all(ids.map(id => imapManager.connectAllForUser(id))))
     .catch(err => console.error('Reconnect after a failed restore:', err.message));

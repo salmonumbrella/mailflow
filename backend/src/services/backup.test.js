@@ -24,7 +24,7 @@ const VERSION = '0061_message_bcc_addresses';
 const KEY_CHECK = 'enc:mailflow-backup-key-check';
 
 // The type OIDs PostgreSQL reports for the column types these tests use.
-const OIDS = { text: 25, int8: 20, json: 114, jsonb: 3802, _jsonb: 3807 };
+const OIDS = { text: 25, int8: 20, date: 1082, bool: 16, json: 114, jsonb: 3802, _jsonb: 3807 };
 
 // Answers the catalog queries the service makes and serves cursor reads from `data`, which holds
 // PostgreSQL's text for each value; like pg, a read hands it to the query's type parsers. Every
@@ -72,6 +72,7 @@ function fakeClient({ tables, columns = {}, foreignKeys = [], version = VERSION,
         return { rows: rows.map(row => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, parse(k, v)]))) };
       }
       if (text === 'CLOSE backup_rows') { cursor = null; return { rows: [] }; }
+      if (text.includes('FROM unnest(')) return { rows: [], rowCount: params[0].length };
       if (text.startsWith('INSERT INTO')) return { rows: [], rowCount: JSON.parse(params[0]).length };
       return { rows: [], rowCount: 0 };
     },
@@ -111,6 +112,22 @@ const FKS = [fk('email_accounts', 'users'), fk('messages', 'email_accounts'), fk
 const restoreClient = over => fakeClient({ tables: PRESENT, columns: COLUMNS, foreignKeys: FKS, ...over });
 const inserts = client => client.log.filter(l => l.text.startsWith('INSERT INTO'));
 
+it('SETUP backups retain encrypted Fastmail credentials and enforce the encryption-key check before restore writes', async () => {
+  const columns = { ...COLUMNS, email_accounts: [...COLUMNS.email_accounts, 'fastmail_api_token'] };
+  const account = { id: 'a1', user_id: 'u1', name: 'Mail', folder_mappings: null, fastmail_api_token: 'enc:synthetic-ciphertext' };
+  const { lines } = await backupLines(restoreClient({ columns, data: { email_accounts: [account] } }));
+  expect(lines.find(line => line.table === 'email_accounts').rows[0].fastmail_api_token).toBe(account.fastmail_api_token);
+  expect(lines[0].scope).toBe('setup');
+  expect(lines[0].keyCheck).toBe(KEY_CHECK);
+  const target = restoreClient({ columns });
+  await restoreBackup(target, file(lines));
+  expect(inserts(target).some(entry => entry.params[0].includes('enc:synthetic-ciphertext'))).toBe(true);
+  const wrongKey = restoreClient({ columns });
+  await expect(restoreBackup(wrongKey, file([{ ...lines[0], keyCheck: 'enc:wrong-key' }, ...lines.slice(1)])))
+    .rejects.toThrow('different ENCRYPTION_KEY');
+  expect(inserts(wrongKey)).toHaveLength(0);
+});
+
 describe('table classification', () => {
   it('covers every table the migrations leave behind, and nothing else', () => {
     const dir = join(dirname(fileURLToPath(import.meta.url)), '../../migrations');
@@ -127,6 +144,43 @@ describe('table classification', () => {
     const classified = [...SETUP_TABLES, ...MAIL_CACHE_TABLES, ...TRANSIENT_TABLES, ...SCHEMA_TABLES];
     expect(new Set(classified).size).toBe(classified.length);
     expect([...live].sort()).toEqual([...classified].sort());
+  });
+
+  it('never backs up or restores API tokens, so a restore cannot bring back a revoked one', () => {
+    expect(TRANSIENT_TABLES).toContain('api_tokens');
+    expect([...SETUP_TABLES, ...MAIL_CACHE_TABLES]).not.toContain('api_tokens');
+  });
+});
+
+describe('archive identity backup durability', () => {
+  for (const scope of ['setup', 'full']) it(`${scope} preserves quota debits and restores only matching cache checkpoints`, async () => {
+    const catalog = {
+      tables: ['email_accounts', 'archive_coverage', 'background_download_debits'],
+      columns: {
+        email_accounts: ['id'],
+        archive_coverage: ['account_id', 'folder', { name: 'uid_validity', type: 'int8' }, { name: 'bootstrap_complete', type: 'bool' }],
+        background_download_debits: ['account_id', { name: 'day', type: 'date' }, { name: 'bytes', type: 'int8' }],
+      },
+      foreignKeys: [fk('archive_coverage', 'email_accounts'), fk('background_download_debits', 'email_accounts')],
+    };
+    const { gz, lines } = await backupLines(fakeClient({ ...catalog, data: {
+      email_accounts: [{ id: 'account-a' }],
+      archive_coverage: [{ account_id: 'account-a', folder: 'INBOX', uid_validity: '9', bootstrap_complete: 't' }],
+      background_download_debits: [{ account_id: 'account-a', day: '2026-10-20', bytes: '1073741824' }],
+    } }), scope);
+    expect(lines[0].tables).toEqual(scope === 'setup'
+      ? ['email_accounts', 'background_download_debits']
+      : ['email_accounts', 'archive_coverage', 'background_download_debits']);
+    const target = fakeClient(catalog);
+    await restoreBackup(target, Readable.from([gz]));
+    const debit = inserts(target).find(row => row.text.startsWith('INSERT INTO "background_download_debits"'));
+    expect(JSON.parse(debit.params[0])).toEqual([{ account_id: 'account-a', day: '2026-10-20', bytes: '1073741824' }]);
+    const coverage = inserts(target).find(row => row.text.startsWith('INSERT INTO "archive_coverage"'));
+    if (scope === 'setup') expect(coverage).toBeUndefined();
+    else expect(JSON.parse(coverage.params[0])).toEqual([{ account_id: 'account-a', folder: 'INBOX', uid_validity: '9', bootstrap_complete: true }]);
+    const truncate = target.statements().find(sql => sql.startsWith('TRUNCATE'));
+    expect(truncate).toContain('"archive_coverage"');
+    expect(truncate).toContain('"background_download_debits"');
   });
 });
 

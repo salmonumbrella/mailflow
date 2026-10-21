@@ -172,6 +172,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
       },
       update: onUpdate, incrementUnread, decrementUnread, adjustCategoryCount,
       patch: api.bulkRead,
+      onError: error => addNotification({ type: 'error', title: t('common.error', { message: error.message }) }),
     });
   };
 

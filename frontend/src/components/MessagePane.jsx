@@ -1,8 +1,11 @@
+import FastmailAddressIndicator from './FastmailAddressIndicator.jsx';
+import { useReaderSenderIdentities } from '../hooks/useReaderSenderIdentities.js';
 import { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
 import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { beginCountIntent } from '../utils/countWriteTracker.js';
 import { formatMessageDateTime } from '../utils/formatDate.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { canHandlePaneShortcut } from '../utils/shortcutApplicability.js';
@@ -10,7 +13,7 @@ import { getEffectiveShortcuts, parseModKey, modCompactLabel } from '../utils/de
 import { useMobile } from '../hooks/useMobile.js';
 import { useSwipeBack } from '../hooks/useSwipeBack.js';
 import SwipePager from './SwipePager.jsx';
-import { clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete } from '../utils/pendingDeletes.js';
+import { applyDeleteGuard, clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete } from '../utils/pendingDeletes.js';
 import { pendingMarkReadMap, completedMarkReadMap } from '../utils/pendingReads.js';
 import { applyMarkRead, scheduleMarkRead, cancelScheduledMarkRead, cancelScheduledMarkReadFor } from '../utils/markRead.js';
 import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../utils/listSelection.js';
@@ -27,6 +30,7 @@ import { saveSenderCategory } from '../utils/senderCategory.js';
 import { folderMatchesQuery, favoriteMoveTargets, recentMoveTargets } from '../utils/folderDisplay.js';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import SpamBadge from './SpamBadge.jsx';
+import { PluginSlot } from '../plugins/PluginSlot.jsx';
 import SpamExplainModal from './SpamExplainModal.jsx';
 import { downloadEml } from '../utils/downloadEml.js';
 import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/printMessage.js';
@@ -156,6 +160,13 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // Antispam (v0.1) — toolbar visibility for the spam / ham buttons.
   // Mirrors the heuristic in ContextMenu.jsx so the toolbar matches the menu.
   const account = accounts.find(a => a.id === message?.account_id);
+  const readerUserId = useStore(state => state.user?.id);
+  const readerSessionGeneration = useStore(state => state.countGeneration);
+  const readerLocked = useStore(state => state.isLocked);
+  const readerInventory = useReaderSenderIdentities({
+    userId: readerUserId, account, configRevision: account?.fastmail_config_revision,
+    sessionGeneration: readerSessionGeneration, locked: readerLocked,
+  });
   const accountFolders = useStore(s => s.folders[message?.account_id] || []);
   // Dark email bodies (#228): the setting, and each message's own choice made with the toggle.
   const theme = useStore(s => s.theme);
@@ -178,38 +189,49 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // here so the MessagePane doesn't need to reach into MessageList internals.
   const performSingleSpamLabel = useCallback(async (label) => {
     if (!message) return;
+    const generation = useStore.getState().countGeneration, endIntent = beginCountIntent();
+    const current = () => useStore.getState().countGeneration === generation && !useStore.getState().isLocked;
     const wasUnread = !message.is_read;
     advanceSelectionAfterRemoval(message.id);
     removeMessage(message.id);
     closeWindowIfWindowed();
-    if (wasUnread) decrementUnread(message.account_id);
+    const countOrigin = wasUnread ? decrementUnread(message.account_id) : null;
     let settled = false;
     const undo = () => {
-      settled = true;
-      useStore.getState().restoreMessages([message]);
-      if (wasUnread) incrementUnread(message.account_id);
-    };
-    setTimeout(async () => {
       if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!current()) { endIntent(); return; }
+      useStore.getState().restoreMessages([message]);
+      countOrigin?.revert();
+      endIntent();
+    };
+    const timer = setTimeout(async () => {
+      if (settled) return;
+      settled = true;
       try {
+        if (!current()) return;
         const fn = label === 'spam' ? api.markSpam : api.markHam;
         await fn(message.id);
       } catch (err) {
-        useStore.getState().restoreMessages([message]);
-        if (wasUnread) incrementUnread(message.account_id);
+        if (!current()) return;
+        if (err.notApplied === true) {
+          useStore.getState().restoreMessages([message]);
+          countOrigin?.revert();
+        }
         addNotification({
           type: 'error',
           title: t(label === 'spam' ? 'spam.failTitle' : 'spam.failHamTitle'),
           body: err.message || t(label === 'spam' ? 'spam.failBody' : 'spam.failHamBody'),
         });
-      }
+      } finally { endIntent(); }
     }, 4500);
     addNotification({
       title: label === 'spam' ? t('spam.movedToSpam') : t('spam.movedToInbox'),
       body: message.subject || t('common.noSubject'),
       onUndo: undo,
     });
-  }, [message, removeMessage, decrementUnread, incrementUnread, addNotification, t, closeWindowIfWindowed]);
+  }, [message, removeMessage, decrementUnread, addNotification, t, closeWindowIfWindowed]);
 
   const currentIdx = allMessages.findIndex(m => m.id === selectedMessageId);
   const hasPrev = currentIdx > 0;
@@ -735,6 +757,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }, [showMovePicker, message?.account_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleMarkUnread = useCallback(() => {
+    const wasRead = Boolean(message?.representative_is_read ?? message?.is_read);
     if (markMessageUnread(message, {
       cancel: () => {
         cancelScheduledMarkRead(autoMarkReadTimerRef.current);
@@ -745,8 +768,13 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       },
       update: updateMessage, incrementUnread, decrementUnread, adjustCategoryCount,
       patch: api.bulkRead,
-    }) && isMobile) setSelectedMessage(null);
-  }, [message, updateMessage, incrementUnread, decrementUnread, adjustCategoryCount, isMobile, setSelectedMessage]);
+      onError: error => addNotification({ type: 'error', title: t('common.error', { message: error.message }) }),
+    })) {
+      // Acknowledge the local request, not provider confirmation or HTTP success.
+      if (wasRead) addNotification({ type: 'info', title: t('message.unreadRequested') });
+      if (isMobile) setSelectedMessage(null);
+    }
+  }, [message, updateMessage, incrementUnread, decrementUnread, adjustCategoryCount, isMobile, setSelectedMessage, addNotification, t]);
 
   const handleEmailClick = useCallback((ev) => {
     const anchor = ev.target.closest('a[href]');
@@ -851,35 +879,46 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const handleMoveToFolder = useCallback((folder) => {
     if (!message) return;
     setShowMovePicker(false);
+    const generation = useStore.getState().countGeneration, endIntent = beginCountIntent();
+    const current = () => useStore.getState().countGeneration === generation && !useStore.getState().isLocked;
     const moved = message;
     advanceSelectionAfterRemoval(moved.id);
     removeMessage(moved.id);
     closeWindowIfWindowed();
-    if (!moved.is_read) decrementUnread(moved.account_id);
+    const countOrigin = !moved.is_read ? decrementUnread(moved.account_id) : null;
     let undone = false;
     const timer = setTimeout(async () => {
       if (undone) return;
+      undone = true;
       try {
+        if (!current()) return;
         await api.bulkMove([moved.id], folder);
+        if (!current()) return;
         useStore.getState().recordRecentFolder({ accountId: moved.account_id, path: folder });
       } catch (err) {
         console.error('Move failed:', err);
-        useStore.getState().restoreMessages([moved]);
-        if (!moved.is_read) incrementUnread(moved.account_id);
+        if (!current()) return;
+        if (err.notApplied === true) {
+          useStore.getState().restoreMessages([moved]);
+          countOrigin?.revert();
+        }
         addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });
-      }
+      } finally { endIntent(); }
     }, 4500);
     addNotification({
       title: t('message.moved.title'),
       body: folder,
       onUndo: () => {
+        if (undone) return;
         undone = true;
         clearTimeout(timer);
+        if (!current()) { endIntent(); return; }
         useStore.getState().restoreMessages([moved]);
-        if (!moved.is_read) incrementUnread(moved.account_id);
+        countOrigin?.revert();
+        endIntent();
       },
     });
-  }, [message, removeMessage, decrementUnread, incrementUnread, addNotification, t, closeWindowIfWindowed]);
+  }, [message, removeMessage, decrementUnread, addNotification, t, closeWindowIfWindowed]);
 
   // Close move picker when the selected message changes and handle click-outside
   useEffect(() => {
@@ -966,53 +1005,85 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }
 
   const handleDelete = () => {
+    const generation = useStore.getState().countGeneration, endIntent = beginCountIntent();
+    const current = () => useStore.getState().countGeneration === generation && !useStore.getState().isLocked;
     const deleted = message;
     setPendingDelete(deleted.id);
     advanceSelectionAfterRemoval(deleted.id);
     removeMessage(deleted.id);
     closeWindowIfWindowed();
-    if (!deleted.is_read) decrementUnread(deleted.account_id);
+    const countOrigin = !deleted.is_read ? decrementUnread(deleted.account_id) : null;
     let undone = false;
     const timer = setTimeout(async () => {
       if (undone) return;
+      undone = true;
       try {
-        await api.deleteMessage(deleted.id);
-        setCompletedDelete(deleted.id);
-      } catch {
-        clearDeleteGuard(deleted.id);
-        useStore.getState().restoreMessages([deleted]);
-        if (!deleted.is_read) incrementUnread(deleted.account_id);
+        if (!current()) return;
+        const result = await api.deleteMessage(deleted.id);
+        if (current() && !result?.unconfirmed?.includes(deleted.id)) setCompletedDelete(deleted.id);
+      } catch (err) {
+        if (!current()) return;
+        if (err.notApplied === true) {
+          clearDeleteGuard(deleted.id);
+          useStore.getState().restoreMessages([deleted]);
+          countOrigin?.revert();
+        }
         addNotification({ type: 'error', title: t('messageList.deleted.failTitle'), body: t('messageList.deleted.failBody') });
-      }
+      } finally { endIntent(); }
     }, 4500);
     addNotification({
       title: t('messageList.deleted.title'),
       body: t('messageList.deleted.body'),
       onUndo: () => {
+        if (undone) return;
         undone = true;
         clearTimeout(timer);
+        if (!current()) { endIntent(); return; }
         clearPendingDelete(deleted.id);
         useStore.getState().restoreMessages([deleted]);
-        if (!deleted.is_read) incrementUnread(deleted.account_id);
+        countOrigin?.revert();
+        endIntent();
       },
     });
   };
 
   const handleArchive = () => {
     const archived = message;
+    if (!applyDeleteGuard([archived]).length) return;
+    const opId = crypto.randomUUID();
+    const generation = useStore.getState().beginArchiveCount(opId, [archived], Date.now() + 4500);
+    const current = () => useStore.getState().countGeneration === generation && !useStore.getState().isLocked;
+    setPendingDelete(archived.id, { archive: true, generation, group: opId });
     advanceSelectionAfterRemoval(archived.id);
     removeMessage(archived.id);
     closeWindowIfWindowed();
-    if (!archived.is_read) decrementUnread(archived.account_id);
-    let undone = false;
+    let pending = true;
+    const restore = () => {
+      clearDeleteGuard(archived.id);
+      useStore.getState().restoreMessages([archived]);
+      useStore.getState().cancelArchiveCount(opId, generation);
+    };
     const timer = setTimeout(async () => {
-      if (undone) return;
+      if (!pending) return;
+      pending = false;
+      if (!current()) return;
       try {
-        const result = await api.bulkArchive([archived.id]);
+        const targets = useStore.getState().updateArchiveCount(opId, [archived], generation);
+        const result = await api.bulkArchive(targets.map(target => target.id));
+        if (!current()) return;
+        useStore.getState().finishArchiveCount(opId, result, generation);
+        if (!result.archived?.includes(archived.id) && !result.unconfirmed?.includes(archived.id)) { clearDeleteGuard(archived.id); useStore.getState().restoreMessages([archived]); }
+        const state = useStore.getState();
+        if (result.countTargets?.some(target => target.folder === (state.selectedAccountId ? state.selectedFolder : 'INBOX') && (!state.selectedAccountId || target.account_id === state.selectedAccountId)) && !state.searchQuery) {
+          useStore.setState(state => ({ messagesRefreshToken: state.messagesRefreshToken + 1 }));
+        }
         if (result.noArchiveFolder?.length) {
           addNotification({ title: t('message.archived.noFolderTitle'), body: t('message.archived.noFolderBody') });
         }
       } catch (err) {
+        if (!current()) return;
+        if (err.notApplied === true) restore();
+        else useStore.getState().finishArchiveCount(opId, { unconfirmed: [archived.id] }, generation);
         console.error('Archive failed:', err);
         addNotification({ title: t('message.archived.failTitle'), body: t('message.archived.failBody') });
       }
@@ -1021,11 +1092,10 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       title: t('message.archived.title'),
       body: archived.subject || t('common.noSubject'),
       onUndo: () => {
-        undone = true;
+        if (!pending) return;
+        pending = false;
         clearTimeout(timer);
-        const state = useStore.getState();
-        state.setMessages([...state.messages, archived].sort((a, b) => new Date(b.date) - new Date(a.date)));
-        if (!archived.is_read) incrementUnread(archived.account_id);
+        if (current()) restore();
       },
     });
   };
@@ -1912,7 +1982,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
             fontFamily: 'var(--font-display)',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-              <span>
+              <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
                 {(() => {
                   const paneSubject = resolvedSubject || message.subject;
                   return (paneSubject && paneSubject !== '(no subject)')
@@ -1921,6 +1991,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                 })()}
               </span>
               <SpamBadge message={message} onClick={(m) => setSpamExplainMessageId(m.id)} />
+              <PluginSlot name="message-header-meta" ctx={{ message, account }} />
             </div>
           </div>
 
@@ -1969,7 +2040,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                     <span style={{ color: 'var(--text-secondary)' }}>
                       {toList.length > 0
                         ? toList.map((r, i) => (
-                            <span key={i}>{r.name || r.email}{i < toList.length - 1 ? ', ' : ''}</span>
+                            <span key={i}>{r.name || r.email}<FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />{i < toList.length - 1 ? ', ' : ''}</span>
                           ))
                         : (message.account_email || message.account_name || '')}
                     </span>
@@ -1979,7 +2050,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                       <span>Cc </span>
                       <span style={{ color: 'var(--text-secondary)' }}>
                         {ccList.map((r, i) => (
-                          <span key={i}>{r.name || r.email}{i < ccList.length - 1 ? ', ' : ''}</span>
+                          <span key={i}>{r.name || r.email}<FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />{i < ccList.length - 1 ? ', ' : ''}</span>
                         ))}
                       </span>
                     </div>
@@ -1989,7 +2060,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                       <span>Bcc </span>
                       <span style={{ color: 'var(--text-secondary)' }}>
                         {bccList.map((r, i) => (
-                          <span key={i}>{r.name || r.email}{i < bccList.length - 1 ? ', ' : ''}</span>
+                          <span key={i}>{r.name || r.email}<FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />{i < bccList.length - 1 ? ', ' : ''}</span>
                         ))}
                       </span>
                     </div>
@@ -2026,6 +2097,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                         ? toList.map((r, i) => (
                             <span key={i}>
                               {r.name ? `${r.name} <${r.email}>` : r.email}
+                              <FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />
                               {i < toList.length - 1 ? ', ' : ''}
                             </span>
                           ))
@@ -2039,6 +2111,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                         {ccList.map((r, i) => (
                           <span key={i}>
                             {r.name ? `${r.name} <${r.email}>` : r.email}
+                              <FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />
                             {i < ccList.length - 1 ? ', ' : ''}
                           </span>
                         ))}
@@ -2052,6 +2125,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                         {bccList.map((r, i) => (
                           <span key={i}>
                             {r.name ? `${r.name} <${r.email}>` : r.email}
+                              <FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />
                             {i < bccList.length - 1 ? ', ' : ''}
                           </span>
                         ))}

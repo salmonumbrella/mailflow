@@ -1,5 +1,5 @@
 import { query } from './db.js';
-import { fanOutReadToSiblings } from '../utils/mailUtils.js';
+import { fanOutReadToSiblings, readCopyTargets, pushSeen } from '../utils/mailUtils.js';
 
 // Generic "labels" capability (v3.0 plugin platform).
 //
@@ -12,6 +12,16 @@ import { fanOutReadToSiblings } from '../utils/mailUtils.js';
 //
 // imapManager is injected (callers pass their handle) so the DB/IMAP logic is unit-testable
 // without a live connection pool — matching the pattern gtdTransitions/gtdSections already use.
+
+// Defense for callers holding a full message row only. Projected thread/label
+// candidates omit this field and rely on the All Mail-only residue invariant.
+function assertWritableSource(message) {
+  if (message.is_archive_residue !== true) return;
+  const error = new Error('This action is not supported for archive residue');
+  error.status = 409;
+  error.code = 'archive-residue-read-only';
+  throw error;
+}
 
 // Resolve the uid of the message's copy that lives in `folder` for its account, or null. The
 // acted row is used directly when it already lives there; otherwise the shared RFC Message-ID
@@ -30,9 +40,18 @@ export async function resolveLabelCopyUid(message, folder) {
 // Apply a label: ensure the label folder exists, then COPY the message into it (leaving the
 // original in place). imapManager.copyMessage also emits the section-refresh event. No-op when
 // the message already lives in the label folder. `message` needs { uid, folder }.
-export async function applyLabel(imapManager, account, message, labelFolder, { forceCopy = false } = {}) {
+export async function applyLabel(imapManager, account, message, labelFolder, { forceCopy = false, recoverableCopy = false } = {}) {
+  assertWritableSource(message);
   if (message.folder === labelFolder) {
     return { applied: false, uid: message.uid, reason: 'already-there' };
+  }
+  if (recoverableCopy && !imapManager.isLabelStore(account)) {
+    // A cached destination alone cannot settle an earlier uncertain provider COPY.
+    // Core checks its durable receipt before deciding whether any new COPY is safe.
+    await imapManager.ensureFolder(account, labelFolder);
+    return imapManager.copyMessage(account.id, message.uid, message.folder, labelFolder, {
+      copyIntent: { sourceId: message.id, messageId: message.message_id },
+    });
   }
   const existingUid = forceCopy ? null : await resolveLabelCopyUid(message, labelFolder);
   if (existingUid != null) {
@@ -48,6 +67,7 @@ export async function applyLabel(imapManager, account, message, labelFolder, { f
 // forged UID cannot remove a different message's label copy. Without a Message-ID there is no
 // stable identity shared by the source and copied rows, so no inverse is advertised.
 export async function removeExactLabelCopy(imapManager, message, labelFolder, uid) {
+  assertWritableSource(message);
   if (!message.message_id) return { removed: false };
   const { rows } = await query(
     `SELECT uid FROM messages
@@ -65,6 +85,7 @@ export async function removeExactLabelCopy(imapManager, message, labelFolder, ui
 // other labels intact. No-op when no such copy exists. `message` needs { account_id, uid,
 // folder, message_id }.
 export async function removeLabel(imapManager, message, labelFolder) {
+  assertWritableSource(message);
   const uid = await resolveLabelCopyUid(message, labelFolder);
   if (uid == null) return { removed: false };
   await imapManager.removeMessageCopy(message.account_id, uid, labelFolder);
@@ -93,28 +114,48 @@ export async function ensureLabelFolders(imapManager, account, folderPaths) {
   return results;
 }
 
-// Mark an entire thread read: a DB fan-out across every sibling copy (by Message-ID, adjusting
-// each folder's unread count) plus a best-effort \Seen on the durable INBOX copy (it rides the
-// archive move; Gmail propagates message-wide). The INBOX copy is looked up first and returned
-// so the caller can archive it afterward — it survives even if the fan-out/flag push degrades.
-// The lookup itself may throw (caller treats that as fatal, matching the plain read route); the
-// fan-out + flag push are best-effort and reported via the returned `error`, never thrown.
-// `message` needs { account_id, message_id }.
-export async function markThreadRead(imapManager, account, message) {
+// Mark DB copies read and await surviving per-copy STOREs before the caller archives.
+// Excluded folders are stripped next and must not acquire retries. INBOX and the acted
+// row stay best-effort because a move without UIDPLUS may invalidate their address.
+// `error` reports DB/selection or best-effort failures; other failed pushes are queued.
+// `pushedIds` contains confirmed STOREs only, for callers avoiding duplicate writes.
+export async function markThreadRead(imapManager, account, message, { excludeFolders = [] } = {}) {
   const { rows } = await query(
     'SELECT id, uid, is_read FROM messages WHERE account_id = $1 AND folder = $2 AND message_id = $3 AND is_deleted = false LIMIT 1',
     [message.account_id, 'INBOX', message.message_id]
   );
   const inboxCopy = rows[0] || null;
+  const pushedIds = [];
+  let error;
   try {
-    await fanOutReadToSiblings(message.account_id, message.message_id, true);
-    if (inboxCopy && !inboxCopy.is_read) {
-      await imapManager.setFlag(account, inboxCopy.uid, 'INBOX', '\\Seen', true);
+    const flipped = await fanOutReadToSiblings(message.account_id, message.message_id, true) || [];
+    const perCopy = !imapManager.isLabelStore(account);
+    let eligible = [];
+    if (perCopy) {
+      try { eligible = await readCopyTargets(message.account_id, message.message_id, message); }
+      catch (err) { error = err; }
     }
-  } catch (err) {
-    return { inboxCopy, error: err };
-  }
-  return { inboxCopy };
+    const eligibleIds = new Set(eligible.map(r => r.id));
+    if (inboxCopy && !inboxCopy.is_read && (!perCopy || inboxCopy.id === message.id || eligibleIds.has(inboxCopy.id))) {
+      try {
+        await imapManager.setFlag(account, inboxCopy.uid, 'INBOX', '\\Seen', true);
+        pushedIds.push(inboxCopy.id);
+      } catch (err) { error = err; }
+    }
+    if (perCopy) {
+      const flippedIds = new Set(flipped.map(r => r.id));
+      const copies = eligible.filter(r => flippedIds.has(r.id) && r.id !== inboxCopy?.id && !excludeFolders.includes(r.folder));
+      const acted = copies.find(r => r.id === message.id);
+      if (acted) {
+        try {
+          await imapManager.setFlag(account, acted.uid, acted.folder, '\\Seen', true);
+          pushedIds.push(acted.id);
+        } catch (err) { error ||= err; }
+      }
+      pushedIds.push(...await pushSeen(imapManager, account, message.account_id, copies.filter(r => r.id !== message.id), true));
+    }
+  } catch (err) { error ||= err; }
+  return { inboxCopy, pushedIds, ...(error ? { error } : {}) };
 }
 
 // Best-effort \Seen on one copy, for when a copy other than INBOX is the durable one (GTD Done

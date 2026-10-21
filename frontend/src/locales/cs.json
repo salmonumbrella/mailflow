@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Maskovaná e-mailová adresa",
+    "alias": "E-mailový alias"
+  },
   "common": {
     "cancel": "Zrušit",
     "save": "Uložit",
@@ -322,6 +326,7 @@
     "snoozedEmptyDesc": "Odložené zprávy tu čekají, dokud se nevrátí."
   },
   "message": {
+    "unreadRequested": "Vyžádáno označení jako nepřečtené",
     "find": {
       "title": "Hledat",
       "close": "Zavřít hledání",
@@ -572,6 +577,11 @@
     "recipientMenu": {
       "copy": "Kopírovat adresu",
       "copyAll": "Kopírovat všechny adresy v tomto poli"
+    },
+    "senderValidation": {
+      "unavailable": "Fastmail tuto adresu neuvádí jako identitu odesílatele.",
+      "unknown": "Odesílatele se nepodařilo ověřit u Fastmailu.",
+      "missing": "Vybraný odesílatel již není dostupný. Vyberte odesílatele znovu."
     }
   },
   "notifications": {
@@ -670,6 +680,7 @@
     }
   },
   "gtd": {
+    "oldestLabeledAge": "{{state}}: stáří nejstarší zprávy s tímto štítkem (dny): {{count}}",
     "title": "GTD",
     "inbox": "Doručené",
     "waiting": "Čeká se",
@@ -690,6 +701,7 @@
     "done": "Označit jako hotové",
     "doneFailed": "Nepodařilo se označit jako hotové",
     "doneArchiveFailed": "Označeno jako hotové, ale archivace se nezdařila — zpráva zůstává v Doručené poště",
+    "doneThreadRemains": "Některé zprávy v této konverzaci nebylo možné odebrat, proto zůstává ve své sekci GTD",
     "state": {
       "todo": "K vyřízení",
       "watch": "Sledovat",
@@ -1177,7 +1189,13 @@
       "trustedAuthservDetected": "Viděno ve vašich nedávných zprávách (kliknutím použijete):",
       "trustedAuthservDetectedNone": "Zatím žádná data — zprávy se kontrolují, jakmile je pro tento účet zapnutý antispam.",
       "trustedAuthservWarn": "Důvěřujte pouze ID, které znáte jako přijímající server vašeho poskytovatele.",
-      "enabledGlobally": "Globálně zapnuto"
+      "enabledGlobally": "Globálně zapnuto",
+      "fastmailVerification": {
+        "token": "Přístupový token API Fastmail",
+        "help": "Omezte token na odesílání e-mailů (identity) a případně maskované e-maily. Nepovolujte plný přístup. Beze změny zůstane uložený token zachován.",
+        "configured": "Token je uložen.",
+        "clear": "Odstranit uložený token"
+      }
     },
     "folderMappings": {
       "title": "Mapování složek",

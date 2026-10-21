@@ -14,6 +14,9 @@ import mailRoutes from './mail.js';
 import { query } from '../services/db.js';
 
 const ID = '00000000-0000-4000-8000-000000000001';
+const source = { id: ID, account_id: 'account-1', folder: 'INBOX', uid: '1', is_archive_residue: false };
+const prepareUpdate = () => query.mockResolvedValueOnce({ rows: [source] }).mockResolvedValueOnce({ rows: [{ id: ID }] });
+const updateCall = () => query.mock.calls.find(([sql]) => sql.includes('UPDATE messages SET category'));
 
 describe('PATCH /api/mail/messages/:id/category (#489)', () => {
   let server;
@@ -36,16 +39,20 @@ describe('PATCH /api/mail/messages/:id/category (#489)', () => {
   it('stores a chosen Primary as primary, not as no category', async () => {
     // NULL means "not chosen": Recategorize and a re-sync fill it in, which moved a message the
     // user had put in Primary back to Newsletter.
-    query.mockResolvedValueOnce({ rows: [{ id: ID }] });
+    prepareUpdate();
     const response = await patch('primary');
     expect(response.status).toBe(200);
-    expect(query.mock.calls[0][1]).toEqual(['primary', ID, 'user-1']);
+    expect(query.mock.calls[0][1]).toEqual([ID, 'user-1']);
+    expect(updateCall()[1]).toEqual(['primary', ID, 'user-1']);
   });
 
   it('stores the other categories as before and rejects unknown ones', async () => {
-    query.mockResolvedValueOnce({ rows: [{ id: ID }] });
+    prepareUpdate();
     expect((await patch('automated')).status).toBe(200);
-    expect(query.mock.calls[0][1][0]).toBe('automated');
+    expect(query.mock.calls[0][1]).toEqual([ID, 'user-1']);
+    expect(updateCall()[1][0]).toBe('automated');
+    const calls = query.mock.calls.length;
     expect((await patch('spam')).status).toBe(400);
+    expect(query.mock.calls).toHaveLength(calls);
   });
 });

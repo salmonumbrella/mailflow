@@ -7,9 +7,13 @@ import { playNotificationSound } from '../utils/notificationSounds.js';
 import { accountAffectsUnifiedInbox } from '../utils/unifiedInbox.js';
 import { dispatchPluginWsMessage, dispatchPluginReconnect } from '../plugins/events.js';
 import { recordDiagEvent } from '../utils/diagEvents.js';
+import { reconcileReadState } from '../utils/pendingReads.js';
 
-function _applyServerCounts(counts) {
-  useStore.getState().setUnreadCounts(counts);
+function refreshServerCounts(generation) {
+  return api.getUnreadCounts().then(counts => useStore.getState().setUnreadCounts(counts, generation)).catch(() => {});
+}
+function refreshFolderCounts(accountId, generation) {
+  return api.getFolders(accountId).then(f => useStore.getState().setFolders(accountId, f, generation)).catch(() => {});
 }
 
 async function _forwardNativeNewMailNotification(notification) {
@@ -52,9 +56,10 @@ export function useWebSocket() {
   // reconnectAttempt can't be used for this: revive() resets it to 0 before
   // reconnecting, which made a wake-triggered reconnect look like a first connect.
   const hasConnectedBefore = useRef(false);
-  const { addNotification, updateAccount, setFolders, setBackfillProgress } = useStore();
+  const { addNotification, updateAccount, setBackfillProgress } = useStore();
 
   const connect = useCallback(() => {
+    const countGeneration = useStore.getState().countGeneration;
     // Clean up any existing socket before opening a new one — prevents duplicate
     // connections if connect() is called while a previous socket is still open.
     if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
@@ -87,9 +92,7 @@ export function useWebSocket() {
       if (wasReconnect) {
         recordDiagEvent({ category: 'ws', type: 'reconnect' });
         window.dispatchEvent(new CustomEvent('mailflow:refresh'));
-        api.getUnreadCounts().then(counts => {
-          useStore.getState().setUnreadCounts(counts);
-        }).catch(() => {});
+        refreshServerCounts(countGeneration);
         // A plugin's rail/derived data can drift during the outage — events fired while the socket
         // was down are lost, not buffered. Let each activated plugin resync (GTD refetches its
         // sections). Core stays plugin-agnostic.
@@ -101,7 +104,7 @@ export function useWebSocket() {
       ws._lastActivity = Date.now(); // any inbound frame (incl. pong) proves the socket is alive
       try {
         const data = JSON.parse(event.data);
-        handleMessage(data);
+        handleMessage(data, countGeneration);
       } catch (err) { console.error('WS message error:', err); }
     };
 
@@ -121,7 +124,7 @@ export function useWebSocket() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleMessage = useCallback((data) => {
+  const handleMessage = useCallback((data, countGeneration) => {
     switch (data.type) {
       case 'new_messages': {
         // Blip the sync icon — a real change just synced in, so show background activity
@@ -181,7 +184,7 @@ export function useWebSocket() {
 
         // Fetch the latest independently observed server count.
         if (isInbox) {
-          api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+          refreshServerCounts(countGeneration);
         }
         break;
       }
@@ -191,10 +194,9 @@ export function useWebSocket() {
         break;
 
       case 'folder_counts':
-        api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+        refreshServerCounts(countGeneration);
         if (useStore.getState().folders[data.accountId]) {
-          api.getFolders(data.accountId)
-            .then(f => useStore.getState().setFolders(data.accountId, f)).catch(() => {});
+          refreshFolderCounts(data.accountId, countGeneration);
         }
         break;
 
@@ -206,9 +208,7 @@ export function useWebSocket() {
       case 'folders_synced': {
         // The folder structure was re-listed (periodic folder sync or a manual
         // "Sync folders now") — refetch so new/renamed folders appear in the sidebar.
-        api.getFolders(data.accountId)
-          .then(f => useStore.getState().setFolders(data.accountId, f))
-          .catch(() => {});
+        refreshFolderCounts(data.accountId, countGeneration);
         break;
       }
 
@@ -264,7 +264,7 @@ export function useWebSocket() {
           window.dispatchEvent(new CustomEvent('mailflow:refresh'));
           window.dispatchEvent(new CustomEvent('mailflow:sync_done'));
         }
-        api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+        refreshServerCounts(countGeneration);
         break;
       }
 
@@ -273,12 +273,12 @@ export function useWebSocket() {
         window.dispatchEvent(new CustomEvent('mailflow:sync_done'));
         // Re-fetch unread counts so sidebar badges reflect messages marked read
         // in external clients (the message list refresh alone doesn't update counts).
-        api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+        refreshServerCounts(countGeneration);
         // Re-fetch per-folder counts for the affected account so sidebar folder
         // badges stay in sync (unread_count, total_count). Only refresh accounts
         // whose folders are already loaded to avoid unnecessary requests.
         if (data.accountId && useStore.getState().folders[data.accountId]) {
-          api.getFolders(data.accountId).then(f => setFolders(data.accountId, f)).catch(() => {});
+          refreshFolderCounts(data.accountId, countGeneration);
         }
         break;
       }
@@ -298,9 +298,9 @@ export function useWebSocket() {
         addNotification({ title: data.ok ? t('sidebar.emptied') : t('sidebar.emptyFailed') });
         window.dispatchEvent(new CustomEvent('mailflow:refresh'));
         window.dispatchEvent(new CustomEvent('mailflow:sync_done'));
-        api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+        refreshServerCounts(countGeneration);
         if (data.accountId && useStore.getState().folders[data.accountId]) {
-          api.getFolders(data.accountId).then(f => setFolders(data.accountId, f)).catch(() => {});
+          refreshFolderCounts(data.accountId, countGeneration);
         }
         break;
       }
@@ -316,15 +316,13 @@ export function useWebSocket() {
         });
         window.dispatchEvent(new CustomEvent('mailflow:rules-run-complete', { detail: data }));
         window.dispatchEvent(new Event('mailflow:rules-ran'));
-        api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+        refreshServerCounts(countGeneration);
         break;
       }
 
       case 'snooze_wakeup': {
         window.dispatchEvent(new CustomEvent('mailflow:refresh'));
-        api.getUnreadCounts().then(counts => {
-          useStore.getState().setUnreadCounts(counts);
-        }).catch(() => {});
+        refreshServerCounts(countGeneration);
         break;
       }
 
@@ -334,7 +332,7 @@ export function useWebSocket() {
         // sync activity stays visible now that sync_complete no longer fires every tick.
         window.dispatchEvent(new CustomEvent('mailflow:refresh'));
         window.dispatchEvent(new CustomEvent('mailflow:sync_done'));
-        api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+        refreshServerCounts(countGeneration);
         break;
       }
 
@@ -348,13 +346,27 @@ export function useWebSocket() {
           for (const c of changes) {
             if (!c || !c.id) continue;
             const patch = {};
-            if (typeof c.is_read === 'boolean') patch.is_read = c.is_read;
+            if (typeof c.is_read === 'boolean') {
+              const state = useStore.getState();
+              if (!state.isLocked && state.countGeneration === countGeneration) {
+                const matches = [...state.messages, ...state.searchResults, ...Object.values(state.threadMessages).flat()]
+                  .filter(row => row.id === c.id);
+                const owned = matches[0];
+                if (owned?.account_id != null && matches.every(row => row.account_id === owned.account_id)
+                  && (data.accountId == null || data.accountId === owned.account_id)
+                  && (c.accountId == null || c.accountId === owned.account_id)) {
+                  // A socket frame has no request-issuance token. It must never
+                  // retire a fence; only a later authoritative GET can do that.
+                  patch.is_read = reconcileReadState([{ ...owned, is_read: c.is_read }])[0].is_read;
+                }
+              }
+            }
             if (typeof c.is_starred === 'boolean') patch.is_starred = c.is_starred;
             if (Object.keys(patch).length) updateMessage(c.id, patch);
           }
           clearTimeout(flagCountRefreshTimer);
           flagCountRefreshTimer = setTimeout(() => {
-            api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+            refreshServerCounts(countGeneration);
           }, 400);
         }
         break;
@@ -365,7 +377,7 @@ export function useWebSocket() {
         // it (e.g. GTD's 'gtd_sections_updated'). No-op when nothing is registered.
         dispatchPluginWsMessage(data);
     }
-  }, [addNotification, updateAccount, setFolders, setBackfillProgress, t]);
+  }, [addNotification, updateAccount, setBackfillProgress, t]);
 
   useEffect(() => {
     mountedRef.current = true;

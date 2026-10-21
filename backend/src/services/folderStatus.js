@@ -1,4 +1,5 @@
 import { query } from './db.js';
+import { countCompletion } from './countCompletion.js';
 import { extractImapError } from './imapError.js';
 
 export const STATUS_INTERVAL_MS = 60000;
@@ -22,6 +23,11 @@ export function folderStaleMs(selectableFolders) {
 }
 export const STATUS_QUERY = { messages: true, unseen: true, uidNext: true, uidValidity: true, highestModseq: true };
 
+export async function allocateCountRevision() {
+  const { rows: [row] } = await query("SELECT nextval('folder_status_revision')::text AS revision");
+  return row.revision;
+}
+
 export function validFolderStatus(s) {
   return !!s && Number.isSafeInteger(s.messages) && s.messages >= 0 &&
     Number.isSafeInteger(s.unseen) && s.unseen >= 0 && s.unseen <= s.messages &&
@@ -40,9 +46,10 @@ export function folderNeedsSync(row, s, now = Date.now()) {
   return now - new Date(row.status_synced_at).getTime() >= 15 * 60000;
 }
 
-export async function observeFolder(client, accountId, path) {
+export async function observeFolder(client, accountId, path, atStart = () => ({})) {
   // Allocate before network I/O. A slower old request must never replace a newer sample.
   const { rows: [sample] } = await query("SELECT nextval('folder_status_revision')::text AS revision, clock_timestamp() AS started_at");
+  const metadata = atStart();
   let timer;
   try {
     const status = await Promise.race([
@@ -69,6 +76,7 @@ export async function observeFolder(client, accountId, path) {
         AND (status_attempt_revision IS NULL OR status_attempt_revision < $9)
       RETURNING id`, [accountId, path, status.messages, status.unseen, status.uidNext,
       String(status.uidValidity), status.highestModseq == null ? null : String(status.highestModseq), sample.started_at, sample.revision]);
+    if (rows.length) countCompletion.remember(accountId, path, sample.revision, metadata);
     return rows.length ? status : null;
   } catch (err) {
     // Never turn an unavailable mailbox into an empty one or erase the last good sample.
@@ -95,6 +103,47 @@ export class FolderStatusMonitor {
     this.running = new Map();
     this.nextCheck = new Map();
     this.failures = new Map();
+    this.trailing = new Map();
+  }
+  scheduleTrailingStatus(account, paths = ['INBOX'], loadAccount = async () => account) {
+    const pending = this.trailing.get(account.id) || { paths: new Map(), version: 0, failures: 0 };
+    pending.version++;
+    paths.forEach(path => pending.paths.set(path, pending.version));
+    pending.loadAccount = loadAccount;
+    this.trailing.set(account.id, pending);
+    this._armTrailing(account, pending, 100);
+  }
+  _armTrailing(account, pending, delay) {
+    if (pending.timer || pending.active) return;
+    pending.timer = setTimeout(async () => {
+      pending.timer = null;
+      pending.active = true;
+      // A leading request can have started before the write. It cannot discharge this debt.
+      while (this.running.has(account.id)) await this.running.get(account.id);
+      if (!countCompletion.canObserveAccount(account.id)) {
+        pending.active = false;
+        this._armTrailing(account, pending, 500);
+        return;
+      }
+      const batch = new Map([...pending.paths].slice(0, STATUS_FOLDER_BATCH));
+      const paths = [...batch.keys()];
+      for (const [path, version] of batch) { pending.paths.delete(path); pending.paths.set(path, version); }
+      const task = (async () => {
+        const current = await pending.loadAccount();
+        return current ? this._refresh(current, paths) : { observed: new Set(paths), qualified: new Set(paths), failed: false };
+      })().catch(err => {
+        console.warn('Post-mutation count refresh:', err.message);
+        return { observed: new Set(), qualified: new Set(), failed: true };
+      }).finally(() => this.running.delete(account.id));
+      this.running.set(account.id, task);
+      const result = await task;
+      for (const path of result.qualified) if (pending.paths.get(path) === batch.get(path)) pending.paths.delete(path);
+      pending.failures = result.failed ? pending.failures + 1 : 0;
+      pending.active = false;
+      if (pending.paths.size) this._armTrailing(account, pending, result.observed.size || !result.failed ? 100 : Math.min(600000, 1000 * 2 ** Math.min(pending.failures, 10)));
+      else this.trailing.delete(account.id);
+    }, delay);
+    pending.timer.unref?.();
   }
   refresh(account, { force = false } = {}) {
     if (this.running.has(account.id)) return this.running.get(account.id);
@@ -105,16 +154,18 @@ export class FolderStatusMonitor {
     this.running.set(account.id, task);
     return task;
   }
-  async _refresh(account) {
-    this.nextCheck.set(account.id, Date.now() + STATUS_INTERVAL_MS);
+  async _refresh(account, paths = null) {
+    if (!paths) this.nextCheck.set(account.id, Date.now() + STATUS_INTERVAL_MS);
     let any = false, failed = false;
+    const observed = new Set(), qualified = new Set();
     try {
       const { rows } = await query(`SELECT f.*,
         (SELECT count(*) FROM messages m WHERE m.account_id=f.account_id AND m.folder=f.path AND NOT m.is_deleted) AS cached_total,
         (SELECT count(*) FROM messages m WHERE m.account_id=f.account_id AND m.folder=f.path AND NOT m.is_deleted AND NOT m.is_read) AS cached_unread
-        FROM folders f WHERE f.account_id=$1 AND NOT f.no_select
-        ORDER BY (f.path='INBOX') DESC, f.status_attempted_at ASC NULLS FIRST, f.path LIMIT $2`, [account.id, STATUS_FOLDER_BATCH]);
-      if (!rows.length) return;
+        FROM folders f WHERE f.account_id=$1 AND NOT f.no_select ${paths ? 'AND f.path=ANY($3::text[])' : ''}
+        ORDER BY (f.path='INBOX') DESC, f.status_attempted_at ASC NULLS FIRST, f.path LIMIT $2`, paths ? [account.id, STATUS_FOLDER_BATCH, paths] : [account.id, STATUS_FOLDER_BATCH]);
+      if (!rows.length) return { observed: new Set(paths || []), qualified: new Set(paths || []), failed: false };
+      for (const path of paths || []) if (!rows.some(row => row.path === path)) { observed.add(path); qualified.add(path); }
       const changed = [];
       // On the fresh-login path this connection stays AUTHENTICATED (no selected mailbox, no
       // interference with IDLE). A secondaryOverPool provider hands us a POOLED client
@@ -122,8 +173,16 @@ export class FolderStatusMonitor {
       await this.withClient(account, async client => {
         for (const row of rows) {
           try {
-            const status = await observeFolder(client, account.id, row.path);
+            let quietAtStart = false;
+            const status = await observeFolder(client, account.id, row.path, () => {
+              // Recheck after lookup/connection waits, at the actual STATUS start. A
+              // successful but nonquiescent sample updates counts without retiring debt.
+              quietAtStart = countCompletion.canObserveAccount(account.id) && !countCompletion.users.get(account.user_id)?.handlers;
+              return countCompletion.observation(account.user_id, account.id);
+            });
             if (!status) continue;
+            observed.add(row.path);
+            if (quietAtStart) qualified.add(row.path);
             any = true;
             if (folderNeedsSync(row, status)) changed.push({ row, status });
           } catch (err) {
@@ -151,13 +210,17 @@ export class FolderStatusMonitor {
       }
       if (failed) throw new Error('One or more folder status checks failed');
       this.failures.delete(account.id);
+      return { observed, qualified, failed: false };
     } catch (err) {
       const failures = (this.failures.get(account.id) || 0) + 1;
       this.failures.set(account.id, failures);
-      this.nextCheck.set(account.id, Date.now() + Math.min(600000, STATUS_INTERVAL_MS * 2 ** Math.min(failures - 1, 4)));
+      if (!paths) this.nextCheck.set(account.id, Date.now() + Math.min(600000, STATUS_INTERVAL_MS * 2 ** Math.min(failures - 1, 4)));
       console.warn(`Folder status cycle failed for account ${account.id}: ${extractImapError(err)}`);
+      failed = true;
+      return { observed, qualified, failed: true };
     } finally {
-      if (any || failed) this.broadcast({ type: 'folder_counts', accountId: account.id }, account.user_id);
+      if (any || failed) this.broadcast({ type: 'folder_counts', accountId: account.id, lease: countCompletion.lease(),
+        observations: Object.fromEntries([...observed].map(path => [path, countCompletion.latest(account.id, path)])) }, account.user_id);
     }
   }
 }
@@ -166,7 +229,7 @@ export function publicFolderCounts(row, now = Date.now(), { selectableFolders = 
   const known = row.server_counts_at != null && row.server_total_count != null && row.server_unread_count != null;
   // INBOX is polled every cycle; everything else waits its turn in the rotation.
   const staleMs = row.path === 'INBOX' ? STATUS_STALE_MS : folderStaleMs(selectableFolders);
-  return { ...row, cached_total_count: row.total_count, cached_unread_count: row.unread_count,
+  return { ...row, ...countCompletion.metadata(row.account_id, row.path, row.server_count_revision), cached_total_count: row.total_count, cached_unread_count: row.unread_count,
     total_count: known ? Number(row.server_total_count) : null,
     unread_count: known ? Number(row.server_unread_count) : null,
     counts_known: known,

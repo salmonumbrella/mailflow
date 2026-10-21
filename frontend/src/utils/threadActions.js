@@ -1,5 +1,6 @@
 import { useStore } from '../store/index.js';
 import { api } from './api.js';
+import { beginCountIntent } from './countWriteTracker.js';
 import { normalizeConversation, newestConversationMessage } from './conversation.js';
 import { conversationActionIds, conversationSpamTargets, newestSnoozeTarget, keepDraftsApart } from './conversationActions.js';
 import { setPendingDelete, setCompletedDelete, clearDeleteGuard, clearPendingDelete } from './pendingDeletes.js';
@@ -77,49 +78,78 @@ export async function resolveThreadMessages({ message, isThreadRow, cached, fetc
 
 const UNDO_WINDOW_MS = 4500;
 
-export function runThreadAction({ messages, commit, resolve, notification, addNotification, beforeRemove, onRemove, onRestore }) {
+export function runThreadAction({ messages, commit, resolve, notification, addNotification, beforeRemove, onRemove, onRestore, archiveGroup }) {
   const targets = normalizeConversation(messages);
   if (!targets.length) return false;
   beforeRemove?.();
 
   const unread = targets.filter(message => !message.is_read);
   const store = useStore.getState();
+  const generation = archiveGroup ? store.beginArchiveCount(archiveGroup, targets, Date.now() + UNDO_WINDOW_MS) : store.countGeneration;
+  const endIntent = archiveGroup ? () => {} : beginCountIntent();
+  const current = () => useStore.getState().countGeneration === generation && !useStore.getState().isLocked;
   targets.forEach(message => store.removeMessage(message.id));
-  unread.forEach(message => store.decrementUnread(message.account_id));
+  const unreadOrigins = new Map();
+  if (archiveGroup) targets.forEach(message => setPendingDelete(message.id, { archive: true, generation, group: archiveGroup }));
+  else unread.forEach(message => unreadOrigins.set(message.id, store.decrementUnread(message.account_id)));
   onRemove?.(targets);
 
-  const restore = () => {
+  const restore = (restored = targets) => {
     const state = useStore.getState();
-    state.restoreMessages(targets);
-    unread.forEach(message => state.incrementUnread(message.account_id));
-    onRestore?.(targets);
+    state.restoreMessages(restored);
+    if (archiveGroup) { state.cancelArchiveCount(archiveGroup, generation); targets.forEach(message => clearDeleteGuard(message.id)); }
+    else restored.filter(message => !message.is_read).forEach(message => unreadOrigins.get(message.id)?.revert());
+    onRestore?.(restored);
   };
 
-  let undone = false;
+  let pending = true;
   const timer = setTimeout(async () => {
-    if (undone) return;
+    if (!pending) return;
+    pending = false;
+    let live = targets, dispatched = false;
     try {
+      if (!current()) return;
       // Resolve last, so a message that arrived during the undo window is included.
-      const live = resolve ? normalizeConversation(await resolve(targets)) : targets;
-      await commit(live.length ? live : targets);
+      live = resolve ? normalizeConversation(await resolve(targets)) : targets;
+      if (!current()) return;
+      if (archiveGroup) {
+        live = useStore.getState().updateArchiveCount(archiveGroup, live, generation);
+        live.forEach(message => setPendingDelete(message.id, { archive: true, generation, group: archiveGroup }));
+      }
+      dispatched = true;
+      const result = await commit(archiveGroup ? live : live.length ? live : targets);
+      if (!current() || !archiveGroup) return;
+      useStore.getState().finishArchiveCount(archiveGroup, result || {}, generation);
+      const archived = new Set(result?.archived || []);
+      const failed = targets.filter(message => !archived.has(message.id) && !result?.unconfirmed?.includes(message.id));
+      failed.forEach(message => clearDeleteGuard(message.id));
+      if (failed.length) useStore.getState().restoreMessages(failed);
+      const state = useStore.getState();
+      if (result?.countTargets?.some(target => target.folder === (state.selectedAccountId ? state.selectedFolder : 'INBOX') && (!state.selectedAccountId || target.account_id === state.selectedAccountId)) && !state.searchQuery) {
+        useStore.setState(state => ({ messagesRefreshToken: state.messagesRefreshToken + 1 }));
+      }
     } catch (err) {
+      if (!current()) return;
       console.error('Thread action failed:', err);
-      restore();
+      if (!dispatched || err.notApplied === true) restore();
+      else if (!archiveGroup && err.notAppliedIds?.length) restore(targets.filter(message => err.notAppliedIds.includes(message.id)));
+      else if (archiveGroup) useStore.getState().finishArchiveCount(archiveGroup, { unconfirmed: live.map(message => message.id) }, generation);
       addNotification({
         type: 'error',
         title: notification.failTitle,
         body: err.message || notification.failBody,
       });
-    }
+    } finally { endIntent(); }
   }, UNDO_WINDOW_MS);
 
   addNotification({
     title: notification.title,
     body: notification.body,
     onUndo: () => {
-      undone = true;
+      if (!pending) return;
+      pending = false;
       clearTimeout(timer);
-      restore();
+      try { if (current()) restore(); } finally { endIntent(); }
     },
   });
   return true;
@@ -174,6 +204,7 @@ export function archiveThread(messages, { t, addNotification, fetchThread, ancho
   const resolveSpared = sparingDrafts(liveThread(fetchThread), anchorId, accountId);
   return runThreadAction({
     messages: inArchiveScope(takenCopies(messages, anchorId, accountId), scope),
+    archiveGroup: crypto.randomUUID(),
     addNotification,
     beforeRemove,
     resolve: resolveSpared ? async (targets) => inArchiveScope(await resolveSpared(targets), scope) : null,
@@ -184,6 +215,7 @@ export function archiveThread(messages, { t, addNotification, fetchThread, ancho
       if (result?.noArchiveFolder?.length) {
         addNotification({ title: t('message.archived.noFolderTitle'), body: t('message.archived.noFolderBody') });
       }
+      return result;
     },
     notification: {
       title: t('message.archived.conversationTitle'),
@@ -260,7 +292,13 @@ export function spamThread(messages, { t, addNotification, accounts = [], fetchT
     // Re-apply the same exclusion to whatever the server returns, so a reply sent during
     // the undo window is not reported as spam either.
     resolve: resolveLive ? async (targets) => conversationSpamTargets(inAccount(await resolveLive(targets), accountId), accounts) : null,
-    commit: async (list) => { await Promise.all(list.map(message => api.markSpam(message.id))); },
+    commit: async (list) => {
+      const outcomes = await Promise.allSettled(list.map(message => api.markSpam(message.id)));
+      const failed = outcomes.flatMap((outcome, index) => outcome.status === 'rejected' ? [{ id: list[index].id, error: outcome.reason }] : []);
+      if (failed.length) throw Object.assign(new Error(failed.map(item => item.error.message).join('; ')), {
+        notAppliedIds: failed.filter(item => item.error.notApplied === true).map(item => item.id),
+      });
+    },
     notification: {
       title: t('spam.conversationMovedToSpam'),
       body: subjectOf(visible, t),

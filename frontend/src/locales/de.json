@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Maskierte E-Mail-Adresse",
+    "alias": "E-Mail-Alias"
+  },
   "common": {
     "cancel": "Abbrechen",
     "save": "Speichern",
@@ -201,9 +205,15 @@
     "recipientMenu": {
       "copy": "Adresse kopieren",
       "copyAll": "Alle in diesem Feld kopieren"
+    },
+    "senderValidation": {
+      "unavailable": "Fastmail führt diese Adresse nicht als Absenderidentität auf.",
+      "unknown": "Dieser Absender konnte bei Fastmail nicht überprüft werden.",
+      "missing": "Der ausgewählte Absender ist nicht mehr verfügbar. Wählen Sie erneut einen Absender."
     }
   },
   "message": {
+    "unreadRequested": "Markierung als ungelesen angefordert",
     "find": {
       "title": "Suchen",
       "close": "Suche schließen",
@@ -921,7 +931,13 @@
       "trustedAuthservDetected": "In Ihren letzten Nachrichten gesehen (zum Übernehmen klicken):",
       "trustedAuthservDetectedNone": "Noch keine Daten — Nachrichten werden geprüft, sobald Antispam für dieses Konto aktiv ist.",
       "trustedAuthservWarn": "Vertrauen Sie nur einer ID, die Sie als empfangenden Server Ihres Anbieters erkennen.",
-      "enabledGlobally": "Global aktiviert"
+      "enabledGlobally": "Global aktiviert",
+      "fastmailVerification": {
+        "token": "Fastmail-API-Token",
+        "help": "Beschränken Sie das Token auf E-Mail-Versand (Identitäten) und optional maskierte E-Mail-Adressen. Gewähren Sie keinen Vollzugriff. Unverändert lassen, um das gespeicherte Token zu behalten.",
+        "configured": "Ein Token ist gespeichert.",
+        "clear": "Gespeichertes Token entfernen"
+      }
     },
     "folderMappings": {
       "title": "Ordnerzuordnungen",
@@ -1902,6 +1918,7 @@
     "show": "Rechte Seitenleiste einblenden"
   },
   "gtd": {
+    "oldestLabeledAge": "{{state}}: Alter der ältesten Nachricht mit diesem Label (Tage): {{count}}",
     "title": "GTD",
     "inbox": "Posteingang",
     "waiting": "Wartet",
@@ -1923,6 +1940,7 @@
     "done": "Als erledigt markieren",
     "doneFailed": "Konnte nicht als erledigt markiert werden",
     "doneArchiveFailed": "Als erledigt markiert, aber Archivieren fehlgeschlagen – noch im Posteingang",
+    "doneThreadRemains": "Einige Nachrichten dieser Konversation konnten nicht entfernt werden, daher bleibt sie in ihrem GTD-Bereich",
     "state": {
       "todo": "Aufgabe",
       "watch": "Beobachten",

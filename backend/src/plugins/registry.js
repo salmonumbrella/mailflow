@@ -35,6 +35,8 @@
 //                              A cheap synchronous gate core uses to skip collecting work when no
 //                              plugin would consume it (e.g. inbox-ingest candidate tracking).
 
+import { pluginContext } from './accountProjection.js';
+
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 export function createPluginRegistry() {
@@ -99,7 +101,7 @@ export function createPluginRegistry() {
   }
 
   // Cheap synchronous check: does any plugin have an active handler for `hookName` in this ctx?
-  const hasActive = (hookName, ctx) => activeHandlers(hookName, ctx).length > 0;
+  const hasActive = (hookName, ctx) => activeHandlers(hookName, pluginContext(ctx)).length > 0;
 
   // Async variant of hasActive: awaits each plugin's (possibly async) isActive predicate. Needed
   // when a hook's gate reads state asynchronously — e.g. GTD's per-account config now lives in the
@@ -107,6 +109,7 @@ export function createPluginRegistry() {
   // await it, so any core gate that must know "is this hook actually active for this ctx" ahead of
   // running it (the inbox-ingest gate in syncMessages, the per-account sync-timer arm) uses this.
   async function hasActiveAsync(hookName, ctx) {
+    ctx = pluginContext(ctx);
     for (const p of plugins.values()) {
       const resolved = resolveHook(p.hooks?.[hookName]);
       if (!resolved) continue;
@@ -124,6 +127,7 @@ export function createPluginRegistry() {
   // Fire-and-forget: run all active handlers, await them, never throw. Individual failures
   // are swallowed (and returned for optional logging) so one plugin can't break core.
   async function runHook(hookName, ctx) {
+    ctx = pluginContext(ctx);
     const handlers = activeHandlers(hookName, ctx);
     const errors = [];
     await Promise.all(handlers.map(async ([p, fn]) => {
@@ -135,6 +139,7 @@ export function createPluginRegistry() {
 
   // Value collection: return each active handler's defined result. Errors contribute nothing.
   async function collectHook(hookName, ctx) {
+    ctx = pluginContext(ctx);
     const handlers = activeHandlers(hookName, ctx);
     const results = await Promise.all(handlers.map(async ([, fn]) => {
       try { return await fn(ctx); }

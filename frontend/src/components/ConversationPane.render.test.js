@@ -70,7 +70,31 @@ let textOnly = false;
 // What every fetched body carries as its attachment list; a test fills it to see the strip.
 const bodyAttachments = [];
 const remoteBodyRequests = [];
+// Admission metadata is separate from the business requests asserted below.
+// UNKNOWN observations admit the real HTTP tracker; they never certify a
+// fabricated unread baseline. Count certification has its own focused cases.
+const countMetadataRequests = [];
+const countLease = { token: 'fixture.1', expiresInMs: 360000 };
+function countMetadataResponse(url, opts = {}) {
+  const pathname = new URL(String(url), 'https://synthetic.test').pathname;
+  let data;
+  if (pathname === '/api/mail/unread-counts') data = { lease: countLease, byAccount: {}, snapshots: {} };
+  else if (pathname === '/api/mail/counts/refresh') data = { epoch: 'fixture', lease: countLease, refreshSeq: '40' };
+  else return null;
+  countMetadataRequests.push({ pathname, method: opts.method || 'GET' });
+  return { ok: true, status: 200, json: async () => data };
+}
+function assertCountWriteHeader(url, opts = {}) {
+  if (!['GET', 'HEAD'].includes(opts.method || 'GET') &&
+      new URL(String(url), 'https://synthetic.test').pathname.startsWith('/api/mail/messages')) {
+    assert.match(opts.headers?.['X-Count-Op'] || '', /^fixture\.1:/,
+      'actual message writes pass through the count tracker admission lease');
+  }
+}
 globalThis.fetch = async (url, opts = {}) => {
+  const metadata = countMetadataResponse(url, opts);
+  if (metadata) return metadata;
+  assertCountWriteHeader(url, opts);
   const u = String(url);
   if (u.includes('/mail/thread?')) return { ok: true, status: 200, json: async () => ({ messages: THREAD }) };
   if (u.includes('/mail/messages/bulk-read')) {
@@ -347,6 +371,9 @@ describe('conversation actions', () => {
   before(() => {
     realFetch = globalThis.fetch;
     globalThis.fetch = async (url, opts = {}) => {
+      const metadata = countMetadataResponse(url, opts);
+      if (metadata) return metadata;
+      assertCountWriteHeader(url, opts);
       requests.push({ url: String(url), method: opts.method || 'GET', body: opts.body });
       if (starAnswer && String(url).endsWith('/star')) {
         const ok = await starAnswer;
@@ -487,6 +514,10 @@ describe('conversation pane on a phone', () => {
     // phone this pane is the entire screen with no header of its own, so the thread
     // actions sat under the status bar a standalone PWA draws its content behind, and
     // there was no way back to the list at all.
+    // The preceding delete test intentionally leaves its undo window open.
+    // Undo that real pending action before mounting another copy of its thread;
+    // otherwise the delete guard correctly removes every mocked response row.
+    await React.act(async () => { useStore.getState().notifications.forEach(n => n.onUndo?.()); });
     const container = document.createElement('div');
     document.body.appendChild(container);
     dom.window.innerWidth = 375;
@@ -534,6 +565,7 @@ describe('a conversation another account also received', () => {
   // The thread route serves [...THREAD, B3] unless a test serves a thread id of its own, and
   // answers only once a promise a test holds there resolves. It marks every message is_draft.
   const served = {};
+  const servedPhysical = new Map();
   const held = {};
   let realFetch;
   before(async () => {
@@ -543,12 +575,32 @@ describe('a conversation another account also received', () => {
     await React.act(async () => { useStore.getState().notifications.forEach(n => n.onUndo?.()); });
     realFetch = globalThis.fetch;
     globalThis.fetch = async (url, opts = {}) => {
+      const metadata = countMetadataResponse(url, opts);
+      if (metadata) return metadata;
+      assertCountWriteHeader(url, opts);
       const u = String(url);
       requests.push({ url: u, body: opts.body ? JSON.parse(opts.body) : null });
       if (u.includes('/mail/thread?')) {
         const id = new URLSearchParams(u.split('?')[1]).get('id');
         if (held[id]) await held[id];
-        return { ok: true, status: 200, json: async () => ({ messages: (served[id] || [...THREAD, B3]).map(m => ({ is_draft: false, ...m })) }) };
+        const messages = (served[id] || [...THREAD, B3]).map(m => ({ is_draft: false, ...m }));
+        messages.forEach(message => servedPhysical.set(message.id, { ...message }));
+        return { ok: true, status: 200, json: async () => ({ messages }) };
+      }
+      if (new URL(u, 'https://synthetic.test').pathname === '/api/mail/messages/bulk-archive') {
+        const ids = JSON.parse(opts.body).ids;
+        // Model this cohort's successful archive response, using the same
+        // physical source snapshots returned by the authoritative thread fetch.
+        // An empty object is not an accepted archive: the real action restores
+        // any target absent from both archived and unconfirmed.
+        const countTargets = ids.map(id => {
+          const source = servedPhysical.get(id);
+          assert.ok(source, 'an archived target must exist in the served physical cohort');
+          const { account_id, folder, category, is_read } = source;
+          return { id, account_id, folder, category, is_read };
+        });
+        return { ok: true, status: 200, json: async () => ({ ok: true,
+          archived: [...ids], noArchiveFolder: [], unconfirmed: [], countTargets }) };
       }
       if (/\/accounts\/[^/]+\/folders/.test(u)) return { ok: true, status: 200, json: async () => [{ path: 'INBOX', name: 'INBOX' }, { path: 'Projects', name: 'Projects' }] };
       return realFetch(url, opts);
@@ -580,6 +632,11 @@ describe('a conversation another account also received', () => {
   const open = async ({ selectedAccountId = 'acct', selected = ROW, threadMessages = {}, rows = [ROW], folder = 'INBOX' } = {}) => {
     requests.length = 0;
     await React.act(async () => {
+      // Each call remounts a fresh scenario and reseeds the same server fixtures.
+      // Retire the previous fixture session through the public boundary first:
+      // accepted archive guards correctly outlive UNKNOWN count observations.
+      useStore.getState().setLocked(true);
+      useStore.getState().setLocked(false);
       useStore.setState({
         conversationMode: 'pane', selectedAccountId, selectedFolder: folder, searchQuery: '',
         searchResults: [], messages: rows, threadMessages, selectedMessageId: selected.id,
@@ -921,6 +978,23 @@ describe('a conversation another account also received', () => {
     }
   });
 
+  test('accepted archive guards survive within a fixture session and retire at the next public session', async () => {
+    const { applyDeleteGuard } = await import('../utils/pendingDeletes.js');
+    const scenario = { selected: B3, threadMessages: { '__dl_b3': [B3] }, rows: [ROW] };
+    await open(scenario);
+    const generation = useStore.getState().countGeneration;
+    await commitWindow(button('message.archive'));
+    assert.deepEqual(sentIds(/bulk-archive/), ['b3'], 'the actual request remains scoped to the opened account');
+    assert.equal(useStore.getState().countGeneration, generation, 'the action does not reset its live session');
+    assert.deepEqual(applyDeleteGuard([B3]), [], 'elapsed undo/cleanup time does not certify an UNKNOWN archive');
+    assert.ok(Object.values(useStore.getState().countOperations.operations || {})
+      .some(operation => operation.targetId === B3.id), 'the archive observation obligation remains live');
+    await open(scenario);
+    assert.equal(useStore.getState().countGeneration, generation + 1, 'fresh scenario uses the real public session boundary');
+    assert.deepEqual(applyDeleteGuard([B3]), [B3], 'the binder retires only the previous-session archive guard');
+    assert.ok(cardIds().includes(B3.id), 'the fresh physical fixture copy is reachable again');
+  });
+
   test('with no row of the conversation listed, an action that leaves the opened message there clears the pane', async () => {
     // Snooze takes only the newest inbox copy, so the older message opened from a notification is
     // not among what it takes, and there is no row to open the next one from.
@@ -1088,4 +1162,220 @@ describe('a conversation another account also received', () => {
       assert.equal(useStore.getState().selectedMessageId, selected, `selected in ${selectedAccountId || 'the unified'} view`);
     }
   });
+});
+
+describe('search conversation focus and request invalidation', () => {
+  const scopedMessages = [
+    { id: 'search-match', account_id: 'search-account', folder: 'Archive', message_id: '<match@synthetic.test>',
+      subject: 'Search fixture', from_email: 'sender@synthetic.test', date: '2026-10-20T10:00:00Z', is_read: true },
+    { id: 'search-context', account_id: 'search-account', folder: 'Sent', message_id: '<context@synthetic.test>',
+      subject: 'Re: Search fixture', from_email: 'self@synthetic.test', date: '2026-10-20T11:00:00Z', is_read: true },
+  ];
+  const scope = { query: 'sender', accountId: 'search-account', folder: 'Archive', mode: 'pane', sessionGeneration: 1 };
+  const openIds = host => [...host.querySelectorAll('[aria-expanded="true"]')]
+    .map(card => card.closest('[data-message-id]')?.dataset.messageId);
+  const settle = () => React.act(async () => { await new Promise(resolve => setImmediate(resolve)); });
+  async function mount(t, overrides = {}) {
+    const host = document.body.appendChild(document.createElement('div'));
+    const pane = createRoot(host);
+    t.after(async () => {
+      await React.act(async () => pane.unmount());
+      host.remove();
+    });
+    const render = extra => React.act(async () => pane.render(React.createElement(ConversationPane, {
+      threadId: '<group@synthetic.test>', folder: 'Archive', accountId: 'search-account',
+      selectedMessageId: 'search-match', ...overrides, ...extra,
+    })));
+    await render({});
+    await settle();
+    return { host, render };
+  }
+
+  test('initial search expansion opens only the match while newer context stays reachable', async t => {
+    t.mock.method(api, 'getThread', async () => ({ messages: scopedMessages }));
+    const { host } = await mount(t, { matchedMessageId: 'search-match', searchScope: scope });
+    assert.deepEqual(openIds(host), ['search-match']);
+    const context = host.querySelector('[data-message-id="search-context"] [aria-expanded="false"]');
+    assert.ok(context, 'newer nonmatching Sent context remains collapsed and reachable');
+    await React.act(async () => context.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })));
+    assert.deepEqual(openIds(host), ['search-match', 'search-context']);
+  });
+
+  test('without search focus the existing newest plus selected expansion is preserved', async t => {
+    t.mock.method(api, 'getThread', async () => ({ messages: scopedMessages }));
+    const { host } = await mount(t);
+    assert.deepEqual(openIds(host), ['search-match', 'search-context']);
+  });
+
+  for (const [field, replacement] of [
+    ['query', 'different'], ['accountId', 'other-account'], ['folder', 'INBOX'],
+    ['mode', 'list'], ['sessionGeneration', 2],
+  ]) {
+    test(`a changed search ${field} ignores the old pending context response`, async t => {
+      const pending = [];
+      t.mock.method(api, 'getThread', () => new Promise(resolve => pending.push(resolve)));
+      const { host, render } = await mount(t, { matchedMessageId: 'search-match', searchScope: scope });
+      assert.equal(pending.length, 1);
+      await render({ searchScope: { ...scope, [field]: replacement } });
+      assert.equal(pending.length, 2, 'scope invalidation refetches even when the thread is unchanged');
+      await React.act(async () => pending[1]({ messages: scopedMessages }));
+      await settle();
+      assert.deepEqual(openIds(host), ['search-match']);
+      await React.act(async () => pending[0]({ messages: [
+        { ...scopedMessages[0], id: 'stale-match', message_id: '<stale@synthetic.test>' }, scopedMessages[1],
+      ] }));
+      await settle();
+      assert.equal(host.querySelector('[data-message-id="stale-match"]'), null);
+      assert.deepEqual(openIds(host), ['search-match']);
+    });
+  }
+
+  test('an equivalent search scope object does not restart the context request', async t => {
+    const request = t.mock.method(api, 'getThread', async () => ({ messages: scopedMessages }));
+    const { render } = await mount(t, { matchedMessageId: 'search-match', searchScope: scope });
+    await render({ searchScope: { ...scope } });
+    assert.equal(request.mock.callCount(), 1);
+  });
+});
+
+describe('grouped search pane selection', () => {
+  const scope = { query: 'Nana', accountId: 'search-account', folder: undefined, mode: 'pane', sessionGeneration: 7 };
+  const match = { id: 'physical-match', account_id: 'search-account', folder: 'Archive',
+    thread_id: '["search-account","T"]', matched_message_id: 'physical-match', search_scope: scope,
+    message_id: '<repeated@synthetic.test>', from_email: 'nana@synthetic.test', subject: 'Question',
+    date: '2026-10-20T10:00:00Z', is_read: true };
+  const newer = { ...match, id: 'physical-context', folder: 'Sent', thread_id: 'T',
+    from_email: 'self@synthetic.test', date: '2026-10-20T11:00:00Z' };
+  async function mount(t, component, props) {
+    const host = document.body.appendChild(document.createElement('div'));
+    const pane = createRoot(host);
+    t.after(async () => { await React.act(async () => pane.unmount()); host.remove(); });
+    await React.act(async () => pane.render(React.createElement(component, props)));
+    await React.act(async () => { await new Promise(resolve => setImmediate(resolve)); });
+    return host;
+  }
+  test('ReadingPane uses the search group rather than a same-id normal-list row and focuses the match', async t => {
+    const request = t.mock.method(api, 'getThread', async () => ({ messages: [match, newer] }));
+    useStore.setState({ conversationMode: 'pane', searchQuery: 'Nana', selectedMessageId: match.id,
+      selectedAccountId: 'search-account', selectedFolder: 'INBOX',
+      messages: [{ ...match, thread_id: 'wrong-normal-group', search_scope: undefined }],
+      searchResults: [match], threadMessages: {}, replyDrafts: {} });
+    const host = await mount(t, ReadingPane);
+    const args = request.mock.calls[0].arguments;
+    assert.equal(args[0], match.thread_id);
+    assert.deepEqual(args[3], { ...scope, matchedMessageId: match.id });
+    assert.deepEqual([...host.querySelectorAll('[aria-expanded="true"]')]
+      .map(card => card.closest('[data-message-id]').dataset.messageId), [match.id]);
+  });
+  test('search context preserves distinct authorized physical rows with repeated RFC Message-IDs', async t => {
+    t.mock.method(api, 'getThread', async () => ({ messages: [match, newer] }));
+    const host = await mount(t, ConversationPane, { threadId: match.thread_id,
+      selectedMessageId: match.id, matchedMessageId: match.id, searchScope: scope, accountId: 'search-account' });
+    assert.ok(host.querySelector('[data-message-id="physical-match"]'));
+    assert.ok(host.querySelector('[data-message-id="physical-context"]'));
+  });
+});
+// Append to the actual ConversationPane.render.test.js harness on the released
+// combined source; real pendingReads/store/hotkey, public getThread boundary.
+describe('search pane issued read token', () => {
+  test('old thread response keeps intent and fresh thread response admits remote unread', async t => {
+    const { changeMessageRead } = await import('../utils/messageHotkeys.js');
+    const { countWriteTracker } = await import('../utils/countWriteTracker.js');
+    const { setReadIntentSession, pendingMarkReadMap } = await import('../utils/pendingReads.js');
+    const parent = { ...THREAD[0], id: 'nana-parent', account_id: 'acct', is_read: false,
+      message_id: '<parent@synthetic.test>', from_email: 'nana@synthetic.test' };
+    const pending = [];
+    let releaseWrite, releaseCounts;
+    const write = new Promise(resolve => { releaseWrite = resolve; });
+    const counts = new Promise(resolve => { releaseCounts = resolve; });
+    t.mock.method(api, 'getThread', () => new Promise(resolve => pending.push(resolve)));
+    t.mock.method(api, 'bulkRead', async () => write);
+    t.mock.method(api, 'refreshCounts', async () => { await counts; return {}; });
+    const host = document.body.appendChild(document.createElement('div'));
+    const pane = createRoot(host);
+    t.after(async () => {
+      await React.act(async () => {
+        useStore.getState().setLocked(true); releaseWrite(); releaseCounts(); pane.unmount();
+        await new Promise(resolve => setImmediate(resolve));
+      }); host.remove();
+    });
+    useStore.getState().setUser({ id: 'nana-pane-token@synthetic.test' });
+    useStore.getState().setLocked(false);
+    useStore.setState({ accounts: [{ id: 'acct', email_address: 'self@synthetic.test' }],
+      searchResults: [parent], searchQuery: 'Nana', markReadBehavior: 'manual' });
+    setReadIntentSession(countWriteTracker.generation());
+    const render = generation => React.act(async () => pane.render(React.createElement(ConversationPane, {
+      threadId: '["acct","T"]', accountId: 'acct', selectedMessageId: parent.id, matchedMessageId: parent.id,
+      searchScope: { query: 'Nana', accountId: 'acct', mode: 'pane', sessionGeneration: generation },
+    })));
+    const tick = () => React.act(async () => { await new Promise(resolve => setImmediate(resolve)); });
+    const showsRead = () => [...host.querySelectorAll(`[data-message-id="${parent.id}"] button`)]
+      .some(button => button.textContent === 'contextMenu.markUnread');
+    await render(1); await tick(); assert.equal(pending.length, 1);
+    const state = useStore.getState();
+    await React.act(async () => changeMessageRead(parent, true, {
+      update: state.updateMessage, patch: api.bulkRead,
+      incrementUnread: state.incrementUnread, decrementUnread: state.decrementUnread,
+      adjustCategoryCount: state.adjustCategoryCount,
+    }));
+    await React.act(async () => { releaseWrite(); await new Promise(resolve => setImmediate(resolve)); });
+    assert.equal(pendingMarkReadMap.has(parent.id), false);
+    await React.act(async () => pending.shift()({ messages: [parent, THREAD[1]] })); await tick();
+    assert.equal(showsRead(), true, 'old issued thread token cannot undo the completed intent');
+    await render(2); await tick(); assert.equal(pending.length, 1);
+    await React.act(async () => pending.shift()({ messages: [parent, THREAD[1]] })); await tick();
+    assert.equal(showsRead(), false, 'fresh issued thread token admits remote unread before rendering');
+  });
+});
+
+// Feature 2 appended after all current source oracles; fixtures are session-isolated.
+test('GTD conversation header uses the displayed account on desktop and mobile', async t => {
+  await import('../plugins/gtd/index.jsx');
+  const { patchGtdMetadata, clearGtdMetadata } = await import('../plugins/gtd/metadataStore.js');
+  const original = useStore.getState(), width = dom.window.innerWidth;
+  const host = document.body.appendChild(document.createElement('div'));
+  const pane = createRoot(host);
+  const selected = { ...THREAD[0], id: 'header-selection', account_id: 'other' };
+  t.mock.method(api, 'getThread', async () => ({ messages: THREAD }));
+  t.mock.method(api, 'getMessageBody', async () => ({ text: 'header fixture', attachments: [] }));
+  const settleHeader = () => React.act(async () => { await new Promise(resolve => setImmediate(resolve)); });
+  try {
+    await React.act(async () => {
+      root.render(null);
+      useStore.getState().setUser({ id: 'conversation-header-fixture@synthetic.test' });
+      useStore.getState().setLocked(false);
+      useStore.setState({ enabledPlugins: ['gtd'], markReadBehavior: 'manual',
+        accounts: [{ id: 'acct', enabled: true, gtd_enabled: false }, { id: 'other', enabled: true, gtd_enabled: true }],
+        messages: [selected], searchResults: [], threadMessages: {}, searchQuery: '',
+        selectedMessageId: selected.id, selectedAccountId: 'acct' });
+      patchGtdMetadata(selected, 'watch');
+    });
+    for (const fixtureWidth of [1024, 375]) {
+      dom.window.innerWidth = fixtureWidth;
+      await React.act(async () => pane.render(React.createElement(ConversationPane, {
+        key: fixtureWidth, threadId: 'header-thread', folder: 'Sent', accountId: 'acct', selectedMessageId: selected.id,
+      })));
+      await settleHeader();
+      assert.equal(host.querySelectorAll('[aria-label="gtd.state.watch"]').length, 1, `one header at ${fixtureWidth}`);
+    }
+    await React.act(async () => {
+      useStore.setState({ messages: [], threadMessages: {}, selectedMessageId: null });
+      pane.render(React.createElement(ConversationPane, { threadId: 'header-thread', folder: 'Sent', accountId: 'acct' }));
+    });
+    await settleHeader();
+    assert.equal(host.querySelector('[aria-label="gtd.state.watch"]'), null, 'local fallback cannot borrow selected metadata');
+  } finally {
+    dom.window.innerWidth = width;
+    await React.act(async () => {
+      pane.unmount(); clearGtdMetadata();
+      useStore.getState().setLocked(true);
+      useStore.getState().setUser(original.user);
+      useStore.getState().setLocked(original.isLocked);
+      useStore.setState({ enabledPlugins: original.enabledPlugins, markReadBehavior: original.markReadBehavior,
+        accounts: original.accounts, messages: original.messages, threadMessages: original.threadMessages,
+        searchResults: original.searchResults, searchQuery: original.searchQuery,
+        selectedAccountId: original.selectedAccountId, selectedMessageId: original.selectedMessageId });
+    });
+    host.remove();
+  }
 });

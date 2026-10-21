@@ -1,3 +1,4 @@
+import { countWriteTracker, countRequestError, setCountLeaseLoader } from './countWriteTracker.js';
 const BASE = '/api';
 
 // Sent on every /api request so the backend CSRF guard accepts it. A cross-site
@@ -8,11 +9,14 @@ export const CSRF_HEADER = 'X-Requested-With';
 export const CSRF_VALUE = 'MailFlow';
 const messageBodyRequests = new Map();
 
+let countLeaseReadOrder = 0;
 async function request(method, path, body, extraHeaders) {
+  return countWriteTracker.track(method, path, async ({ opId, generation }) => {
+  const leaseReadOrder = path === '/mail/unread-counts' ? ++countLeaseReadOrder : 0;
   const opts = {
     method,
     credentials: 'include',
-    headers: { [CSRF_HEADER]: CSRF_VALUE, ...(extraHeaders || {}) },
+    headers: { [CSRF_HEADER]: CSRF_VALUE, ...(extraHeaders || {}), ...(opId ? { 'X-Count-Op': opId } : {}) },
   };
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
@@ -29,10 +33,23 @@ async function request(method, path, body, extraHeaders) {
     }
     const err = await res.json().catch(() => ({ error: 'Request failed' }));
     // The status rides along so a caller can tell a refusal (409) from a failure.
-    throw Object.assign(new Error(err.error || 'Request failed'), { status: res.status });
+    throw countRequestError(method, path, res.status, err);
   }
-  return res.json();
+  const payload = await res.json();
+  if (leaseReadOrder) countWriteTracker.observeLease(payload.lease, generation, leaseReadOrder);
+  return payload;
+  });
 }
+
+let countRead;
+function readUnreadCounts(force = false) {
+  const generation = countWriteTracker.generation();
+  if (!force && countRead?.generation === generation) return countRead.promise;
+  const promise = request('GET', '/mail/unread-counts').finally(() => { if (countRead?.promise === promise) countRead = null; });
+  countRead = { generation, promise };
+  return promise;
+}
+setCountLeaseLoader(readUnreadCounts);
 
 // purpose is 'compose' (writing assistant) or 'summarize' (summaries and AI actions): the server
 // checks it against the admin's switch for that feature (#644).
@@ -307,8 +324,11 @@ export const api = {
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),
   reconnectAccount: (id) => request('POST', `/accounts/${id}/reconnect`),
   reindexAccount: (id) => request('POST', `/accounts/${id}/reindex`),
+  getSearchCoverage: id => request('GET', `/accounts/${encodeURIComponent(id)}/search-coverage`),
+  setSearchCoverageAction: (id, action) => request('POST', `/accounts/${encodeURIComponent(id)}/search-coverage`, { action }),
   getFolders: (accountId) => request('GET', `/accounts/${accountId}/folders`),
   getAliases: (accountId) => request('GET', `/accounts/${accountId}/aliases`),
+  getSenderIdentities: (accountId, aliasId) => request('GET', `/accounts/${encodeURIComponent(accountId)}/sender-identities${aliasId ? `?aliasId=${encodeURIComponent(aliasId)}` : ''}`),
   addAlias: (accountId, data) => request('POST', `/accounts/${accountId}/aliases`, data),
   updateAlias: (accountId, aliasId, data) => request('PUT', `/accounts/${accountId}/aliases/${aliasId}`, data),
   deleteAlias: (accountId, aliasId) => request('DELETE', `/accounts/${accountId}/aliases/${aliasId}`),
@@ -329,10 +349,17 @@ export const api = {
   getMessageBody,
   // The id rides in the query string, not the path: GitHub's Message-IDs contain slashes, which
   // some reverse proxies reject when encoded in a path (#509).
-  getThread: (threadId, folder, unified = false) => {
+  getThread: (threadId, folder, unified = false, searchScope = null) => {
     const qs = new URLSearchParams({ id: threadId });
-    if (folder) qs.set('folder', folder);
+    const contextFolder = searchScope ? searchScope.folder : folder;
+    if (contextFolder) qs.set('folder', contextFolder);
     if (unified) qs.set('unified', 'true');
+    if (searchScope) {
+      qs.set('q', searchScope.query);
+      if (searchScope.accountId) qs.set('accountId', searchScope.accountId);
+      qs.set('mode', searchScope.mode);
+      if (searchScope.matchedMessageId) qs.set('matchedMessageId', searchScope.matchedMessageId);
+    }
     return request('GET', `/mail/thread?${qs}`);
   },
   bulkRead: (ids, read) => request('POST', '/mail/messages/bulk-read', { ids, read }),
@@ -344,7 +371,8 @@ export const api = {
   bulkMove: (ids, folder) => request('POST', '/mail/messages/bulk-move', { ids, folder }),
   copyMessage: (id, folder) => request('POST', `/mail/messages/${encodeURIComponent(id)}/copy`, { folder }),
   bulkArchive: (ids) => request('POST', '/mail/messages/bulk-archive', { ids }),
-  getUnreadCounts: () => request('GET', '/mail/unread-counts'),
+  getUnreadCounts: () => readUnreadCounts(),
+  refreshCounts: ops => request('POST', '/mail/counts/refresh', { ops }),
 
   // Mailbox cleanup (read-only analysis; actual cleanup reuses bulkDelete above).
   mailboxUsage: (accountId) => request('GET', `/mail/mailbox-usage?accountId=${encodeURIComponent(accountId)}`),
@@ -396,12 +424,15 @@ export const api = {
   emptyFolder: (accountId, path) => request('POST', '/mail/folders/empty', { accountId, path }),
 
   // Search
-  search: (q, accountId, { offset = 0, limit, folder } = {}) => {
+  search: (q, accountId, { offset = 0, cursor, threaded = false, mode, limit, folder } = {}) => {
     const params = new URLSearchParams({ q });
     if (accountId) params.set('accountId', accountId);
     if (limit) params.set('limit', limit);
     if (folder) params.set('folder', folder);
-    if (offset) params.set('offset', offset);
+    if (cursor !== undefined) params.set('cursor', cursor);
+    if (threaded) params.set('threaded', 'true');
+    if (mode) params.set('mode', mode);
+    if (offset && !threaded && cursor === undefined) params.set('offset', offset);
     return request('GET', `/search?${params}`);
   },
   suggestContacts: (q) => request('GET', `/search/contacts?q=${encodeURIComponent(q)}`),
@@ -515,6 +546,7 @@ export const api = {
     const qs = p.toString();
     return request('GET', `/gtd/sections${qs ? '?' + qs : ''}`);
   },
+  gtdMetadata: (accountId, messageIds) => request('POST', '/gtd/metadata', { accountId, messageIds }),
   gtdClassify: (messageId, state) => request('POST', '/gtd/classify', { messageId, state }),
   gtdUndoClassify: (undoToken) => request('POST', '/gtd/classify/undo', undoToken),
   gtdUnclassify: (messageId, state) => request('DELETE', '/gtd/classify', { messageId, state }),

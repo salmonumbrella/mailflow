@@ -4,7 +4,7 @@ vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
-vi.mock('../index.js', () => ({ imapManager: { emptyFolder: vi.fn(), broadcast: vi.fn() } }));
+vi.mock('../index.js', () => ({ imapManager: { _assertWritableSource: vi.fn(async () => {}), emptyFolder: vi.fn(), broadcast: vi.fn() } }));
 
 import express from 'express';
 import mailRoutes from './mail.js';

@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn(), pool: {} }));
+vi.mock('../services/db.js', () => ({ query: vi.fn(), pool: {}, withTransaction: vi.fn() }));
+vi.mock('../services/aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
+vi.mock('./oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('../index.js', () => ({ imapManager: { disconnectUser: vi.fn(), closeSockets: vi.fn() } }));
 vi.mock('../services/encryption.js', () => ({
   decrypt: value => value,
@@ -33,6 +35,8 @@ import express from 'express';
 import authRoutes from './auth.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
+import { ImapManager } from '../services/imapManager.js';
+import { createSearchIndexLifecycle } from '../services/searchIndexLifecycle.js';
 
 const ENDPOINT = 'https://fcm.googleapis.com/fcm/send/device-a';
 
@@ -80,6 +84,36 @@ describe('POST /api/auth/logout: push subscription of the signing-out browser', 
     expect(res).toEqual({ status: 200, json: { ok: true, endSessionUrl: null } });
     expect(destroyed).toBe(true);
     expect(imapManager.disconnectUser).toHaveBeenCalledWith('user-a');
+  });
+
+  it('contains a failed index fence when actual logout fires disconnectUser without awaiting it', async () => {
+    const manager = Object.create(ImapManager.prototype);
+    for (const name of ['connections', 'syncIntervals', 'pluginSyncIntervals', 'syncThrottleSkips', 'syncTickCount',
+      'lastSyncOkAt', '_idleMissStreak', '_syncErrorState', '_pendingFlagSync', '_pendingNewMail',
+      '_flagDebounceTimers', '_expungeDebounceTimers']) manager[name] = new Map();
+    manager._pollOnlyAccounts = new Set();
+    let fail = true, observed;
+    manager._searchIndex = createSearchIndexLifecycle({
+      runBatch: async () => { throw new Error('Unexpected index activation'); },
+      invalidateRun: async () => { if (fail) throw new Error('logout index fence unavailable'); },
+    });
+    query.mockResolvedValue({ rows: [{ id: 'logout-index-account' }] });
+    imapManager.disconnectUser.mockImplementation((...args) => {
+      const actual = manager.disconnectUser(...args);
+      // Observe a rejection as an assertion failure rather than an unhandled
+      // test-runner error. The production route still does not await this call.
+      observed = actual.then(() => ({ fulfilled: true }), error => ({ fulfilled: false, error }));
+      return actual;
+    });
+    const res = await logout();
+    expect(res).toEqual({ status: 200, json: { ok: true, endSessionUrl: null } });
+    expect(destroyed).toBe(true);
+    expect(await observed).toEqual({ fulfilled: true });
+    expect(await manager._searchIndex.run({ id: 'logout-index-account' })).toBeNull();
+    await expect(manager._searchIndex.resume('logout-index-account')).rejects.toThrow('logout index fence unavailable');
+    fail = false;
+    await manager.disconnectAccount('logout-index-account');
+    await expect(manager._searchIndex.resume('logout-index-account')).resolves.toBe(true);
   });
 
   it('still signs out when the delete fails', async () => {

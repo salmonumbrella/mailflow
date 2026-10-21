@@ -10,9 +10,12 @@ function setExpiring(map, messageId, ttlMs) {
   map.set(messageId, { timer });
 }
 
-export function setPendingDelete(messageId) {
+export function setPendingDelete(messageId, options) {
   clearCompletedDelete(messageId);
-  setExpiring(pendingDeleteMap, messageId, 30000);
+  if (options?.archive) {
+    clearPendingDelete(messageId);
+    pendingDeleteMap.set(messageId, { ...options, archive: true });
+  } else setExpiring(pendingDeleteMap, messageId, 30000);
 }
 
 export function clearPendingDelete(messageId) {
@@ -56,4 +59,17 @@ export function applyDeleteGuard(messages) {
       && !guarded(folderThreadKey)
       && !guarded(accountThreadKey);
   });
+}
+
+// Archive guards follow their operation cohort, including uncertain responses. Only a
+// qualifying count observation or a session reset releases them; elapsed time cannot.
+export function reconcileArchiveDeleteGuards(generation, groups) {
+  let retired = false;
+  for (const [id, guard] of pendingDeleteMap) {
+    if (guard.archive && guard.group && (guard.generation !== generation || !groups.has(guard.group))) {
+      if (guard.generation === generation) retired = true;
+      clearDeleteGuard(id);
+    }
+  }
+  return retired;
 }

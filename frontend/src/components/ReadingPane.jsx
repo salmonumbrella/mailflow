@@ -34,12 +34,11 @@ export default function ReadingPane() {
   // meant those always fell back to the single-message pane.
   const { selectedMessage: selected, listed, parked } = resolveConversationSelection({
     selectedMessageId,
-    pool: [...(messages || []), ...(searchResults || [])],
+    pool: searchQuery.trim() ? (searchResults || []) : [...(messages || []), ...(searchResults || [])],
     threadMessages: threadMessages || {},
   });
 
-  // A message with no thread of its own is just a message, and a search deliberately shows
-  // the one matched message rather than its conversation.
+  // Grouped search keeps the physical match selected while opening its scoped context.
   const pane = !shouldUseConversationPane({ mode, searchQuery, message: selected }) ? <MessagePane /> : (
 
     <ConversationPane
@@ -60,6 +59,8 @@ export default function ReadingPane() {
       // thread does not change threadId, so without this the pane had no way to know a
       // click had happened and nothing opened.
       selectedMessageId={selectedMessageId}
+      matchedMessageId={searchQuery.trim() ? selected.matched_message_id : null}
+      searchScope={searchQuery.trim() ? selected.search_scope : null}
     />
   );
   return <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, height: '100%', minHeight: 0 }}>

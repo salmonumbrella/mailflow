@@ -166,3 +166,119 @@ describe('freshness allowance tracks the rotation the monitor actually performs'
     expect(publicFolderCounts(row, 200000, { selectableFolders: 6 }).counts_stale).toBe(true);
   });
 });
+
+describe('post-write trailing observations', () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(0); });
+  it('retains a write behind a running STATUS and bypasses the leading throttle', async () => {
+    vi.useFakeTimers();
+    let release;
+    let revision = 0;
+    const starts = [];
+    query.mockImplementation(async sql => sql.includes('SELECT f.*') ? { rows: [{ path: 'INBOX' }] }
+      : sql.includes('nextval') ? { rows: [{ revision: String(++revision), started_at: new Date() }] } : { rows: [{ id: 'f' }] });
+    const monitor = new FolderStatusMonitor({ withClient: async (_a, fn) => fn({ status: async () => {
+      starts.push(Date.now());
+      if (starts.length === 1) await new Promise(r => { release = r; });
+      return good;
+    } }), enqueueSync: () => false, broadcast: vi.fn() });
+    const account = { id: 'a' };
+    const leading = monitor.refresh(account);
+    await vi.advanceTimersByTimeAsync(0);
+    monitor.scheduleTrailingStatus(account, ['INBOX']);
+    await vi.advanceTimersByTimeAsync(1000);
+    release();
+    await leading;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(starts).toHaveLength(2);
+    expect(starts[1]).toBeLessThanOrEqual(3000);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it('retries a failed trailing pass without discarding its obligation', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let calls = 0;
+    query.mockImplementation(async sql => sql.includes('SELECT f.*') ? { rows: [{ path: 'INBOX' }] }
+      : sql.includes('nextval') ? { rows: [{ revision: '2', started_at: new Date() }] } : { rows: [{ id: 'f' }] });
+    const monitor = new FolderStatusMonitor({ withClient: async (_a, fn) => {
+      if (++calls === 1) throw new Error('offline');
+      return fn({ status: async () => good });
+    }, enqueueSync: () => false, broadcast: vi.fn() });
+    monitor.scheduleTrailingStatus({ id: 'a' }, ['INBOX']);
+    await vi.advanceTimersByTimeAsync(31000);
+    expect(calls).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('trailing burst coalescing', () => {
+  it('keeps one transport across 120 writes during configurable provider lag', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(0);
+    let revision = 0, active = 0, maxActive = 0;
+    const starts = [];
+    const lag = 1500;
+    query.mockImplementation(async sql => sql.includes('SELECT f.*') ? { rows: [{ path: 'INBOX' }] }
+      : sql.includes('nextval') ? { rows: [{ revision: String(++revision), started_at: new Date() }] } : { rows: [{ id: 'f' }] });
+    const monitor = new FolderStatusMonitor({ withClient: async (_a, fn) => {
+      maxActive = Math.max(maxActive, ++active);
+      try { return await fn({ status: async () => { starts.push(Date.now()); await new Promise(resolve => setTimeout(resolve, lag)); return good; } }); }
+      finally { active--; }
+    }, enqueueSync: () => false, broadcast: vi.fn() });
+    const account = { id: 'a' };
+    const leading = monitor.refresh(account);
+    for (let i = 0; i < 120; i++) {
+      monitor.scheduleTrailingStatus(account, ['INBOX']);
+      await vi.advanceTimersByTimeAsync(5);
+    }
+    const lastWrite = Date.now();
+    await vi.advanceTimersByTimeAsync(5000);
+    await leading;
+    expect(starts).toHaveLength(2);
+    expect(starts[1] - lastWrite).toBeLessThanOrEqual(3000);
+    expect(maxActive).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('review regressions: fair retained obligations', () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(0); vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+  it('targeted writes cannot postpone the normal rotating folder deadline', async () => {
+    let revision = 0;
+    query.mockImplementation(async (sql, params) => sql.includes('SELECT f.*') ? { rows: (params[2] || ['INBOX', 'Sent']).map(path => ({ path })) }
+      : sql.includes('nextval') ? { rows: [{ revision: String(++revision), started_at: new Date() }] } : { rows: [{ id: 'f' }] });
+    const seen = [];
+    const monitor = new FolderStatusMonitor({ withClient: async (_a, fn) => fn({ status: async path => { seen.push([path, Date.now()]); return good; } }), enqueueSync: () => false, broadcast: vi.fn() });
+    const account = { id: 'a' };
+    await monitor.refresh(account);
+    for (let i = 0; i < 10; i++) {
+      await vi.advanceTimersByTimeAsync(30000);
+      monitor.scheduleTrailingStatus(account, ['INBOX']);
+      await vi.advanceTimersByTimeAsync(100);
+      await monitor.refresh(account);
+    }
+    expect(seen.filter(([path]) => path === 'Sent').length).toBeGreaterThanOrEqual(5);
+  });
+  it('a permanently failing first folder cannot starve a healthy seventh target', async () => {
+    let revision = 0;
+    const seen = [];
+    query.mockImplementation(async (sql, params) => sql.includes('SELECT f.*') ? { rows: params[2].map(path => ({ path })) }
+      : sql.includes('nextval') ? { rows: [{ revision: String(++revision), started_at: new Date() }] } : { rows: [{ id: 'f' }] });
+    const monitor = new FolderStatusMonitor({ withClient: async (_a, fn) => fn({ usable: true, status: async path => { seen.push(path); if (path === 'bad') throw new Error('unavailable'); return good; } }), enqueueSync: () => false, broadcast: vi.fn() });
+    monitor.scheduleTrailingStatus({ id: 'a' }, ['bad', 'b', 'c', 'd', 'e', 'f', 'seventh']);
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(seen).toContain('seventh');
+    expect(seen.filter(path => path === 'b')).toHaveLength(1);
+  });
+});
+
+it('retains poisoned trailing debt without a permanent thirty-second transport loop', async () => {
+  vi.useFakeTimers();
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  query.mockImplementation(async sql => sql.includes('SELECT f.*') ? { rows: [{ path: 'INBOX' }] } : { rows: [{ revision: '1', started_at: new Date() }] });
+  const starts = [];
+  const monitor = new FolderStatusMonitor({ withClient: async () => { starts.push(Date.now()); throw new Error('offline'); }, enqueueSync: () => false, broadcast: () => {} });
+  monitor.scheduleTrailingStatus({ id: 'poisoned.test' });
+  await vi.advanceTimersByTimeAsync(20 * 60000);
+  expect(monitor.trailing.has('poisoned.test')).toBe(true);
+  expect(starts.length).toBeLessThan(15);
+  expect(starts[1] - starts[0]).toBe(2000);
+});

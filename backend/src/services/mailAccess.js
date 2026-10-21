@@ -9,6 +9,7 @@
 // established it owns (via one of the user-keyed reads) and only ever read within that account —
 // they never span accounts or users.
 import { query } from './db.js';
+import { pluginAccount } from '../plugins/accountProjection.js';
 
 // A message the user owns (joined through their accounts), or null. Full row (m.*).
 export async function loadOwnedMessage(userId, messageId) {
@@ -22,13 +23,13 @@ export async function loadOwnedMessage(userId, messageId) {
   return rows[0] || null;
 }
 
-// One of the user's accounts by id (ownership enforced), or null. Full row.
+// One of the user's accounts by id (ownership enforced), without the core-only Fastmail token.
 export async function getOwnedAccount(userId, accountId) {
   const { rows } = await query(
     'SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2',
     [accountId, userId]
   );
-  return rows[0] || null;
+  return rows[0] ? pluginAccount(rows[0]) : null;
 }
 
 // All of the user's accounts (light columns for listing/iteration). The caller filters by its
@@ -93,7 +94,7 @@ export async function getThreadKeysForMessageIdHeaders(accountId, messageIdHeade
 export async function getMessagesByThreadKeys(accountId, threadKeys) {
   if (!threadKeys || threadKeys.length === 0) return [];
   const { rows } = await query(
-    `SELECT thread_key, uid, folder, message_id, from_email, date, id
+    `SELECT thread_key, uid, folder, message_id, from_email, date, id, is_read
        FROM messages
       WHERE account_id = $1 AND thread_key = ANY($2::text[]) AND is_deleted = false`,
     [accountId, threadKeys]
@@ -145,6 +146,35 @@ export async function getMessageAnnotations(accountId, ids, pluginId) {
   const out = {};
   for (const r of rows) if (r.ann != null) out[r.id] = r.ann;
   return out;
+}
+
+// Label-folder membership for a bounded set of message rows. Targets are scoped to one account;
+// their live siblings are joined by thread key or RFC Message-ID so plugins can decorate existing rows
+// without adding feature-specific joins to the core message-list query.
+export async function getLabelMetadata(accountId, messageIds, labelFolders) {
+  if (!messageIds?.length || !labelFolders?.length) return [];
+  if (messageIds.length > 100) throw new RangeError('Label metadata accepts at most 100 message ids');
+  const { rows } = await query(
+    `SELECT target.id AS message_id, sibling.folder, MIN(sibling.date) AS date
+       FROM messages target
+       JOIN messages sibling
+         ON sibling.account_id = target.account_id
+        AND (sibling.thread_key = target.thread_key
+             OR (target.message_id IS NOT NULL AND sibling.message_id = target.message_id))
+        AND sibling.folder = ANY($3::text[])
+        AND sibling.is_deleted = false
+      WHERE target.account_id = $1
+        AND target.id = ANY($2::uuid[])
+        AND target.is_deleted = false
+      GROUP BY target.id, sibling.folder
+      ORDER BY target.id, sibling.folder`,
+    [accountId, messageIds, labelFolders]
+  );
+  return rows.map(row => ({
+    messageId: row.message_id,
+    folder: row.folder,
+    date: row.date == null ? null : new Date(row.date).toISOString(),
+  }));
 }
 
 // Merge `patch` into a plugin's namespace of a message's annotations (creating the namespace if

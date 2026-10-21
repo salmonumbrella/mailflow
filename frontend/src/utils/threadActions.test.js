@@ -29,14 +29,27 @@ Object.assign(globalThis, {
   document: dom.window.document,
   localStorage: dom.window.localStorage,
   CustomEvent: dom.window.CustomEvent,
+  Event: dom.window.Event,
 });
 
 let requests = [];
+let metadataRequests = [];
 let failNext = false;
+let failMutation = false;
+const countLease = { token: 'thread-actions.test.1', expiresInMs: 360000 };
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
-  requests.push({ url: u, body: opts.body ? JSON.parse(opts.body) : null });
-  if (failNext) return { ok: false, status: 500, json: async () => ({ error: 'server said no' }) };
+  const folderObservation = opts.method === 'GET' && /^\/api\/accounts\/[^/]+\/folders$/.test(u);
+  if (u.endsWith('/mail/unread-counts') || u.endsWith('/mail/counts/refresh') || folderObservation) {
+    metadataRequests.push(u);
+    if (failNext) return { ok: false, status: 500, json: async () => ({ error: 'server said no' }) };
+    const body = folderObservation ? [] : u.endsWith('/mail/unread-counts')
+      ? { lease: countLease, byAccount: {}, snapshots: {} }
+      : { epoch: 'thread-actions.test', lease: countLease, refreshSeq: '40' };
+    return { ok: true, status: 200, json: async () => body };
+  }
+  requests.push({ method: opts.method, url: u, body: opts.body ? JSON.parse(opts.body) : null, headers: opts.headers });
+  if (failNext || failMutation) return { ok: false, status: 500, json: async () => ({ error: 'server said no' }) };
   return { ok: true, status: 200, json: async () => ({}) };
 };
 
@@ -49,7 +62,7 @@ const THREAD = [
   { id: 'a2', account_id: 'acct', folder: 'Sent', subject: 'Re: Hello', from_email: 'me@x.z', date: '2026-01-02T00:00:00Z', is_read: true },
   { id: 'a3', account_id: 'acct', folder: 'INBOX', subject: 'Re: Hello', from_email: 'them@x.z', date: '2026-01-03T00:00:00Z', is_read: false },
 ];
-const ACCOUNTS = [{ id: 'acct', email_address: 'me@x.z', aliases: [], folder_mappings: { sent: 'Sent' } }];
+const ACCOUNTS = [{ id: 'acct', enabled: true, email_address: 'me@x.z', aliases: [], folder_mappings: { sent: 'Sent' } }];
 
 // The authoritative lookup the pane supplies. It returns a thread that has GAINED a
 // message since the pane rendered, which is the staleness this module exists to handle.
@@ -66,11 +79,16 @@ const UNDO_WINDOW = 4500;
 
 beforeEach(() => {
   requests = [];
+  metadataRequests = [];
   notifications = [];
-  failNext = false;
+  failNext = false; failMutation = false;
+  useStore.getState().setLocked(true);
+  useStore.getState().setUser({ id: 'thread-actions.fixture' });
+  useStore.getState().setLocked(false);
   useStore.getState().setMessages(THREAD.map(m => ({ ...m })));
-  useStore.setState({ accounts: ACCOUNTS });
+  useStore.getState().setAccounts(ACCOUNTS);
 });
+afterEach(() => { useStore.getState().setLocked(true); });
 
 describe('archiveThread', () => {
   test('removes the whole thread at once and holds the request for the undo window', async () => {
@@ -89,6 +107,8 @@ describe('archiveThread', () => {
     await tick(UNDO_WINDOW + 50);
     assert.equal(requests.length, 1, 'one bulk request for the whole thread');
     assert.match(requests[0].url, /bulk-archive/);
+    assert.ok(metadataRequests.some(url => url.endsWith('/mail/unread-counts')), 'the real funnel obtained metadata');
+    assert.match(requests[0].headers['X-Count-Op'], /^thread-actions\.test\.1:/);
     assert.deepEqual(requests[0].body.ids.sort(), ['a1', 'a2', 'a3'], 'all three ids in a single call');
   });
 
@@ -111,6 +131,27 @@ describe('archiveThread', () => {
     assert.deepEqual(ids(), ['a1', 'a2', 'a3'], 'a thread that failed to archive must come back');
     const failure = notifications.find(n => n.type === 'error');
     assert.ok(failure, 'the user is told the archive failed');
+    assert.equal(requests.length, 0, 'a failed lease read never dispatches the archive');
+    assert.ok(metadataRequests.some(url => url.endsWith('/mail/unread-counts')));
+  });
+
+  test('an actual mutation 500 stays uncertain after successful metadata admission', async () => {
+    failMutation = true;
+    archiveThread(THREAD, { t, addNotification });
+    assert.deepEqual(requests, [], 'the archive remains held before the Undo window closes');
+    await tick(UNDO_WINDOW + 50);
+    assert.ok(metadataRequests.some(url => url.endsWith('/mail/unread-counts')));
+    assert.equal(requests.length, 1, 'the mutating request really was dispatched');
+    assert.equal(requests[0].method, 'POST');
+    assert.deepEqual(requests[0].body, { ids: ['a1', 'a2', 'a3'] }, 'the single archive targets both INBOX rows and the Sent copy');
+    assert.match(requests[0].url, /bulk-archive/);
+    assert.match(requests[0].headers['X-Count-Op'], /^thread-actions\.test\.1:/);
+    assert.ok(metadataRequests.includes('/api/accounts/acct/folders'), 'the unconfirmed Sent copy requests folder truth, separately from mutation traffic');
+    assert.deepEqual(ids(), [], 'an uncertain write is not an owned inverse');
+    const unresolved = Object.values(useStore.getState().countOperations.operations);
+    assert.deepEqual(unresolved.map(op => op.targetId).sort(), ['a1', 'a2', 'a3'], 'UNKNOWN observations retain every uncertain physical target');
+    assert.ok(unresolved.every(op => op.state === 'awaiting-observation'), 'no unknown folder response certifies the cohort');
+    assert.ok(notifications.some(n => n.type === 'error'), 'uncertainty is reported');
   });
 });
 

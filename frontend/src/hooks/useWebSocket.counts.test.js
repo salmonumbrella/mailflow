@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
@@ -54,6 +54,25 @@ test('already-seen arrivals do not inflate badges; count events update without r
   } finally {
     await React.act(async () => root.unmount());
     api.getUnreadCounts = original;
-    dom.window.close();
+
   }
 });
+
+test('count callbacks captured by an old socket cannot cross a session switch', async () => {
+  const root = createRoot(document.getElementById('root'));
+  const original = api.getUnreadCounts;
+  let release;
+  try {
+    useStore.getState().setUser({ id: 'old.test' });
+    useStore.getState().setLocked(false);
+    useStore.getState().setAccounts([{ id: 'a', enabled: true }]);
+    api.getUnreadCounts = () => new Promise(resolve => { release = resolve; });
+    await React.act(async () => root.render(React.createElement(App)));
+    socket.onmessage({ data: JSON.stringify({ type: 'folder_counts', accountId: 'a' }) });
+    useStore.getState().setUser({ id: 'new.test' });
+    await React.act(async () => release({ byAccount: { a: 99 }, snapshots: { a: { revision: '99', known: true } } }));
+    assert.deepEqual(useStore.getState().unreadCounts.byAccount, {});
+  } finally { await React.act(async () => root.unmount()); api.getUnreadCounts = original; }
+});
+
+after(() => dom.window.close());

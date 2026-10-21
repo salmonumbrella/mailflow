@@ -20,7 +20,8 @@ const CACHED = [
   { id: 'b-new', thread_id: 't', account_id: 'b', is_read: false },
 ];
 const echo = (selectedAccountId) => {
-  useStore.setState({ selectedAccountId, messages: [ROW], searchResults: [], threadMessages: { t: CACHED } });
+  useStore.setState({ accounts: [{ id: 'a', enabled: true }, { id: 'b', enabled: true }],
+    selectedAccountId, messages: [ROW], searchResults: [], threadMessages: { t: CACHED } });
   useStore.getState().updateMessage('a-old', { is_read: true });
   return useStore.getState().messages[0];
 };
@@ -37,4 +38,84 @@ test('in the unified inbox the row still counts every cached copy', () => {
   const row = echo(null);
   assert.equal(row.unread_count, 1);
   assert.equal(row.is_read, false);
+});
+
+
+test('explicit unread of the selected representative updates its row and search badge within the account', () => {
+  useStore.setState({ selectedAccountId: 'a', messages: [ROW], searchResults: [ROW], threadMessages: { t: CACHED } });
+  useStore.getState().updateMessage(ROW.id, { is_read: false });
+  for (const row of [useStore.getState().messages[0], useStore.getState().searchResults[0]]) {
+    assert.equal(row.is_read, false);
+    assert.equal(row.unread_count, 1, 'the other account copy must not contribute');
+  }
+  assert.equal(useStore.getState().threadMessages.t[2], CACHED[2]);
+});
+
+test('representative unread without an expanded cache updates the aggregate immediately', () => {
+  useStore.setState({ selectedAccountId: 'a', messages: [ROW], searchResults: [], threadMessages: {} });
+  useStore.getState().updateMessage(ROW.id, { is_read: false });
+  assert.equal(useStore.getState().messages[0].unread_count, 1);
+  useStore.getState().updateMessage(ROW.id, { is_read: true });
+  assert.equal(useStore.getState().messages[0].unread_count, 0);
+});
+
+test('explicit bulk aggregate is not overwritten by an older cached thread', () => {
+  useStore.setState({ selectedAccountId: 'a', messages: [ROW], searchResults: [], threadMessages: { t: CACHED } });
+  useStore.getState().updateMessage(ROW.id, { is_read: false, unread_count: 2 });
+  assert.equal(useStore.getState().messages[0].unread_count, 2);
+});
+
+
+test('an unread aggregate retains its read representative own flag for the next action', () => {
+  useStore.setState({ selectedAccountId: 'a', messages: [ROW], searchResults: [], threadMessages: { t: CACHED } });
+  useStore.getState().updateMessage('a-old', { is_read: false });
+  const aggregate = useStore.getState().messages[0];
+  assert.equal(aggregate.is_read, false);
+  assert.equal(aggregate.representative_is_read, true);
+  assert.equal(aggregate.unread_count, 1);
+  useStore.getState().updateMessage(ROW.id, { is_read: false });
+  assert.equal(useStore.getState().messages[0].representative_is_read, false);
+  assert.equal(useStore.getState().messages[0].unread_count, 2);
+});
+
+// A post-send cache can contain another account's copy outside the unified view.
+// Keep its physical flag truthful while aggregating only the current view's members.
+for (const [position, extraAccount, expectedUnread] of [
+  ['excluded', { id: 'c', enabled: true, include_in_unified_inbox: false }, 0],
+  ['disabled', { id: 'c', enabled: false, include_in_unified_inbox: true }, 0],
+  ['unknown', null, 0],
+  ['included', { id: 'c', enabled: true, include_in_unified_inbox: true }, 1],
+]) {
+  test(`unified read aggregate: ${position} cached account preserves its own flag`, () => {
+    const outside = { ...CACHED[2], id: 'c-new', account_id: 'c' };
+    const cached = [...CACHED.map(message => ({ ...message, is_read: true })), outside];
+    const accounts = [{ id: 'a', enabled: true }, { id: 'b', enabled: true }, ...(extraAccount ? [extraAccount] : [])];
+    useStore.setState({ accounts, selectedAccountId: null, messages: [ROW], searchResults: [ROW], threadMessages: { t: cached } });
+    useStore.getState().updateMessage('a-old', { is_read: true });
+    for (const row of [useStore.getState().messages[0], useStore.getState().searchResults[0]]) {
+      assert.equal(row.unread_count, expectedUnread);
+      assert.equal(row.is_read, expectedUnread === 0);
+      assert.equal(row.representative_is_read, true);
+    }
+    const after = useStore.getState().threadMessages.t;
+    assert.deepEqual(after.map(message => [message.id, message.account_id]), cached.map(message => [message.id, message.account_id]));
+    assert.equal(after[3], outside, 'an echo for A never changes C physical flag or identity');
+    assert.equal(outside.is_read, false);
+    useStore.getState().updateMessage(outside.id, { is_read: false });
+    assert.equal(useStore.getState().messages[0].unread_count, expectedUnread, 'C echo respects the same membership');
+  });
+}
+
+test('an account excluded from unified still counts its own mailbox copies', () => {
+  const ownRow = { ...ROW, account_id: 'c', id: 'c-new' };
+  const cached = [
+    { ...ownRow, is_read: true },
+    { ...ownRow, id: 'c-old', is_read: false },
+    { ...ownRow, id: 'a-other', account_id: 'a', is_read: false },
+  ];
+  useStore.setState({ accounts: [{ id: 'c', enabled: true, include_in_unified_inbox: false }],
+    selectedAccountId: 'c', messages: [ownRow], searchResults: [], threadMessages: { t: cached } });
+  useStore.getState().updateMessage('c-old', { is_read: false });
+  assert.equal(useStore.getState().messages[0].unread_count, 1);
+  assert.equal(useStore.getState().messages[0].is_read, false);
 });

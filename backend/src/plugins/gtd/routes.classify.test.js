@@ -103,7 +103,8 @@ beforeEach(() => {
   Object.values(imapManager).forEach(fn => fn.mockReset());
   getGtdConfig.mockReset();
   getGtdConfig.mockResolvedValue({ enabled: true, folders: DEFAULT_GTD_FOLDERS });
-  imapManager.copyMessage.mockResolvedValue(77);
+  imapManager.copyMessage.mockImplementation(async (_accountId, _uid, _from, _to, options) =>
+    options?.copyIntent ? { applied: true, uid: 77 } : 77);
   // By default the server confirms a surviving copy, and the account is not Gmail.
   imapManager.hasMessageCopy.mockResolvedValue(true);
   imapManager.isLabelStore.mockReturnValue(false);
@@ -226,7 +227,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, folder: 'Watch', applied: true, undoToken: null, switched: true, sourceRemoved: false });
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch', { copyIntent: { sourceId: MSG_ID, messageId: inboxMsg.message_id } });
     expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(ACCT_ID, 42, 'Todo');
     expect(imapManager.copyMessage.mock.invocationCallOrder[0]).toBeLessThan(imapManager.removeMessageCopy.mock.invocationCallOrder[0]);
   });
@@ -257,7 +258,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     expect(live.get('INBOX:10')).toBe('<m@x>');
   });
 
-  it('preserves live old copies when earlier non-UIDPLUS COPY acknowledgements copied no stale UID', async () => {
+  it('keeps old members when per-copy Watch cannot confirm a non-UIDPLUS COPY', async () => {
     const live = new Map([['Reference:98', '<m@x>']]);
     stubQueries({ threadCopies: [
       { ...inboxMsg },
@@ -268,15 +269,59 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     imapManager.copyMessage.mockImplementation(async (_account, uid, from, to) => {
       const identity = live.get(`${from}:${uid}`);
       if (identity) live.set(`${to}:${nextUid++}`, identity);
-      return null; // IMAP may acknowledge COPY of a vanished UID without UIDPLUS.
+      throw Object.assign(new Error('COPY outcome is unconfirmed'), { code: 'label-copy-unconfirmed' });
+    });
+    imapManager.removeMessageCopy.mockImplementation(async (_account, uid, folder) => {
+      live.delete(`${folder}:${uid}`);
+    });
+    const res = await classify({ messageId: MSG_ID, state: 'watch' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'label-copy-unconfirmed', retryable: true });
+    expect([...live.values()]).toContain('<m@x>');
+    expect([...live.keys()]).toEqual(['Reference:98']);
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch', { copyIntent: { sourceId: MSG_ID, messageId: inboxMsg.message_id } });
+  });
+
+  it('Gmail: preserves live old copies when earlier non-UIDPLUS COPY acknowledgements copied no stale UID', async () => {
+    imapManager.isLabelStore.mockReturnValue(true);
+    const identity = '<stale-uid@synthetic.test>';
+    const msg = { ...inboxMsg, message_id: identity };
+    // Cached INBOX:10 and Todo:42 are stale. Reference:98 is the only live mail.
+    const live = new Map([['Reference:98', identity]]);
+    stubQueries({ msg, threadCopies: [
+      msg,
+      { uid: 42, folder: 'Todo', message_id: identity },
+      { uid: 98, folder: 'Reference', message_id: identity },
+    ] });
+    let nextUid = 100;
+    imapManager.copyMessage.mockImplementation(async (_account, uid, from, to) => {
+      const content = live.get(`${from}:${uid}`);
+      if (content) live.set(`${to}:${nextUid++}`, content);
+      return null; // OK without COPYUID does not establish that a stale UID copied mail.
     });
     imapManager.removeMessageCopy.mockImplementation(async (_account, uid, folder) => {
       live.delete(`${folder}:${uid}`);
     });
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
     expect(res.status).toBe(200);
-    expect([...live.values()]).toContain('<m@x>');
+    expect(await res.json()).toEqual({ ok: true, folder: 'Watch', applied: true, undoToken: null,
+      switched: true, sourceRemoved: false });
+    expect([...live.values()]).toContain(identity);
     expect([...live.keys()].every(key => key.startsWith('Watch:'))).toBe(true);
+    expect([...live]).toEqual([['Watch:100', identity]]);
+    // Keep the unchanged four-argument Gmail contract and prove every cached
+    // physical source is attempted before stripping either old state.
+    expect(imapManager.copyMessage.mock.calls).toEqual([
+      [ACCT_ID, 10, 'INBOX', 'Watch'],
+      [ACCT_ID, 42, 'Todo', 'Watch'],
+      [ACCT_ID, 98, 'Reference', 'Watch'],
+    ]);
+    expect(imapManager.removeMessageCopy.mock.calls).toEqual([
+      [ACCT_ID, 42, 'Todo'], [ACCT_ID, 98, 'Reference'],
+    ]);
+    expect(imapManager.copyMessage.mock.invocationCallOrder.at(-1))
+      .toBeLessThan(imapManager.removeMessageCopy.mock.invocationCallOrder[0]);
   });
 
   it.each(['source', 'destination'])('preserves a member when the %s cache identity differs from live mail', async (stale) => {
@@ -368,7 +413,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     stubQueries({ folders: ['Watch', 'Todo'], siblings: { Watch: 41, Todo: 42 } });
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
     expect(res.status).toBe(200);
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch', { copyIntent: { sourceId: MSG_ID, messageId: inboxMsg.message_id } });
     expect(imapManager.copyMessage.mock.invocationCallOrder[0]).toBeLessThan(imapManager.removeMessageCopy.mock.invocationCallOrder[0]);
   });
 
@@ -389,7 +434,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
 
     expect(res.status).toBe(200);
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch', { copyIntent: { sourceId: MSG_ID, messageId: inboxMsg.message_id } });
     expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(ACCT_ID, 42, 'Todo');
   });
 
@@ -402,7 +447,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
   });
 
-  it('switches from a selected GTD folder copy even without a Message-ID', async () => {
+  it('Gmail: switches from a selected GTD folder copy even without a Message-ID', async () => {
+    imapManager.isLabelStore.mockReturnValue(true);
     stubQueries({ msg: { ...inboxMsg, folder: 'Todo', message_id: null } });
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
 
@@ -421,7 +467,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(ACCT_ID, 77, 'Watch');
   });
 
-  it('retains a non-UIDPLUS target copy after old-state removal fails', async () => {
+  it('Gmail: retains a non-UIDPLUS target copy after old-state removal fails', async () => {
+    imapManager.isLabelStore.mockReturnValue(true);
     stubQueries({ folders: ['Todo'], siblings: { Todo: 42 } });
     const originalQuery = query.getMockImplementation();
     let watchLookups = 0;
@@ -443,7 +490,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(ACCT_ID, 88, 'Watch');
   });
 
-  it('reports the removal error without trying rollback before destination sync', async () => {
+  it('Gmail: reports the removal error without trying rollback before destination sync', async () => {
+    imapManager.isLabelStore.mockReturnValue(true);
     stubQueries({ folders: ['Todo'], siblings: { Todo: 42 } });
     imapManager.copyMessage.mockResolvedValueOnce(null);
     imapManager.removeMessageCopy.mockRejectedValueOnce(new Error('cannot remove Todo'));
@@ -460,7 +508,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     }
   });
 
-  it('removes the selected old-state row last so a failed switch remains retryable', async () => {
+  it('Gmail: removes the selected old-state row last so a failed switch remains retryable', async () => {
+    imapManager.isLabelStore.mockReturnValue(true);
     stubQueries({ msg: { ...inboxMsg, folder: 'Todo' }, threadCopies: [
       { uid: 10, folder: 'Todo' },
       { uid: 98, folder: 'Reference' },
@@ -473,7 +522,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(ACCT_ID, 10, 'Todo');
   });
 
-  it('retains a fresh target UID when the source has no Message-ID', async () => {
+  it('Gmail: retains a fresh target UID when the source has no Message-ID', async () => {
+    imapManager.isLabelStore.mockReturnValue(true);
     stubQueries({ msg: { ...inboxMsg, folder: 'Todo', message_id: null } });
     imapManager.removeMessageCopy.mockRejectedValueOnce(new Error('cannot remove Todo'));
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
@@ -490,9 +540,10 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
       { uid: 98, folder: 'Reference', message_id: '<invoice@example.test>' },
     ] });
     let nextUid = 100;
-    imapManager.copyMessage.mockImplementation(async (_acct, uid, from, to) => {
+    imapManager.copyMessage.mockImplementation(async (_acct, uid, from, to, options) => {
       live.set(`${to}:${nextUid}`, live.get(`${from}:${uid}`));
-      return nextUid++;
+      const copiedUid = nextUid++;
+      return options?.copyIntent ? { applied: true, uid: copiedUid } : copiedUid;
     });
     imapManager.removeMessageCopy.mockImplementation(async (_acct, uid, folder) => {
       live.delete(`${folder}:${uid}`);
@@ -519,6 +570,47 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     expect(res.status).toBe(500);
     expect((await res.json()).error).toMatch(/failed to apply gtd label/i);
   });
+
+  it('preserves a recovered Watch UID with applied:false before removing Todo, with no extra COPY', async () => {
+    stubQueries({ folders: ['INBOX', 'Todo'], siblings: { Todo: 42 } });
+    imapManager.copyMessage.mockResolvedValueOnce({ applied: false, uid: 77 });
+    const res = await classify({ messageId: MSG_ID, state: 'watch' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, folder: 'Watch', applied: false, undoToken: null, switched: true, sourceRemoved: false });
+    expect(imapManager.copyMessage).toHaveBeenCalledExactlyOnceWith(ACCT_ID, 10, 'INBOX', 'Watch', {
+      copyIntent: { sourceId: MSG_ID, messageId: inboxMsg.message_id },
+    });
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(ACCT_ID, 42, 'Todo');
+    expect(imapManager.copyMessage.mock.invocationCallOrder[0]).toBeLessThan(imapManager.removeMessageCopy.mock.invocationCallOrder[0]);
+  });
+
+  it.each([500, 409])('releases the Watch guard after a %s response before the next session retries', async status => {
+    const error = Object.assign(new Error('synthetic classification failure'), status === 409 ? { code: 'label-copy-unconfirmed' } : {});
+    imapManager.copyMessage.mockRejectedValueOnce(error);
+    const first = await classify({ messageId: MSG_ID, state: 'watch' });
+    expect(first.status).toBe(status);
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    const retry = await classify({ messageId: MSG_ID, state: 'watch' });
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ applied: true });
+    expect(imapManager.copyMessage).toHaveBeenCalledTimes(2);
+    expect(imapManager.copyMessage).toHaveBeenNthCalledWith(2, ACCT_ID, 10, 'INBOX', 'Watch', {
+      copyIntent: { sourceId: MSG_ID, messageId: inboxMsg.message_id },
+    });
+  });
+
+  it('returns a per-copy headerless Watch hold without deleting the selected old state', async () => {
+    stubQueries({ msg: { ...inboxMsg, folder: 'Todo', message_id: null } });
+    imapManager.copyMessage.mockRejectedValueOnce(Object.assign(new Error('Identity is unverifiable'), { code: 'label-copy-unconfirmed' }));
+    const res = await classify({ messageId: MSG_ID, state: 'watch' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'label-copy-unconfirmed', retryable: true });
+    expect(imapManager.copyMessage).toHaveBeenCalledExactlyOnceWith(ACCT_ID, 10, 'Todo', 'Watch', {
+      copyIntent: { sourceId: MSG_ID, messageId: null },
+    });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+  });
+
 });
 
 describe('DELETE /api/gtd/classify — remove a GTD label', () => {

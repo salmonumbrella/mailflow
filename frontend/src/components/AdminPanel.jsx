@@ -40,6 +40,7 @@ import { formatDateTime, formatDay, formatTime } from '../utils/formatDate.js';
 import { htmlLang } from '../utils/browserLanguage.js';
 import SpamSettings from './SpamSettings.jsx';
 import BackupSettings from './BackupSettings.jsx';
+import SearchCoverage from './SearchCoverage.jsx';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -400,6 +401,19 @@ function AccountForm({ initial, onSave, onCancel }) {
         </div>
       </Field>
 
+      {isEdit && (initial.fastmail_verification_supported || initial.fastmail_api_token_configured) && (
+        <Field label={t('admin.accounts.fastmailVerification.token')}>
+          <input type="password" autoComplete="new-password"
+            aria-label={t('admin.accounts.fastmailVerification.token')}
+            value={form.fastmail_api_token || ''} onChange={e => set('fastmail_api_token', e.target.value)} style={inputStyle} />
+          <p style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('admin.accounts.fastmailVerification.help')}</p>
+          {initial.fastmail_api_token_configured && <>
+            <span style={{ fontSize: 12 }}>{t('admin.accounts.fastmailVerification.configured')}</span>
+            <button type="button" onClick={() => set('fastmail_api_token', '')}>{t('admin.accounts.fastmailVerification.clear')}</button>
+          </>}
+        </Field>
+      )}
+
       <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
       <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
         {t('admin.accounts.signatureSection')}
@@ -644,8 +658,10 @@ function AccountsTab() {
   };
 
   const handleEdit = async (form) => {
+    const countGeneration = useStore.getState().countGeneration;
     const updates = { name: form.name, sender_name: form.sender_name || null, color: form.color, icon: form.icon || null, imap_host: form.imap_host, imap_port: form.imap_port, imap_skip_tls_verify: !!form.imap_skip_tls_verify, smtp_host: form.smtp_host, smtp_port: form.smtp_port, smtp_tls: form.smtp_tls, signature: form.signature || null, categorization_enabled: !!form.categorization_enabled, antispam_enabled: !!form.antispam_enabled, trusted_authserv_id: (form.trusted_authserv_id || '').trim() || null, include_in_unified_inbox: form.include_in_unified_inbox !== false };
     Object.assign(updates, autoRecipientFields(form), { signature_enabled: form.signature_enabled !== false });
+    if (Object.hasOwn(form, 'fastmail_api_token')) updates.fastmail_api_token = form.fastmail_api_token;
     if (form.auth_pass) updates.auth_pass = form.auth_pass;
     if (form.auth_user) updates.auth_user = form.auth_user;
     // Separate SMTP credentials (optional). A username sends both (a blank password on
@@ -658,8 +674,9 @@ function AccountsTab() {
       updates.smtp_auth_pass = null;
     }
     const updated = await api.updateAccount(editTarget.id, updates);
-    updateAccount(editTarget.id, updated);
-    api.getUnreadCounts().then(setUnreadCounts).catch(console.error);
+    if (countGeneration !== useStore.getState().countGeneration || useStore.getState().isLocked) return;
+    updateAccount(editTarget.id, updated, countGeneration);
+    api.getUnreadCounts().then(counts => setUnreadCounts(counts, countGeneration)).catch(console.error);
     setSubview('list');
     setEditTarget(null);
   };
@@ -670,8 +687,10 @@ function AccountsTab() {
       message: 'All synced messages for this account will be deleted. This cannot be undone.',
       confirmLabel: 'Remove',
       onConfirm: async () => {
+        const countGeneration = useStore.getState().countGeneration;
         await api.deleteAccount(id);
-        setAccounts(accounts.filter(a => a.id !== id));
+        if (countGeneration !== useStore.getState().countGeneration || useStore.getState().isLocked) return;
+        setAccounts(useStore.getState().accounts.filter(a => a.id !== id), countGeneration);
       },
     });
   };
@@ -1247,6 +1266,13 @@ function AccountsTab() {
                   </div>
                 )}
               </div>
+            )}
+            {!useStore.getState().isLocked && useStore.getState().user?.id && (
+              <SearchCoverage
+                key={`${account.id}:${useStore.getState().countGeneration}`}
+                accountId={account.id}
+                sessionGeneration={useStore.getState().countGeneration}
+              />
             )}
           </div>
         </div>

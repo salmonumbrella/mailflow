@@ -17,6 +17,7 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { holdSend, cancelSend, getSendStatus } from '../services/sendHold.js';
 import { deleteSentDraft } from './draft.js';
 import { truncateFilename, safeFilename } from '../utils/contentDisposition.js';
+import { classifyFastmailSender, readFastmailIdentities } from '../services/fastmailIdentities.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -26,6 +27,7 @@ function escapeHtml(str) {
 
 // Map SMTP/connection errors to user-friendly messages that don't expose server internals.
 function sanitizeSmtpError(err) {
+  if (err.code === 'SENDER_UNAVAILABLE') return err.publicMessage;
   const msg = err.message || '';
   if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EHOSTUNREACH/i.test(msg)) {
     return 'Could not connect to the mail server. Check your SMTP settings.';
@@ -43,6 +45,17 @@ function sanitizeSmtpError(err) {
     return 'Secure connection to the mail server failed. Check your TLS settings.';
   }
   return 'Failed to send message. Please try again.';
+}
+
+function senderUnavailable(message) {
+  return Object.assign(new Error(message), { code: 'SENDER_UNAVAILABLE', publicMessage: message, status: 422 });
+}
+
+async function verifySender(account, email) {
+  const inventory = await readFastmailIdentities(account);
+  if (classifyFastmailSender(inventory, email) === 'unavailable') {
+    throw senderUnavailable('Fastmail does not list this address as a sending identity.');
+  }
 }
 
 // Extract name and email from an RFC 5322 address string.
@@ -239,6 +252,7 @@ router.post('/send', async (req, res) => {
       'SELECT * FROM account_aliases WHERE id = $1 AND account_id = $2',
       [aliasId, accountId]
     );
+    if (!aliasResult.rows.length) return res.status(422).json({ error: 'The selected sender is no longer available. Select a sender again.' });
     if (aliasResult.rows.length) {
       const alias = aliasResult.rows[0];
       fromName = alias.name;
@@ -248,6 +262,9 @@ router.post('/send', async (req, res) => {
       if (alias.signature !== null) fromSignature = alias.signature;
     }
   }
+
+  try { await verifySender(account, fromEmail); }
+  catch (error) { return res.status(error.status || 503).json({ error: error.publicMessage || 'Could not verify this sender with Fastmail.' }); }
 
   // Allow the client to override the signature per-send (editedSignature === undefined means use DB value).
   // Sanitize client-supplied HTML to prevent injecting scripts or tracking pixels into sent mail.
@@ -482,6 +499,23 @@ router.post('/send', async (req, res) => {
       let rejected = [];
       let learning = Promise.resolve(); // never rejects: its errors are logged inside
       try {
+        if (holdMs) {
+          const fresh = (await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, userId])).rows[0];
+          if (!fresh || fresh.enabled === false) throw senderUnavailable('The selected sender account is no longer available.');
+          let currentEmail = fresh.email_address;
+          if (aliasId) {
+            const currentAlias = (await query('SELECT email FROM account_aliases WHERE id = $1 AND account_id = $2', [aliasId, accountId])).rows[0];
+            if (!currentAlias) throw senderUnavailable('The selected sender is no longer available. Select a sender again.');
+            currentEmail = currentAlias.email;
+          }
+          // The transport was prepared before the hold. Do not combine changed credentials
+          // with permission evidence for a different account, or silently change From.
+          const transportFields = ['smtp_host', 'smtp_port', 'smtp_tls', 'smtp_auth_user', 'smtp_auth_pass', 'auth_user', 'auth_pass'];
+          if (currentEmail !== fromEmail || transportFields.some(key => fresh[key] !== account[key])) {
+            throw senderUnavailable('The selected sender account changed. Review it and send again.');
+          }
+          await verifySender(fresh, fromEmail);
+        }
         const info = await transport.sendMail(mailOptions);
         delivered = true;
         // A server that accepts some recipients and refuses others at RCPT still resolves, so
@@ -680,7 +714,7 @@ router.post('/send', async (req, res) => {
         console.error('Send failed:', err.message);
         // A failure before reservation must not delete a concurrent request's lock.
         if (idemKeyRedis && reservationAcquired) redisClient.del(idemKeyRedis).catch(() => {});
-        throw Object.assign(new Error('Send failed'), { publicMessage: sanitizeSmtpError(err) });
+        throw Object.assign(new Error('Send failed'), { publicMessage: sanitizeSmtpError(err), code: err.code, status: err.status });
       }
     };
 
@@ -700,11 +734,11 @@ router.post('/send', async (req, res) => {
 
     res.json(await deliverAndRecord());
   } catch (err) {
-    if (err.publicMessage) return res.status(500).json({ error: err.publicMessage });
+    if (err.publicMessage) return res.status(err.code === 'SENDER_UNAVAILABLE' ? 422 : 500).json({ error: err.publicMessage });
     console.error('Send failed:', err.message);
     // A failure before reservation must not delete a concurrent request's lock.
     if (idemKeyRedis && reservationAcquired) redisClient.del(idemKeyRedis).catch(() => {});
-    res.status(500).json({ error: sanitizeSmtpError(err) });
+    res.status(err.code === 'SENDER_UNAVAILABLE' ? 422 : 500).json({ error: sanitizeSmtpError(err) });
   }
 });
 
