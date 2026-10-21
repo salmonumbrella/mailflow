@@ -9,6 +9,9 @@ const TIMEOUT_MS = 10000;
 function address(value) {
   if (typeof value !== 'string' || value.length > 254 || /[\p{Cc}\p{Cf}]/u.test(value)
     || !/^[^\s<>@]+@[^\s<>@]+$/.test(value)) return null;
+  const [local, domain] = value.split('@');
+  if (local.length > 64 || !/^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*$/i.test(local)
+    || domain.split('.').some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))) return null;
   return value.toLowerCase();
 }
 
@@ -119,7 +122,7 @@ export async function readGmailIdentities(account) {
   const rows = data.sendAs;
   if (rows.some(row => !row || !address(row.sendAsEmail)
     || (row.isPrimary !== undefined && typeof row.isPrimary !== 'boolean')
-    || (row.verificationStatus !== undefined && !['accepted', 'pending'].includes(row.verificationStatus)))) {
+    || (row.verificationStatus !== undefined && !['accepted', 'pending', 'verificationStatusUnspecified'].includes(row.verificationStatus)))) {
     return unavailable('invalid_response');
   }
   const primaries = rows.filter(row => row.isPrimary === true);

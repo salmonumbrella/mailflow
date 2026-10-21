@@ -49,6 +49,16 @@ describe('readGmailIdentities', () => {
     }));
   });
 
+  it('keeps primary and accepted identities when a custom alias has unspecified verification', async () => {
+    safeFetch.mockResolvedValue(response({ sendAs: [primary(),
+      { sendAsEmail: 'accepted@synthetic.test', verificationStatus: 'accepted' },
+      { sendAsEmail: 'unspecified@synthetic.test', verificationStatus: 'verificationStatusUnspecified' },
+    ] }));
+    expect(await readGmailIdentities(account())).toMatchObject({ identityStatus: 'ready', reason: null,
+      identities: [{ email: 'primary@synthetic.test' }, { email: 'accepted@synthetic.test' }],
+    });
+  });
+
   it.each([
     [{ enabled: false }, 'account_disabled'],
     [{ oauth_provider: null, oauth_access_token: null }, 'credentials_missing'],
@@ -111,10 +121,13 @@ describe('readGmailIdentities', () => {
 
   it('uses the database email_address column and does not dot-fold or alias Google domains', async () => {
     expect(account()).not.toHaveProperty('email');
-    for (const different of ['pri.mary@synthetic.test', 'primary@googlemail.com']) {
+    for (const different of ['synthetic.fixture@googlemail.com', 'syntheticfixture@gmail.com']) {
       safeFetch.mockResolvedValue(response({ sendAs: [primary(different)] }));
-      expect(await readGmailIdentities(account())).toMatchObject({ reason: 'account_mismatch', identities: [] });
+      expect(await readGmailIdentities(account({ email_address: 'synthetic.fixture@gmail.com' })))
+        .toMatchObject({ reason: 'account_mismatch', identities: [] });
     }
+    safeFetch.mockResolvedValue(response({ sendAs: [primary('SYNTHETIC.FIXTURE@GMAIL.COM')] }));
+    expect((await readGmailIdentities(account({ email_address: 'synthetic.fixture@gmail.com' }))).identityStatus).toBe('ready');
   });
 
   it('uses stable disabled-API, scope, quota precedence for mixed reasons regardless of order', async () => {
@@ -131,7 +144,7 @@ describe('readGmailIdentities', () => {
   });
 
   it('returns Retry-After only for quota errors with bounded valid header values', async () => {
-    for (const [header, expected] of [['30', 30], ['0', 0], ['-1', undefined], ['1.5', undefined],
+    for (const [header, expected] of [['30', 30], ['0', 0], ['86400', 86400], ['86401', undefined], ['-1', undefined], ['1.5', undefined],
       ['999999999999999999999', undefined], [SECRET, undefined]]) {
       safeFetch.mockResolvedValue(new Response(JSON.stringify({ error: { errors: [{ reason: 'quotaExceeded' }] } }),
         { status: 403, headers: { 'Retry-After': header } }));
@@ -141,6 +154,25 @@ describe('readGmailIdentities', () => {
     }
     safeFetch.mockResolvedValue(new Response('{}', { status: 403, headers: { 'Retry-After': '30' } }));
     expect(await readGmailIdentities(account())).not.toHaveProperty('retryAfter');
+  });
+
+  it('supports HTTP-date Retry-After bounds and omits it when a higher-priority reason wins', async () => {
+    const now = Date.parse('2026-10-21T00:00:00Z');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      for (const seconds of [-1, 0, 30, 86400, 86401]) {
+        safeFetch.mockResolvedValue(new Response('{}', { status: 429,
+          headers: { 'Retry-After': new Date(now + seconds * 1000).toUTCString() } }));
+        expect((await readGmailIdentities(account())).retryAfter)
+          .toBe(seconds >= 0 && seconds <= 86400 ? seconds : undefined);
+      }
+      for (const reason of ['SERVICE_DISABLED', 'ACCESS_TOKEN_SCOPE_INSUFFICIENT']) {
+        safeFetch.mockResolvedValue(new Response(JSON.stringify({ error: { details: [
+          { reason: 'RATE_LIMIT_EXCEEDED' }, { reason },
+        ] } }), { status: 403, headers: { 'Retry-After': '30' } }));
+        expect(await readGmailIdentities(account())).not.toHaveProperty('retryAfter');
+      }
+    } finally { clock.mockRestore(); }
   });
 
   it('fails closed on missing credentials and does not fetch with a corrupt token', async () => {
@@ -158,18 +190,28 @@ describe('readGmailIdentities', () => {
     expect(await readGmailIdentities(account())).toMatchObject({ identityStatus: 'unknown', reason: 'account_mismatch', identities: [] });
   });
 
+  it.each(['alias@synthetic.test/path', 'alias@synthetic.test,other', 'alias@synthetic.test:443',
+    'alias@-synthetic.test', 'alias@synthetic..test', 'alias@synthetic.test-',
+    '.alias@synthetic.test', 'alias..name@synthetic.test', 'alias,name@synthetic.test']) (
+    'rejects the entire inventory when an accepted alias is malformed: %s', async email => {
+      safeFetch.mockResolvedValue(response({ sendAs: [primary(), { sendAsEmail: email, verificationStatus: 'accepted' }] }));
+      expect(await readGmailIdentities(account())).toMatchObject({ identityStatus: 'unknown', reason: 'invalid_response', identities: [] });
+    },
+  );
+
   it.each([
     {}, { sendAs: null }, { sendAs: [primary(), null] },
     { sendAs: [primary(), { sendAsEmail: 'bad\r\naddress@synthetic.test', verificationStatus: 'accepted' }] },
     { sendAs: [primary(), { sendAsEmail: 'a@synthetic.test', isPrimary: 'true' }] },
+    { sendAs: [primary(), { sendAsEmail: 'a@synthetic.test', verificationStatus: 'rejected' }] },
   ])('rejects malformed inventory completely instead of claiming a partial ready list', async (body) => {
     safeFetch.mockResolvedValue(response(body));
     expect(await readGmailIdentities(account())).toMatchObject({ identityStatus: 'unknown', reason: 'invalid_response', identities: [] });
   });
 
-  it('refuses invalid JSON, oversized bodies and redirect responses', async () => {
+  it('refuses invalid JSON and redirect responses', async () => {
     for (const reply of [
-      new Response('{'), new Response('x'.repeat(262145)),
+      new Response('{'),
       new Response('', { status: 302, headers: { Location: 'https://other.synthetic.test/' } }),
     ]) {
       safeFetch.mockResolvedValueOnce(reply);
@@ -177,7 +219,77 @@ describe('readGmailIdentities', () => {
       expect(result.identityStatus).toBe('unknown');
       expect(result.identities).toEqual([]);
     }
-    expect(safeFetch).toHaveBeenCalledTimes(3);
+    expect(safeFetch).toHaveBeenCalledTimes(2);
+  });
+
+  const bodyAtSize = size => {
+    const body = JSON.stringify({ sendAs: [primary()], padding: '' });
+    return new TextEncoder().encode(body.replace('"padding":""', `"padding":"${'x'.repeat(size - body.length)}"`));
+  };
+
+  it('accepts valid exact-cap JSON and rejects valid over-cap JSON without relying on parse failure', async () => {
+    for (const size of [262144, 262145]) {
+      const bytes = bodyAtSize(size);
+      expect(bytes.byteLength).toBe(size);
+      expect(JSON.parse(new TextDecoder().decode(bytes)).sendAs).toEqual([primary()]);
+      safeFetch.mockResolvedValue(new Response(bytes, { headers: { 'Content-Length': String(size) } }));
+      expect((await readGmailIdentities(account())).identityStatus).toBe(size === 262144 ? 'ready' : 'unknown');
+    }
+  });
+
+  it('cancels a declared oversized body before reading it', async () => {
+    const cancel = vi.fn();
+    const read = vi.fn();
+    const body = new ReadableStream({ pull: read, cancel }, { highWaterMark: 0 });
+    safeFetch.mockResolvedValue(new Response(body, { headers: { 'Content-Length': '262145' } }));
+    expect(await readGmailIdentities(account())).toMatchObject({ reason: 'invalid_response', identities: [] });
+    expect(read).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels an unknown-length multi-chunk body at the first byte over the cap', async () => {
+    const bytes = bodyAtSize(262145);
+    const cancel = vi.fn();
+    const chunks = [bytes.slice(0, 131072), bytes.slice(131072, 262144), bytes.slice(262144)];
+    let pulled = 0;
+    const body = new ReadableStream({
+      pull(controller) { controller.enqueue(chunks[pulled++]); }, cancel,
+    }, { highWaterMark: 0 });
+    safeFetch.mockResolvedValue(new Response(body));
+    expect(await readGmailIdentities(account())).toMatchObject({ reason: 'invalid_response', identities: [] });
+    expect(pulled).toBe(3);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['fetch', 'body'])('aborts a stalled %s at its deadline, with one provider request', async stage => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('Deadline', 'TimeoutError')), ms);
+      return controller.signal;
+    });
+    let aborted = false;
+    safeFetch.mockImplementation((_url, { signal }) => {
+      if (stage === 'fetch') return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => { aborted = true; reject(signal.reason); }, { once: true });
+      });
+      const body = new ReadableStream({ start(controller) {
+        signal.addEventListener('abort', () => { aborted = true; controller.error(signal.reason); }, { once: true });
+      } });
+      return Promise.resolve(new Response(body));
+    });
+    try {
+      let settled = false;
+      const pending = readGmailIdentities(account()).then(result => { settled = true; return result; });
+      await vi.advanceTimersByTimeAsync(9999);
+      expect(settled).toBe(false);
+      expect(aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toMatchObject({ identityStatus: 'unknown', identities: [] });
+      expect(aborted).toBe(true);
+      expect(timeout).toHaveBeenCalledWith(10000);
+      expect(safeFetch).toHaveBeenCalledTimes(1);
+    } finally { timeout.mockRestore(); vi.useRealTimers(); }
   });
 
   it('bounds the provider request and sanitizes network/timeout failures', async () => {
