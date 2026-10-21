@@ -9,6 +9,7 @@ import { finished } from 'stream/promises';
 import { createGunzip, createGzip } from 'zlib';
 import pg from 'pg';
 import { decrypt, encrypt, isEncrypted } from './encryption.js';
+import { resetSearchIndexLeasesAfterRestore } from './searchIndexJobs.js';
 
 // Format 1, written before json and jsonb travelled as text, could not tell a JSON null from
 // SQL NULL, so it is not read.
@@ -37,6 +38,7 @@ export const SETUP_TABLES = [
   'plugin_account_config',
   'plugin_data',
   'push_subscriptions',
+  'search_index_accounts',
   'snoozed_messages',
   'spam_models',
   'spam_training_deletions',
@@ -48,7 +50,7 @@ export const SETUP_TABLES = [
   'users',
 ];
 // The local copy of the mail on the IMAP servers. Synced again after a restore that leaves it out.
-export const MAIL_CACHE_TABLES = ['archive_coverage', 'folders', 'messages', 'unfetchable_uids', 'search_text_generations', 'search_text_chunks'];
+export const MAIL_CACHE_TABLES = ['archive_coverage', 'folders', 'messages', 'unfetchable_uids', 'search_text_generations', 'search_text_chunks', 'search_index_jobs'];
 // Short-lived tokens that are worthless minutes later.
 export const TRANSIENT_TABLES = ['ai_codex_device_flows', 'email_otp_tokens', 'password_reset_tokens'];
 // The record of which migrations shaped the schema the rows are written back into.
@@ -504,6 +506,7 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
       const next = (BigInt(value) > here ? BigInt(value) : here) + 1n;
       await client.query(`ALTER SEQUENCE ${ident(name)} RESTART WITH ${next}`);
     }
+    if (present.has('search_index_jobs')) await resetSearchIndexLeasesAfterRestore(client);
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
