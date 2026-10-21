@@ -1,0 +1,164 @@
+name: Verify reviewed integrations
+
+on:
+  push:
+    branches: ["verification/ci-mailflow-final-features-v33"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mailflow-reviewed-integrations-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'salmonumbrella/mailflow'
+    name: Verify ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - label: mailflow-combined-features-v33
+            source_sha: c5ff51d2e7b09cca70c8bc23941eb913d34fec5d
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: salmonumbrella/mailflow
+          ref: ${{ matrix.source_sha }}
+          persist-credentials: false
+
+      - name: Assert exact tested source
+        id: pin
+        env:
+          EXPECTED_SHA: ${{ matrix.source_sha }}
+        run: |
+          actual_sha=$(git rev-parse HEAD)
+          echo "actual_sha=$actual_sha" >> "$GITHUB_OUTPUT"
+          test "$actual_sha" = "$EXPECTED_SHA"
+          if git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null; then
+            echo 'Unexpected persisted checkout credential header' >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v6
+        id: node
+        with:
+          node-version: "22"
+          package-manager-cache: false
+          token: ''
+
+      - name: Backend install
+        id: backend_ci
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: backend
+        run: npm ci
+
+      - name: Backend lint
+        id: backend_lint
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: backend
+        run: npm run lint
+
+      - name: Backend plugin boundary
+        id: backend_plugins
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: backend
+        run: npm run lint:plugins
+
+      - name: Backend syntax
+        id: backend_syntax
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: backend
+        run: node --check src/index.js
+
+      - name: Backend tests
+        id: backend_test
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: backend
+        run: npm test
+
+      - name: Backend audit
+        id: backend_audit
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: backend
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Frontend install
+        id: frontend_ci
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend lint
+        id: frontend_lint
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Frontend build
+        id: frontend_build
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: frontend
+        run: npm run build
+
+      - name: Frontend tests
+        id: frontend_test
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: frontend
+        run: npm test
+
+      - name: Frontend audit
+        id: frontend_audit
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Record exact-source results and enforce all gates
+        if: always()
+        env:
+          EXPECTED_SHA: ${{ matrix.source_sha }}
+          ACTUAL_SHA: ${{ steps.pin.outputs.actual_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          SOURCE_LABEL: ${{ matrix.label }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          NODE_VERSION: ${{ steps.node.outputs.node-version }}
+        run: |
+          python3 - <<'PY'
+          import json, os, platform
+          from pathlib import Path
+          checks = ['backend_ci', 'backend_lint', 'backend_plugins',
+                    'backend_syntax', 'backend_test', 'backend_audit',
+                    'frontend_ci', 'frontend_lint', 'frontend_build',
+                    'frontend_test', 'frontend_audit']
+          steps = json.loads(os.environ['STEPS_JSON'])
+          outcomes = {key: steps.get(key, {}).get('outcome', 'missing') for key in checks}
+          passed = (os.environ['ACTUAL_SHA'] == os.environ['EXPECTED_SHA']
+                    and steps.get('pin', {}).get('outcome') == 'success'
+                    and steps.get('node', {}).get('outcome') == 'success'
+                    and all(value == 'success' for value in outcomes.values()))
+          result = dict(source_sha=os.environ['EXPECTED_SHA'], actual_sha=os.environ['ACTUAL_SHA'],
+                        workflow_sha=os.environ['WORKFLOW_SHA'], label=os.environ['SOURCE_LABEL'],
+                        profile='native GitHub ubuntu-latest; upstream commands and default workers/timeouts',
+                        architecture=platform.machine(), node=os.environ['NODE_VERSION'],
+                        commands=outcomes, status='passed' if passed else 'failed_or_incomplete')
+          print(json.dumps(result, indent=2))
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write('## Exact-source verification\n\n```json\n'
+                            + json.dumps(result, indent=2) + '\n```\n')
+          raise SystemExit(0 if passed else 1)
+          PY
