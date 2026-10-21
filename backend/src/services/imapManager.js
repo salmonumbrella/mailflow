@@ -6262,7 +6262,7 @@ export class ImapManager {
   async _assertWritableSource(account, folder, uids = null) {
     await assertNoArchiveResidue(account.id, folder, uids);
     if (await this._isArchiveFolder(account, folder)) {
-      throw new Error('This action is not supported for archive residue');
+      throw Object.assign(new Error('This action is not supported for archive residue'), { status: 409, code: 'archive-residue-read-only' });
     }
   }
 
@@ -7382,7 +7382,7 @@ export class ImapManager {
     const account = accountResult.rows[0];
     if (!account) throw new Error(`copyMessage: account ${accountId} not found`);
     await this._assertWritableSource(account, fromFolder, [uid]);
-    if (await this._isArchiveFolder(account, toFolder)) throw new Error('Archive residue must be admitted through archive coverage');
+    if (await this._isArchiveFolder(account, toFolder)) throw Object.assign(new Error('Archive residue must be admitted through archive coverage'), { status: 409, code: 'archive-residue-read-only' });
 
     const labelStore = providerProfile(account).labelStore;
     const source = labelStore ? (await query(`SELECT m.provider_msgid,f.uid_validity FROM messages m

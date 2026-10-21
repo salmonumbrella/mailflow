@@ -1177,6 +1177,7 @@ router.post('/folders/delete', async (req, res) => {
   try {
     await imapManager.deleteFolder(check.rows[0], path);
   } catch (err) {
+    if (err.status === 409) return res.status(409).json({ error: err.message, code: err.code || 'archive-residue-read-only' });
     console.error(`IMAP deleteFolder failed for ${path}:`, err.message);
     return res.status(500).json({ error: 'Failed to delete folder on server' });
   }
@@ -1259,6 +1260,7 @@ router.post('/folders/rename', async (req, res) => {
       [accountId, oldPath, childPrefix, newPath]);
     res.json({ ok: true, newPath });
   } catch (err) {
+    if (err.status === 409) return res.status(409).json({ error: err.message, code: err.code || 'archive-residue-read-only' });
     console.error('Rename folder error:', err);
     res.status(500).json({ error: 'Failed to rename folder' });
   }
@@ -1279,6 +1281,12 @@ router.post('/folders/empty', async (req, res) => {
   const check = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
   const account = check.rows[0];
+  // Refuse cached read-only sources before accepting a background job.
+  try { await imapManager._assertWritableSource(account, path); }
+  catch (err) {
+    if (err.status === 409) return res.status(409).json({ error: err.message, code: err.code || 'archive-residue-read-only' });
+    return res.status(500).json({ error: 'Failed to empty folder' });
+  }
 
   const inflightKey = `${accountId}:${path}`;
   if (emptyInFlight.has(inflightKey)) return res.status(409).json({ error: 'This folder is already being emptied' });
@@ -1922,6 +1930,9 @@ router.post('/messages/:id/copy', async (req, res) => {
   `, [message.account_id, folder]);
   const target = destination.rows[0];
   if (!target || message.folder === folder) return res.status(400).json({ error: 'Folder is not a copy target' });
+  if (target.special_use === '\\All') return res.status(409).json({
+    error: 'Archive residue must be admitted through archive coverage', code: 'archive-residue-read-only',
+  });
   const special = String(target.special_use || '').replaceAll('\\', '').toLowerCase();
   const system = new Set(['inbox', 'sent', 'drafts', 'trash', 'junk', 'spam', 'archive', 'all', 'flagged']);
   const names = new Set(['inbox', 'sent', 'drafts', 'trash', 'spam', 'junk', 'archive', 'all mail', 'starred', 'important']);
@@ -1934,6 +1945,7 @@ router.post('/messages/:id/copy', async (req, res) => {
     imapManager.broadcast?.({ type: 'folder_updated', folder, accountId: message.account_id }, req.session.userId);
     res.json({ ok: true, uid });
   } catch (error) {
+    if (error.status === 409) return res.status(409).json({ error: error.message, code: error.code || 'archive-residue-read-only' });
     console.error('Message copy failed:', error.message);
     res.status(502).json({ error: 'Could not copy message' });
   }

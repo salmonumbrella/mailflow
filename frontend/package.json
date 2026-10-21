@@ -10,6 +10,9 @@
     "email": "matthias@mailflow.sh"
   },
   "type": "module",
+  "engines": {
+    "node": ">=22.15 <23"
+  },
   "main": "packages/electron/main.cjs",
   "repository": {
     "type": "git",
