@@ -87,3 +87,10 @@ native Ubuntu x64 GitHub-hosted runner with public npm/Docker registry access.
 There are no credentials or external DB inputs to provide. Execution has not
 validated this harness. Full385 SQL, E10, full migration chain, provider/Mini,
 corpus and performance gates remain open even if the selected subset passes.
+
+Successor to first hosted run39606786966: the original attempt failed before
+any test file at bootstrap SQLSTATE42P18 (format parameter type unknown).
+The sole executable change explicitly casts that parameter to text. Source,
+case selection, resource limits, timeouts and assertions are unchanged. The
+original failure and successful owned cleanup are preserved. This successor
+has not yet executed.

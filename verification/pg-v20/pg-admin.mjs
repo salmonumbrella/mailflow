@@ -32,7 +32,7 @@ if (mode === 'versions') {
     }
     try {
       const ddl = (await db.query(`SELECT format('CREATE ROLE mailflow_fixture LOGIN NOSUPERUSER
-        NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 2 PASSWORD %L', $1) AS ddl`,
+        NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 2 PASSWORD %L', $1::text) AS ddl`,
       [process.env.FJVE_FIXTURE_PASSWORD])).rows[0].ddl;
       await db.query(ddl);
       for (const name of ['mailflow_svtw', 'mailflow_pyws_backup']) {
