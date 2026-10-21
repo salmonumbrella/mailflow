@@ -113,18 +113,29 @@ export function trashFolderExclusionCondition() {
 export const FTS_BODY_CHAR_CAP = 600000;
 
 // Builds the per-term free-text OR-condition: a term matches if it appears in
-// the sender, the subject, the stored search_vector, or the length-capped body.
+// the sender, subject, stored metadata vector, or published body chunks. Legacy
+// cached bodies are considered only until a verified generation is available.
 // Extracted so the body cap is a single, testable source of truth.
 export function freeTextTermCondition(likeIdx, ftsIdx) {
+  const verified = (dictionary, column) => `(numnode(plainto_tsquery('${dictionary}', $${ftsIdx})) > 0
+            AND NOT EXISTS (
+              SELECT 1 FROM unnest(tsvector_to_array(to_tsvector('${dictionary}', $${ftsIdx}))) AS q(lexeme)
+              WHERE NOT EXISTS (SELECT 1 FROM search_text_chunks c WHERE c.generation_id=m.search_generation_id
+                AND c.${column} @@ quote_literal(q.lexeme)::tsquery)))`;
   return `(
         m.from_name ILIKE $${likeIdx}
         OR m.from_email ILIKE $${likeIdx}
         OR m.subject ILIKE $${likeIdx}
         OR m.search_vector @@ plainto_tsquery('english', $${ftsIdx})
-        OR CASE WHEN numnode(plainto_tsquery('english', $${ftsIdx})) > 0
+        OR CASE WHEN m.search_generation_id IS NOT NULL THEN
+          CASE WHEN numnode(plainto_tsquery('english', $${ftsIdx})) > 0
+            THEN ${verified('english', 'en_tsv')}
+            ELSE ${verified('simple', 'simple_tsv')}
+          END
+        ELSE CASE WHEN numnode(plainto_tsquery('english', $${ftsIdx})) > 0
           THEN to_tsvector('english', LEFT(coalesce(m.body_text,''), ${FTS_BODY_CHAR_CAP})) @@ plainto_tsquery('english', $${ftsIdx})
           ELSE to_tsvector('simple', LEFT(coalesce(m.body_text,''), ${FTS_BODY_CHAR_CAP})) @@ plainto_tsquery('simple', $${ftsIdx})
-        END
+        END END
       )`;
 }
 

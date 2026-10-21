@@ -26,6 +26,9 @@ const RELOCATE_EXCLUDED = new Set([
   // Snippet indexer bookkeeping, also never carried. Resetting it costs at most one more
   // snippet fetch for a moved row that has none.
   'snippet_attempted_at',
+  // The destination has a new physical UID/folder. Keep coverage unverified
+  // until the search worker publishes for that locator and folder epoch.
+  'search_generation_id',
 ]);
 
 const TABLE_CONSTRAINT = /^(constraint|primary|unique|check|foreign|exclude)$/i;

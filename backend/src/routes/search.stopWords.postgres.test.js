@@ -28,7 +28,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('stop-word body search 
         in_reply_to text, thread_references text, reply_to jsonb, delivery_addresses jsonb, thread_id text,
         date timestamptz DEFAULT now(), snippet text,
         is_read boolean, is_starred boolean, has_attachments boolean, is_deleted boolean DEFAULT false,
-        search_vector tsvector, body_text text);
+        search_vector tsvector, body_text text, search_generation_id uuid);
+      CREATE TEMP TABLE search_text_chunks (generation_id uuid, en_tsv tsvector, simple_tsv tsvector);
       INSERT INTO email_accounts VALUES
         ('main','owner',true,true,'Primary','owner@example.test',NULL),
         ('other','stranger',true,true,'Other','other@example.test',NULL),
@@ -89,7 +90,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('stop-word body search 
   it('keeps English stemming when a term contains both stop words and significant words', async () => {
     const result = await database.query(`SELECT ${freeTextTermCondition(1, 2)} AS matched FROM
       (SELECT ''::text AS from_name, ''::text AS from_email, ''::text AS subject,
-        ''::tsvector AS search_vector, 'runs swiftly'::text AS body_text) m`,
+        ''::tsvector AS search_vector, 'runs swiftly'::text AS body_text, NULL::uuid AS search_generation_id) m`,
     ['%the running%', 'the running']);
     expect(result.rows[0].matched).toBe(true);
   });
@@ -99,7 +100,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('stop-word body search 
     for (const [padding, expected] of [[599997, true], [599998, false], [600000, false]]) {
       const result = await database.query(`SELECT ${condition} AS matched FROM
         (SELECT ''::text AS from_name, ''::text AS from_email, ''::text AS subject,
-          ''::tsvector AS search_vector, repeat('界', $3::int) || ' we ' AS body_text) m`,
+          ''::tsvector AS search_vector, repeat('界', $3::int) || ' we ' AS body_text, NULL::uuid AS search_generation_id) m`,
       ['%we%', 'we', padding]);
       expect(result.rows[0].matched, String(padding)).toBe(expected);
     }
@@ -117,7 +118,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('stop-word body search 
       const result = await database.query(`SELECT ${condition} AS positive,
         NOT coalesce(${condition},false) AS negative FROM
         (SELECT NULL::text AS from_name, NULL::text AS from_email, NULL::text AS subject,
-          NULL::tsvector AS search_vector, $3::text AS body_text) m`, [`%${term}%`, term, body]);
+          NULL::tsvector AS search_vector, $3::text AS body_text, NULL::uuid AS search_generation_id) m`, [`%${term}%`, term, body]);
       const present = body !== null && tokens.includes(term);
       // Absent body matches may be SQL NULL through nullable metadata; route negation coalesces it.
       expect(result.rows[0].positive === true, JSON.stringify({ i, term, body })).toBe(present);
