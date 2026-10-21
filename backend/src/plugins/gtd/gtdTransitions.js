@@ -169,13 +169,13 @@ export async function runGtdTransitions(imapManager, account, threadKeys) {
           }
         }
         if (!survives) continue;
-        anyStripped = true;
         try {
-          await imapManager.removeMessageCopy(account.id, copy.uid, copy.folder);
+          const removed = await imapManager.removeMessageCopy(account.id, copy.uid, copy.folder, { expectMessageId: copy.message_id });
+          if (removed > 0) anyStripped = true;
         } catch (err) {
           // An external automation may strip the same label concurrently, so the copy
-          // can already be gone on the server. Treat a failed removal as a successful
-          // strip and move on; the stale DB row reconciles on the next sync.
+          // can already be gone on the server. A failed identity check does not confirm
+          // removal; leave the cached result for the next sync to reconcile.
           logger.debug(`gtdTransitions: tolerated removeMessageCopy failure uid=${copy.uid} ${copy.folder}: ${err.message}`);
         }
       }

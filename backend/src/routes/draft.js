@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { randomBytes } from 'crypto';
 import { Router } from 'express';
 import { query } from '../services/db.js';
+import { normalizeMessageId } from '../services/imapIdentity.js';
 import { requireAuth } from '../middleware/auth.js';
 import { sanitizeSignature, sanitizeComposeBody, sanitizeEmail, composeHtmlToText, proxyRemoteImages } from '../services/emailSanitizer.js';
 import { imageProxyPath } from '../services/imageProxy.js';
@@ -497,8 +498,9 @@ router.post('/draft', async (req, res) => {
 });
 
 router.delete('/draft/:uid', async (req, res) => {
-  const uid = parseInt(req.params.uid, 10);
-  if (!uid || !Number.isFinite(uid)) return res.status(400).json({ error: 'Invalid uid' });
+  const rawUid = req.params.uid;
+  if (!/^[1-9]\d{0,9}$/.test(rawUid) || Number(rawUid) > 4294967295) return res.status(400).json({ error: 'Invalid uid' });
+  const uid = Number(rawUid);
 
   const { accountId, folder } = req.query;
   if (!accountId || !folder) return res.status(400).json({ error: 'accountId and folder required' });
@@ -514,12 +516,19 @@ router.delete('/draft/:uid', async (req, res) => {
     if (!(await isDraftsPath(account, folder))) {
       return res.status(400).json({ error: 'Folder is not a Drafts folder' });
     }
-    await imapManager.permanentDeleteMessage(account, uid, folder);
-    await query(
-      'DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3',
+    const { rows: [row] } = await query(
+      'SELECT id, message_id FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 AND is_deleted = false',
       [account.id, uid, folder]
     );
-    noteDraftsChanged(req.session.userId, account.id);
+    if (!row?.id || !normalizeMessageId(row.message_id) ||
+        await imapManager.permanentDeleteMessage(account, uid, folder, { expectMessageId: row.message_id }) !== true) {
+      return res.status(409).json({ error: 'Draft identity could not be confirmed', code: 'message_identity_unverified' });
+    }
+    const removed = await query(
+      'DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 AND id = $4 AND message_id = $5 AND is_deleted = false',
+      [account.id, uid, folder, row.id, row.message_id]
+    );
+    if (removed.rowCount > 0) noteDraftsChanged(req.session.userId, account.id);
     res.json({ ok: true });
   } catch (err) {
     console.error('Delete draft failed:', err.message);

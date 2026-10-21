@@ -411,7 +411,7 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
   beforeEach(() => {
     query.mockReset();
     imapManager.permanentDeleteMessage.mockReset();
-    imapManager.permanentDeleteMessage.mockResolvedValue(undefined);
+    imapManager.permanentDeleteMessage.mockResolvedValue(true);
   });
 
   const del = (qs) => fetch(`${base}/api/mail/draft/9?accountId=${ACCOUNT_ID}&${qs}`, { method: 'DELETE' });
@@ -419,12 +419,13 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
   it('deletes a draft from the Drafts folder', async () => {
     query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });          // owner check
     query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveDraftsFolder
-    query.mockResolvedValueOnce({ rows: [] });                     // DELETE FROM messages
+    query.mockResolvedValueOnce({ rows: [{ id: 'd0000000-0000-4000-8000-000000000009', message_id: '<draft@example.test>' }] }); // captured identity
+    query.mockResolvedValueOnce({ rows: [], rowCount: 1 }); // guarded local DELETE
     imapManager.broadcast.mockReset();
     const res = await del('folder=Drafts');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 9, 'Drafts');
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 9, 'Drafts', { expectMessageId: '<draft@example.test>' });
     expect(draftsChanged()).toEqual([[ACCOUNT_ID, 'user-1']]);
   });
 
@@ -432,10 +433,11 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
     query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });
     query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });
     query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }, { path: 'INBOX.Drafts' }] }); // resolveAllDraftsPaths
-    query.mockResolvedValueOnce({ rows: [] });
+    query.mockResolvedValueOnce({ rows: [{ id: 'd0000000-0000-4000-8000-000000000009', message_id: '<draft@example.test>' }] });
+    query.mockResolvedValueOnce({ rows: [], rowCount: 1 });
     const res = await del('folder=INBOX.Drafts');
     expect(res.status).toBe(200);
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 9, 'INBOX.Drafts');
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 9, 'INBOX.Drafts', { expectMessageId: '<draft@example.test>' });
   });
 
   it('refuses to expunge from a non-Drafts folder', async () => {
@@ -464,10 +466,11 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
     query.mockResolvedValueOnce({ rows: [{ ...ACCOUNT_ROW, folder_mappings: { drafts: 'INBOX.Drafts' } }] });
     query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });   // mappedFolderUsable: usable
     query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });   // special_use \Drafts
-    query.mockResolvedValueOnce({ rows: [] });                    // DELETE FROM messages
+    query.mockResolvedValueOnce({ rows: [{ id: 'd0000000-0000-4000-8000-000000000009', message_id: '<draft@example.test>' }] }); // captured identity
+    query.mockResolvedValueOnce({ rows: [], rowCount: 1 }); // guarded local DELETE
     const res = await del('folder=Drafts');
     expect(res.status).toBe(200);
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 9, 'Drafts');
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 9, 'Drafts', { expectMessageId: '<draft@example.test>' });
   });
 
   it('with the drafts mapping pointing elsewhere, refuses a folder that is neither mapped nor \\Drafts', async () => {

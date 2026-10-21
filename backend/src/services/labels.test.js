@@ -14,7 +14,7 @@ import {
 } from './labels.js';
 
 const account = { id: 'acct-1' };
-const mkImap = () => ({ ensureFolder: vi.fn(), copyMessage: vi.fn(), removeMessageCopy: vi.fn() });
+const mkImap = () => ({ ensureFolder: vi.fn(), copyMessage: vi.fn(), removeMessageCopy: vi.fn().mockResolvedValue(1) });
 
 beforeEach(() => { query.mockReset(); fanOutReadToSiblings.mockReset(); });
 
@@ -86,6 +86,13 @@ describe('applyLabel', () => {
 });
 
 describe('removeExactLabelCopy', () => {
+  it('does not advertise removal after identity refusal by the actual remover', async () => {
+    query.mockResolvedValueOnce({ rows: [{ uid: 77 }] });
+    const imap = mkImap(); imap.removeMessageCopy.mockResolvedValue(0);
+    expect(await removeExactLabelCopy(imap, { account_id: 'acct-1', message_id: '<m>' }, 'Todo', 77))
+      .toEqual({ removed: false });
+  });
+
   const source = { account_id: 'acct-1', message_id: '<source@example.com>', thread_key: 'thread-1' };
 
   it('removes only the requested UID when it belongs to the exact source message', async () => {
@@ -97,7 +104,7 @@ describe('removeExactLabelCopy', () => {
     expect(query).toHaveBeenCalledWith(expect.stringMatching(/message_id = \$4/), [
       'acct-1', 'Todo', 77, '<source@example.com>',
     ]);
-    expect(imap.removeMessageCopy).toHaveBeenCalledWith('acct-1', 77, 'Todo');
+    expect(imap.removeMessageCopy).toHaveBeenCalledWith('acct-1', 77, 'Todo', { expectMessageId: source.message_id });
   });
 
   it('does not remove an absent UID or a UID belonging to another message', async () => {
@@ -125,12 +132,18 @@ describe('removeExactLabelCopy', () => {
 });
 
 describe('removeLabel', () => {
+  it('does not advertise a refused removal', async () => {
+    const imap = mkImap(); imap.removeMessageCopy.mockResolvedValue(0);
+    expect(await removeLabel(imap, { account_id: 'acct-1', folder: 'Todo', uid: 99, message_id: '<m>' }, 'Todo'))
+      .toEqual({ removed: false });
+  });
+
   it('removes the resolved sibling copy from the label folder', async () => {
     query.mockResolvedValueOnce({ rows: [{ uid: 99 }] });
     const imap = mkImap();
     const r = await removeLabel(imap, { account_id: 'acct-1', uid: 1, folder: 'INBOX', message_id: '<m>' }, 'Todo');
     expect(r).toEqual({ removed: true });
-    expect(imap.removeMessageCopy).toHaveBeenCalledWith('acct-1', 99, 'Todo');
+    expect(imap.removeMessageCopy).toHaveBeenCalledWith('acct-1', 99, 'Todo', { expectMessageId: '<m>' });
   });
 
   it('is a no-op (no IMAP call) when no copy lives in the label folder', async () => {
