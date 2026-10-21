@@ -25,6 +25,7 @@ import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
 import { parseMessage } from './messageParser.js';
 import { classifyAndTagMessage } from './spamPipeline.js';
 import { getAccountAddresses } from './mailAccess.js';
+import { reserveBackgroundBudget } from './backgroundDownloadBudget.js';
 
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
@@ -3203,6 +3204,75 @@ describe('Gmail label memberships (#418)', () => {
     await vi.runAllTimersAsync();
     await pending;
   }
+  function enableIdentityBootstrap() {
+    const existing = query.getMockImplementation();
+    query.mockImplementation(async (sql, params = []) => {
+      if (sql.includes('SELECT f.path')) return { rows: [{ path: 'All' }] };
+      if (sql.includes('SELECT f.uid_validity')) return { rows: [{ uid_validity: '1' }] };
+      if (sql.includes('INSERT INTO archive_coverage') || sql.includes('INSERT INTO background_download_debits')) return { rows: [{ account_id: acct.id }] };
+      return existing(sql, params);
+    });
+  }
+  for (const mode of ['sync', 'backfill']) it(`${mode} invokes read-only identity bootstrap after releasing the sync lock`, async () => {
+    acct.imap_host = `imap.bootstrap-${mode}.gmail.com.test`;
+    enableIdentityBootstrap();
+    const imap = clientFor('INBOX'), release = vi.fn();
+    imap.capabilities = new Set(['X-GM-EXT-1']);
+    imap.getMailboxLock.mockImplementation(async (_folder, options) => {
+      if (options?.readOnly) expect(release).toHaveBeenCalled();
+      return { release };
+    });
+    imap.fetch.mockImplementation(async function* () { yield { uid: 1, flags: new Set(), emailId: '9007199254740993' }; });
+    if (mode === 'sync') await ImapManager.prototype.syncMessages.call(manager(), acct, imap, 'INBOX', 20, false, true);
+    else {
+      ImapFlow.mockImplementation(function () { return imap; });
+      const pending = ImapManager.prototype.backfillMessages.call(manager(), acct, 'INBOX');
+      await vi.runAllTimersAsync(); await pending;
+      expect(imap.close).toHaveBeenCalledOnce();
+    }
+    expect(imap.getMailboxLock).toHaveBeenCalledWith('INBOX', { readOnly: true });
+    expect(imap.fetch).toHaveBeenCalledWith('1', { uid: true }, { uid: true });
+    expect(query.mock.calls.some(([sql, args]) => sql.includes('UPDATE messages m SET provider_msgid=$4') &&
+      args[2] === 1 && args[3] === '9007199254740993')).toBe(true);
+  });
+  it('counts one bootstrap refusal across a folder walk with the real secondary cooldown', async () => {
+    acct.imap_host = 'imap.bootstrap-refusal.gmail.com.test';
+    enableIdentityBootstrap();
+    const folders = Array.from({ length: 6 }, (_, i) => `Label${i}`);
+    rows = folders.map(folder => ({ folder, uid: 1 }));
+    const mgr = { ...manager(), _connectCooldown: new Map(), _secondaryCooldown: new Map(),
+      _secondaryConnectBlocked: ImapManager.prototype._secondaryConnectBlocked,
+      _noteSecondaryRefusal: vi.fn(ImapManager.prototype._noteSecondaryRefusal) };
+    const imap = clientFor(folders[0]); imap.capabilities = new Set(['X-GM-EXT-1']);
+    const refused = new Error('Connection not available');
+    imap.getMailboxLock.mockRejectedValue(refused);
+    const now = Date.now();
+    for (const folder of folders) await ImapManager.prototype.bootstrapProviderIdentity.call(mgr, acct, imap, folder)
+      .catch(err => expect(err).toBe(refused));
+    expect(imap.getMailboxLock).toHaveBeenCalledOnce();
+    expect(mgr._noteSecondaryRefusal).toHaveBeenCalledOnce();
+    expect(mgr._secondaryCooldown.get(acct.id)).toEqual({ failures: 1, until: now + 30000 });
+  });
+  it.each([
+    ['closed', 'Connection not available', false],
+    ['timeout', 'connect timeout', false],
+    ['credentials', 'Invalid credentials (AUTHENTICATIONFAILED)', false],
+    ['limit', '[LIMIT] Rate limit hit', true],
+    ['connections', 'Too many connections', true],
+    ['maximum', 'Maximum number of connections exceeded', true],
+  ])('reduces host admission only for a load refusal: %s', async (name, detail, limited) => {
+    vi.setSystemTime(0);
+    acct.imap_host = `imap.bootstrap-${name}.gmail.com.test`;
+    rows = [{ folder: 'INBOX', uid: 1 }]; enableIdentityBootstrap();
+    const imap = clientFor('INBOX'); imap.capabilities = new Set(['X-GM-EXT-1']);
+    imap.getMailboxLock.mockRejectedValue(new Error(detail));
+    const mgr = manager();
+    await expect(ImapManager.prototype.bootstrapProviderIdentity.call(mgr, acct, imap, 'INBOX')).rejects.toThrow(detail);
+    expect(mgr._noteSecondaryRefusal).toHaveBeenCalledOnce();
+    vi.setSystemTime(60000);
+    expect((await reserveBackgroundBudget('other-account', acct.imap_host, { messages: 120, bytes: 0 })).allowed).toBe(!limited);
+    if (limited) expect((await reserveBackgroundBudget('other-account', acct.imap_host, { messages: 60, bytes: 0 })).allowed).toBe(true);
+  });
   for (const mode of ['sync', 'backfill']) {
     for (const order of [['INBOX', sent], [sent, 'INBOX'], ['INBOX', 'Projects']]) {
       it(`${mode} preserves both memberships in order ${order.join(' -> ')}`, async () => {
@@ -3228,6 +3298,30 @@ describe('Gmail label memberships (#418)', () => {
       });
     }
   }
+  it('bootstrap yields to foreground work on another account sharing the host', async () => {
+    acct.id = 'foreground-budget-account';
+    ImapFlow.mockImplementation(function () { return clientFor('INBOX'); });
+    const held = [];
+    for (let i = 0; i < 4; i++) held.push(await acquirePooledClient(acct));
+    const foreground = acquirePooledClient(acct);
+    const background = { ...acct, id: 'background-budget-account', imap_host: 'IMAP.GMAIL.COM' };
+    const client = clientFor('INBOX'); client.capabilities = new Set(['X-GM-EXT-1']);
+    query.mockImplementation(async sql => {
+      if (sql.includes('SELECT f.path')) return { rows: [{ path: 'All' }] };
+      if (sql.includes('SELECT f.uid_validity')) return { rows: [{ uid_validity: '1' }] };
+      if (sql.includes('SELECT uid FROM messages')) return { rows: [{ uid: '1' }] };
+      return { rows: [{ account_id: background.id, bytes: '0' }] };
+    });
+    try {
+      await ImapManager.prototype.bootstrapProviderIdentity.call(manager(), background, client, 'INBOX');
+      expect(client.getMailboxLock).not.toHaveBeenCalled();
+    } finally {
+      releasePooledClient(acct, held.shift());
+      releasePooledClient(acct, await foreground);
+      for (const item of held) releasePooledClient(acct, item);
+    }
+  });
+
   it('repairs an older INBOX hole even when cached counts and maximum UID look complete', async () => {
     serverUids = [1, 2];
     rows = [{ folder: 'INBOX', uid: 2 }, { folder: 'INBOX', uid: 3 },
