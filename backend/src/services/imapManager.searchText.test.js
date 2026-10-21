@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { Parser } from 'htmlparser2';
 import { extractHtmlSnippetText } from './messageParser.js';
+import { fetchSearchText } from './searchText.js';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('./aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
@@ -14,7 +15,7 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(async () => 
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn(async () => ({})) }));
 
 import { ImapFlow } from 'imapflow';
-import { ImapManager, acquirePooledClient, releasePooledClient, evictPool } from './imapManager.js';
+import { ImapManager, acquirePooledClient, releasePooledClient, evictPool, isConnectionRefusal, isAuthFailure } from './imapManager.js';
 
 const account = { id: 'search-account', imap_tls: true, imap_host: 'imap.example.test', email_address: 'reader@example.test' };
 const LIMIT = 16 * 1024 * 1024;
@@ -83,6 +84,43 @@ describe('search extraction admission', () => {
     expect(charged).toBe(structureReservation);
     expect(client.getMailboxLock).not.toHaveBeenCalled();
     expect(client.fetch).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['budget database unavailable', undefined],
+    ['disk quota exceeded', 1093],
+    ['password authentication failed', undefined],
+  ])('keeps initial admission storage errors out of provider classification: %s', async (detail, reservedBodyBytes) => {
+    const acquire = vi.fn(async () => { throw new Error('Unexpected session acquisition'); });
+    const admit = vi.fn(async () => { throw new Error(detail); });
+    const result = await fetchSearchText(account, 42, 'INBOX', { admit, reservedBodyBytes, uidValidity: '19' },
+      { acquire, isConnectionRefusal, isAuthFailure });
+    expect(result).toMatchObject({
+      complete: false, status: 'retry', reason: 'budget-failed', detail, identity,
+      bodyBytes: reservedBodyBytes ?? null, downloadBytes: 0, structureOverrunBytes: 0,
+      textParts: [], requiredParts: [],
+    });
+    expect(admit).toHaveBeenCalledExactlyOnceWith({ messages: 1, bytes: structureReservation + (reservedBodyBytes ?? 0) });
+    expect(acquire).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+  });
+
+  it.each(['AbortError', 'aborted signal'])('preserves initial admission aborts: %s', async mode => {
+    const acquire = vi.fn(async () => { throw new Error('Unexpected session acquisition'); });
+    const controller = new AbortController();
+    const admit = vi.fn(async () => {
+      if (mode === 'aborted signal') controller.abort();
+      throw mode === 'AbortError' ? new DOMException('cancelled', 'AbortError') : new Error('disk quota exceeded');
+    });
+    const result = await fetchSearchText(account, 42, 'INBOX', { admit, signal: controller.signal, uidValidity: '19' },
+      { acquire, isConnectionRefusal, isAuthFailure });
+    expect(result).toMatchObject({
+      complete: false, status: 'cancelled', reason: 'cancelled', identity,
+      bodyBytes: null, downloadBytes: 0, structureOverrunBytes: 0, textParts: [], requiredParts: [],
+    });
+    expect(admit).toHaveBeenCalledOnce();
+    expect(acquire).not.toHaveBeenCalled();
     expect(ImapFlow).not.toHaveBeenCalled();
   });
 

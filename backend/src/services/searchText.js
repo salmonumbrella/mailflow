@@ -52,7 +52,12 @@ export async function fetchSearchText(account, uid, folder, options, { acquire, 
       if (quoted && (!Number.isSafeInteger(bodyBytes) || bodyBytes < 0 || !Number.isSafeInteger(STRUCTURE_RESERVATION + bodyBytes))) {
         return incomplete('retry', 'bound-changed');
       }
-      const admission = await options.admit({ messages: 1, bytes: STRUCTURE_RESERVATION + (quoted ? bodyBytes : 0) });
+      let admission;
+      try { admission = await options.admit({ messages: 1, bytes: STRUCTURE_RESERVATION + (quoted ? bodyBytes : 0) }); }
+      catch (err) {
+        if (options.signal?.aborted || err?.name === 'AbortError') throw err;
+        return { ...incomplete('retry', 'budget-failed'), detail: err.message };
+      }
       options.signal?.throwIfAborted();
       if (admission?.allowed !== true) return { ...incomplete('deferred', 'budget'), deferAt: admission?.deferAt };
     }
