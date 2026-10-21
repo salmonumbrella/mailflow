@@ -308,7 +308,7 @@ export async function pushSeen(manager, account, accountId, rows, read) {
   const pushedIds = [];
   await Promise.all(unique.map(async row => {
     try {
-      await manager.setFlag(account, row.uid, row.folder, '\\Seen', read);
+      if (await manager.setFlag(account, row.uid, row.folder, '\\Seen', read) !== true) return;
       manager._resolveFlagPush(accountId, row.id, '\\Seen');
       pushedIds.push(row.id);
     } catch (err) {

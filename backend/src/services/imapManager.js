@@ -528,6 +528,8 @@ const SYNC_HUNG_MS = 30 * 1000;
 // is why we don't need to touch the three pull-sync guards. Give up (clear the marker so
 // the server's truth can show through) after MAX_ATTEMPTS connected failures.
 const FLAG_PUSH_RECONCILE_MS = 15 * 1000;
+const FLAG_PUSH_LIFETIME_MS = 30 * 60 * 1000;
+const FLAG_INTENT_LIMIT = 10000;
 const FLAG_PUSH_MAX_ATTEMPTS = 40;   // ~10 min of connected retries before honest revert
 const FLAG_PUSH_PER_CYCLE = 30;      // cap setFlag attempts per account per cycle (bounds cycle time)
 
@@ -2561,6 +2563,11 @@ export class ImapManager {
     // accountId -> Map<`${messageId}:${flag}`, { messageId, flag, attempts }>: local read/star
     // changes whose IMAP push failed and must be retried until the server confirms them.
     this._pendingFlagPush = new Map();
+    this._flagIntents = new Map();
+    this._flagGeneration = 0;
+    this._flagMarkerClock = 0;
+    this._flagVersionChain = Promise.resolve();
+    this._settledFlagIntents = new WeakSet();
     // Tracks UIDs that are actively being moved by inboxRules so reconcileDeletes
     // does not delete the DB row if an EXPUNGE arrives before the DB update completes,
     // or if the server is non-UIDPLUS and the DB temporarily holds a stale UID.
@@ -2887,116 +2894,206 @@ export class ImapManager {
     }, FLAG_PUSH_RECONCILE_MS);
   }
 
-  // Record a local read/star change whose immediate IMAP push failed so the reconciler
-  // re-pushes it until the server confirms. Keyed by message+flag; a repeat toggle updates
-  // the intended `value` and preserves the attempt count. The reconciler pushes and
-  // re-asserts THIS value — never a re-read of the row, which a concurrent flag-pull could
-  // have reverted (that re-read was a silent-loss bug).
-  _enqueueFlagPush(accountId, messageId, flag, value) {
+  _newFlagAction() {
+    const now = Date.now();
+    this._flagMarkerClock = Math.max(now, this._flagMarkerClock + 1);
+    const version = this._flagVersionChain.catch(() => {}).then(async () => {
+      const { rows: [row] } = await query("SELECT nextval('message_flag_intent_version_seq')::text AS version");
+      if (!row?.version || !/^[1-9][0-9]*$/.test(row.version)) throw new Error('Could not allocate flag intent version');
+      return row.version; // PostgreSQL bigint remains lossless text, including after restore.
+    }).catch(cause => { throw Object.assign(new Error('Flag intent version unavailable'), { flagIntentVersionFailed: true, cause }); });
+    this._flagVersionChain = version;
+    version.catch(() => {});
+    return Object.freeze({ generation: ++this._flagGeneration, createdAt: now, version,
+      marker: new Date(this._flagMarkerClock + FLAG_PUSH_LIFETIME_MS - 30000).toISOString() });
+  }
+
+  _admitFlagIntent(accountId, messageId, flag, value, action = this._newFlagAction()) {
+    let intents = this._flagIntents.get(accountId);
+    if (!intents) this._flagIntents.set(accountId, intents = new Map());
+    for (const [key, token] of intents) {
+      if (Date.now() - token.createdAt >= FLAG_PUSH_LIFETIME_MS) intents.delete(key);
+    }
+    const key = `${messageId}:${flag}`;
+    const current = intents.get(key);
+    const pending = this._pendingFlagPush.get(accountId);
+    let retained = intents.size;
+    if (retained + (pending?.size || 0) >= FLAG_INTENT_LIMIT) {
+      for (const pendingKey of pending?.keys() || []) if (!intents.has(pendingKey)) retained++;
+    }
+    if (!current && !pending?.has(key) && retained >= FLAG_INTENT_LIMIT) throw new Error('Too many pending flag changes for this account');
+    const intent = Object.freeze({ ...action, accountId, messageId, flag, value: !!value, key });
+    if (Date.now() - action.createdAt < FLAG_PUSH_LIFETIME_MS && (!current || current.generation < action.generation)) intents.set(key, intent);
+    return current?.generation === action.generation ? current : intent;
+  }
+
+  _isFlagIntentCurrent(intent) {
+    return !intent || (Date.now() - intent.createdAt < FLAG_PUSH_LIFETIME_MS
+      && this._flagIntents.get(intent.accountId)?.get(intent.key) === intent
+      && !this._settledFlagIntents.has(intent));
+  }
+
+  _enqueueFlagPush(accountId, messageId, flag, value, intent) {
     if (!accountId || !messageId) return;
+    if (intent && !this._isFlagIntentCurrent(intent)) return intent;
+    try { intent ||= this._admitFlagIntent(accountId, messageId, flag, value); }
+    catch (err) {
+      console.warn(`Flag-push could not queue ${flag} for msg=${messageId}:`, err.message);
+      return null;
+    }
     let ops = this._pendingFlagPush.get(accountId);
-    if (!ops) { ops = new Map(); this._pendingFlagPush.set(accountId, ops); }
-    const key = `${messageId}:${flag}`;
-    const existing = ops.get(key);
-    ops.set(key, { messageId, flag, value: !!value, attempts: existing ? existing.attempts : 0 });
+    if (!ops) this._pendingFlagPush.set(accountId, ops = new Map());
+    const previous = ops.get(intent.key);
+    // Enqueuing the same admission twice does not reset its retry budget or address.
+    if (previous?.intent !== intent) ops.set(intent.key, {
+      messageId, flag, value: intent.value, attempts: 0, intent,
+    });
+    this._protectFlagMarker(ops.get(intent.key));
+    return intent;
   }
 
-  // A later push of the SAME message+flag succeeded — drop any queued op so the reconciler
-  // can't re-assert/re-push a now-stale value (e.g. mark-read failed, then mark-unread
-  // succeeded: the queued read=true must not resurrect).
-  _resolveFlagPush(accountId, messageId, flag) {
+  async _resolveFlagPush(accountId, messageId, flag, expectedIntent) {
+    const key = `${messageId}:${flag}`;
     const ops = this._pendingFlagPush.get(accountId);
-    if (!ops) return;
-    const key = `${messageId}:${flag}`;
-    // Mark resolved as well as delete: a reconciler cycle may already hold this op object in
-    // its snapshot, parked on an await — the flag lets it bail before clobbering the newer value.
-    const op = ops.get(key);
-    if (op) op.resolved = true;
-    ops.delete(key);
-    if (ops.size === 0) this._pendingFlagPush.delete(accountId);
+    const current = this._flagIntents.get(accountId)?.get(key);
+    // Five-argument STOREs settle their own token. A redundant legacy callback
+    // cannot qualify a newer active intent that appeared while the STORE waited.
+    if (!expectedIntent && current && !this._settledFlagIntents.has(current)) return false;
+    if (expectedIntent && current !== expectedIntent) return false;
+    // Qualification above proves this is the latest confirmed owner; an older
+    // pending op for the same key is obsolete even when it has a different token.
+    ops?.delete(key);
+    if (current) this._settledFlagIntents.add(current);
+    if (current) await this._clearFlagMarker(messageId, flag, current);
+    if (ops?.size === 0 && this._pendingFlagPush.get(accountId) === ops) this._pendingFlagPush.delete(accountId);
+    if (this._flagIntents.get(accountId)?.size === 0) this._flagIntents.delete(accountId);
+    return true;
   }
 
-  // Re-bump the *_changed_at marker for every pending message up-front, before any
-  // (possibly slow) setFlag, so the 30s "local wins" window can't lapse mid-cycle and let
-  // a concurrent pull revert an unconfirmed change.
+  async _stampFlagIntent(op, reassert = false) {
+    if (!['\\Seen', '\\Flagged'].includes(op.flag) || !this._isFlagIntentCurrent(op.intent) || op.canStore?.() === false) return false;
+    const version = await op.intent.version;
+    if (!this._isFlagIntentCurrent(op.intent) || op.canStore?.() === false) return false;
+    const col = op.flag === '\\Seen' ? 'read_changed_at' : 'star_changed_at';
+    const valueCol = op.flag === '\\Seen' ? 'is_read' : 'is_starred';
+    const versionCol = op.flag === '\\Seen' ? 'read_intent_version' : 'star_intent_version';
+    const target = op.targetMessageId || op.messageId;
+    const result = reassert ? await query(
+      `UPDATE messages SET ${valueCol} = $1, ${col} = $3, ${versionCol} = $4 WHERE id = $2
+        AND (${versionCol} < $4::bigint OR (${versionCol} = $4::bigint AND ${col} = $3::timestamptz)) RETURNING id`,
+      [op.value, target, op.intent.marker, version]) : await query(
+      `UPDATE messages SET ${col} = $2, ${versionCol} = $3 WHERE id = $1
+        AND (${versionCol} < $3::bigint OR (${versionCol} = $3::bigint AND ${col} = $2::timestamptz)) RETURNING id`, [target, op.intent.marker, version]);
+    return result.rowCount > 0;
+  }
+
   async _rebumpFlagMarkers(ops) {
-    const readIds = [];
-    const starIds = [];
-    for (const op of ops.values()) {
-      (op.flag === '\\Seen' ? readIds : starIds).push(op.messageId);
-    }
-    if (readIds.length) {
-      await query('UPDATE messages SET read_changed_at = NOW() WHERE id = ANY($1::uuid[])', [readIds]).catch(() => {});
-    }
-    if (starIds.length) {
-      await query('UPDATE messages SET star_changed_at = NOW() WHERE id = ANY($1::uuid[])', [starIds]).catch(() => {});
-    }
+    for (const op of ops.values()) await this._protectFlagMarker(op);
   }
 
-  // Clear the marker for a message+flag once the server has confirmed (or we give up), so a
-  // subsequent flag-sync pull resumes reflecting the server for that message.
-  async _clearFlagMarker(messageId, flag) {
+  _protectFlagMarker(op) {
+    if (op.markerProtected) return Promise.resolve(true);
+    if (op.markerReady) return op.markerReady;
+    op.markerReady = this._stampFlagIntent(op).then(applied => {
+      op.markerProtected = applied;
+      return applied;
+    }).catch(async err => {
+      console.warn('Flag-push marker could not be protected:', err.message);
+      if (err.flagIntentVersionFailed) {
+        const accountId = op.intent.accountId, ops = this._pendingFlagPush.get(accountId);
+        if (ops) await this._retireFlagPush(accountId, ops, op.intent.key, op, 'retired because intent version allocation failed');
+        if (ops?.size === 0 && this._pendingFlagPush.get(accountId) === ops) this._pendingFlagPush.delete(accountId);
+      }
+      return false;
+    }).finally(() => { op.markerReady = null; });
+    return op.markerReady;
+  }
+
+  async _clearFlagMarker(messageId, flag, intent) {
     const col = flag === '\\Seen' ? 'read_changed_at' : 'star_changed_at';
-    // col is a fixed internal literal (not user input) — safe to interpolate.
-    await query(`UPDATE messages SET ${col} = NULL WHERE id = $1`, [messageId]).catch(() => {});
+    const versionCol = flag === '\\Seen' ? 'read_intent_version' : 'star_intent_version';
+    try {
+      const version = await intent.version;
+      // Fence even a FIRST stamp still in flight. Preserve an unowned legacy marker
+      // while advancing this terminal version, so equal-version SQL cannot revive it.
+      await query(`UPDATE messages SET ${col} = CASE WHEN ${col} = $3::timestamptz THEN NULL ELSE ${col} END,
+        ${versionCol} = $2::bigint WHERE id = $1 AND ${versionCol} <= $2::bigint`, [messageId, version, intent.marker]);
+    } catch (err) { console.warn('Flag marker cleanup failed:', err.message); }
+  }
+
+  async _retireFlagPush(accountId, ops, key, op, reason) {
+    if (ops.get(key) !== op) return;
+    ops.delete(key); // release old ownership before awaiting any cleanup
+    if (this._flagIntents.get(accountId)?.get(key) === op.intent) {
+      this._settledFlagIntents.add(op.intent);
+    }
+    if (reason) console.warn(`Flag-push ${reason} (${op.flag} msg=${op.messageId})`);
+    await this._clearFlagMarker(op.targetMessageId || op.messageId, op.flag, op.intent);
   }
 
   async _reconcileFlagPushes() {
+    for (const [accountId, intents] of this._flagIntents) {
+      for (const [key, intent] of intents) {
+        if (Date.now() - intent.createdAt >= FLAG_PUSH_LIFETIME_MS) intents.delete(key);
+      }
+      if (!intents.size) this._flagIntents.delete(accountId);
+    }
     for (const [accountId, ops] of this._pendingFlagPush) {
-      if (ops.size === 0) { this._pendingFlagPush.delete(accountId); continue; }
-
-      // Hold the local-wins window for all pending messages this cycle regardless of
-      // whether we can push right now.
-      await this._rebumpFlagMarkers(ops);
-
-      // Only attempt pushes while the account has a live connection; otherwise keep the
-      // ops queued (markers already re-bumped) and wait for reconnect. Not counted as an
-      // attempt, so an outage doesn't burn the give-up budget.
-      if (!this.connections.has(accountId)) continue;
-
-      const acct = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
-      const account = acct.rows[0];
-      if (!account) { this._pendingFlagPush.delete(accountId); continue; }
-
-      let processed = 0;
       for (const [key, op] of [...ops]) {
-        if (processed >= FLAG_PUSH_PER_CYCLE) break; // rest wait for the next cycle
-        if (!ops.has(key)) continue; // resolved by a concurrent successful push mid-cycle
-        processed++;
-        // Re-read only uid/folder (a move changes them) + existence — NOT the flag value,
-        // which we own via op.value. A concurrent pull may have reverted the row, so
-        // re-assert our intended value locally (with a fresh marker) before pushing the
-        // same value, so a slow cycle can never let the change be silently lost.
-        const { rows: [msg] } = await query(
-          'SELECT uid, folder FROM messages WHERE id = $1',
-          [op.messageId]
-        );
-        if (!msg) { ops.delete(key); continue; } // message gone — nothing to push
-        // A concurrent successful push may have resolved this op during the await above —
-        // don't re-assert/re-push a now-stale value over the newer one.
-        if (op.resolved) continue;
-        if (op.flag === '\\Seen') {
-          await query('UPDATE messages SET is_read = $1, read_changed_at = NOW() WHERE id = $2', [op.value, op.messageId]).catch(() => {});
-        } else {
-          await query('UPDATE messages SET is_starred = $1, star_changed_at = NOW() WHERE id = $2', [op.value, op.messageId]).catch(() => {});
-        }
-        try {
-          await this.setFlag(account, msg.uid, msg.folder, op.flag, op.value);
-          // If a newer value was pushed elsewhere while our setFlag was in flight, leave its
-          // marker in place and let the pull reconcile, rather than clearing to our stale push.
-          if (!op.resolved) await this._clearFlagMarker(op.messageId, op.flag); // confirmed on server
+        if (Date.now() - op.intent.createdAt >= FLAG_PUSH_LIFETIME_MS) {
+          await this._retireFlagPush(accountId, ops, key, op, 'expired after 30 minutes');
+        } else if (!this._isFlagIntentCurrent(op.intent)) {
           ops.delete(key);
-        } catch (err) {
-          op.attempts += 1;
-          if (op.attempts >= FLAG_PUSH_MAX_ATTEMPTS) {
-            console.warn(`Flag-push giving up after ${op.attempts} attempts (${op.flag} msg=${op.messageId}): ${extractImapError(err)}`);
-            await this._clearFlagMarker(op.messageId, op.flag); // honest revert to server truth
-            ops.delete(key);
-          }
-          // else keep queued; marker + value re-asserted above so nothing is lost before retry
         }
       }
-      if (ops.size === 0) this._pendingFlagPush.delete(accountId);
+      if (!ops.size) {
+        if (this._pendingFlagPush.get(accountId) === ops) this._pendingFlagPush.delete(accountId);
+        if (this._flagIntents.get(accountId)?.size === 0) this._flagIntents.delete(accountId);
+        continue;
+      }
+      const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+      if (!account || account.enabled === false) {
+        for (const [key, op] of [...ops]) {
+          await this._retireFlagPush(accountId, ops, key, op, 'retired for removed or disabled account');
+          if (this._flagIntents.get(accountId)?.get(key) === op.intent) this._flagIntents.get(accountId).delete(key);
+        }
+      } else {
+        await this._rebumpFlagMarkers(ops);
+        if (!this.connections.has(accountId)
+          && !(this._pollOnlyAccounts.has(accountId) && this.syncIntervals.has(accountId))) continue;
+        let processed = 0;
+        for (const [key, op] of [...ops]) {
+          if (processed++ >= FLAG_PUSH_PER_CYCLE) break;
+          if (ops.get(key) !== op || !this._isFlagIntentCurrent(op.intent)) continue;
+          const { rows: [msg] } = await query(
+            'SELECT uid, folder, message_id, is_deleted, flag_address_valid FROM messages WHERE id = $1', [op.messageId]);
+          if (ops.get(key) !== op || !this._isFlagIntentCurrent(op.intent)) continue;
+          if (!msg || msg.is_deleted) {
+            await this._retireFlagPush(accountId, ops, key, op, 'dropped because its row is gone or deleted');
+            continue;
+          }
+          if (msg.flag_address_valid === false) continue;
+          try {
+            if (!await this._stampFlagIntent(op, true)) continue;
+            const applied = await this.setFlag(account, msg.uid, msg.folder, op.flag, op.value, {
+              intent: op.intent,
+              onStoreFailure: () => { if (ops.get(key) === op) op.attempts++; },
+              canStore: () => ops.get(key) === op && op.attempts < FLAG_PUSH_MAX_ATTEMPTS,
+            });
+            if (ops.get(key) === op && this._isFlagIntentCurrent(op.intent)) {
+              if (op.attempts >= FLAG_PUSH_MAX_ATTEMPTS) await this._retireFlagPush(accountId, ops, key, op, 'giving up after 40 failed STORE attempts');
+              else if (applied) await this._retireFlagPush(accountId, ops, key, op);
+            }
+          } catch (err) {
+            if (op.attempts >= FLAG_PUSH_MAX_ATTEMPTS) {
+              await this._retireFlagPush(accountId, ops, key, op,
+                `giving up after ${op.attempts} failed STORE attempts: ${extractImapError(err)}`);
+            }
+          }
+        }
+      }
+      if (!ops.size && this._pendingFlagPush.get(accountId) === ops) this._pendingFlagPush.delete(accountId);
+      if (this._flagIntents.get(accountId)?.size === 0) this._flagIntents.delete(accountId);
     }
   }
 
@@ -6922,7 +7019,10 @@ export class ImapManager {
     });
   }
 
-  async setFlag(account, uid, folder, flag, value) {
+  async setFlag(account, uid, folder, flag, value, options = {}) {
+    const tracked = flag === '\\Seen' || flag === '\\Flagged';
+    const action = tracked ? options.intent || this._newFlagAction() : undefined;
+    options = { ...options, action, account, folder, implicitIntent: tracked && !options.intent };
     // Serialized per account. Review found a cross-call inversion: call A's persistent
     // STORE could be granted its lock just before the 5s deadline, linger on the wire
     // while the fallback also stored, and land AFTER a newer call B stored the opposite
@@ -6930,7 +7030,8 @@ export class ImapManager {
     // an older op). Two flag operations for one account never overlap now, so a stale
     // STORE cannot outlive a newer one. Waiters are short: the inner attempt is bounded.
     const prev = this._flagOpChains.get(account.id) || Promise.resolve();
-    const run = prev.catch(() => {}).then(() => this._setFlagInner(account, uid, folder, flag, value));
+    const run = prev.catch(() => {}).then(() => this._isFlagIntentCurrent(options.intent)
+      ? this._setFlagInner(account, uid, folder, flag, value, options) : false);
     this._flagOpChains.set(account.id, run);
     try {
       return await run;
@@ -6939,7 +7040,41 @@ export class ImapManager {
     }
   }
 
-  async _setFlagInner(account, uid, folder, flag, value) {
+  async _checkFlagAddress(client, uid, { account, folder }) {
+    const { rows: [row] } = await query(
+      'SELECT id, message_id, flag_address_valid, flag_uid_validity FROM messages WHERE account_id = $1 AND folder = $2 AND uid = $3 AND is_deleted = false',
+      [account.id, folder, uid]);
+    // Legacy callers may STORE a proven new server UID before its cache row is repointed.
+    // Address validation and those consumers are coordinated in the address-safety part.
+    return row;
+  }
+
+  async _storeFlag(client, uid, flag, value, options) {
+    if (!this._isFlagIntentCurrent(options.intent) || options.canStore?.() === false) return false;
+    if (flag === '\\Seen' || flag === '\\Flagged') {
+      const row = await this._checkFlagAddress(client, uid, options);
+      if (!this._isFlagIntentCurrent(options.intent) || options.canStore?.() === false) return false;
+      if (row) options.intent ||= this._admitFlagIntent(options.account.id, row.id, flag, value, options.action);
+      if (options.intent && !await this._stampFlagIntent({ messageId: row?.id || options.intent.messageId,
+        flag, value, intent: options.intent, canStore: options.canStore }, true)) return false;
+    }
+    if (!this._isFlagIntentCurrent(options.intent) || options.canStore?.() === false) return false;
+    try {
+      const applied = value
+        ? await client.messageFlagsAdd(String(uid), [flag], { uid: true })
+        : await client.messageFlagsRemove(String(uid), [flag], { uid: true });
+      if (applied === false) throw new Error('server did not apply flag');
+      if (options.implicitIntent && options.intent) {
+        await this._resolveFlagPush(options.account.id, options.intent.messageId, flag, options.intent);
+      }
+      return true;
+    } catch (err) {
+      options.onStoreFailure?.();
+      throw err;
+    }
+  }
+
+  async _setFlagInner(account, uid, folder, flag, value, options = {}) {
     console.log(`setFlag: uid=${uid} folder=${folder} flag=${flag} value=${value}`);
 
     // Attempt 0: the persistent IDLE connection, the way Thunderbird stores flags: DONE,
@@ -6977,21 +7112,20 @@ export class ImapManager {
             // after the pool path's is the inversion described at setFlag.
             await refreshSelectedMailbox(client);
             if (expired) throw new Error('persistent flag store timed out');
-            const applied = value
-              ? await client.messageFlagsAdd(String(uid), [flag], { uid: true })
-              : await client.messageFlagsRemove(String(uid), [flag], { uid: true });
-            if (applied === false) throw new Error('server did not apply flag on persistent session');
+            return await this._storeFlag(client, uid, flag, value, { ...options,
+              canStore: () => !expired && options.canStore?.() !== false });
           } finally { lock.release(); }
         })();
         attempt.catch(() => {}); // detached after a timeout; never an unhandled rejection
         try {
-          await raceTimeout(attempt, 5000, 'Persistent flag store');
+          const applied = await raceTimeout(attempt, 5000, 'Persistent flag store');
           logger.debug(`setFlag success (persistent): uid=${uid} ${flag}=${value}`);
-          return;
+          return applied;
         } catch (err) {
           // Mark the detached attempt dead BEFORE falling through: its late-arriving lock
           // must release-and-exit, not store a flag the pool path is about to store again.
           expired = true;
+          if (err.unsafeFlagAddress) throw err;
           logger.debug(`setFlag persistent attempt failed, using pool: ${extractImapError(err)}`);
         }
       }
@@ -7017,23 +7151,17 @@ export class ImapManager {
     let lastErr = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        await withFreshClient(account, async (client) => {
+        return await withFreshClient(account, async (client) => {
           const lock = await client.getMailboxLock(folder);
           try {
-            const flagResult = value
-              ? await client.messageFlagsAdd(String(uid), [flag], { uid: true })
-              : await client.messageFlagsRemove(String(uid), [flag], { uid: true });
-            if (flagResult === false) {
-              throw new Error(`server did not apply ${flag}=${value} for uid=${uid} (no matching message)`);
-            }
-            logger.debug(`setFlag success: uid=${uid} ${flag}=${value}`);
+            return await this._storeFlag(client, uid, flag, value, options);
           } finally {
             lock.release();
           }
         });
-        return; // applied
       } catch (err) {
         lastErr = err;
+        if (err.unsafeFlagAddress || err.providerRefusing || err.poolExhausted || options.canStore?.() === false) throw err;
         if (attempt < 2) await new Promise(r => setTimeout(r, 400));
       }
     }

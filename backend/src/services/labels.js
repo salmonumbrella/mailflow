@@ -117,8 +117,7 @@ export async function markThreadRead(imapManager, account, message, { excludeFol
     const eligibleIds = new Set(eligible.map(r => r.id));
     if (inboxCopy && !inboxCopy.is_read && (!perCopy || inboxCopy.id === message.id || eligibleIds.has(inboxCopy.id))) {
       try {
-        await imapManager.setFlag(account, inboxCopy.uid, 'INBOX', '\\Seen', true);
-        pushedIds.push(inboxCopy.id);
+        if (await imapManager.setFlag(account, inboxCopy.uid, 'INBOX', '\\Seen', true) === true) pushedIds.push(inboxCopy.id);
       } catch (err) { error = err; }
     }
     if (perCopy) {
@@ -127,8 +126,7 @@ export async function markThreadRead(imapManager, account, message, { excludeFol
       const acted = copies.find(r => r.id === message.id);
       if (acted) {
         try {
-          await imapManager.setFlag(account, acted.uid, acted.folder, '\\Seen', true);
-          pushedIds.push(acted.id);
+          if (await imapManager.setFlag(account, acted.uid, acted.folder, '\\Seen', true) === true) pushedIds.push(acted.id);
         } catch (err) { error ||= err; }
       }
       pushedIds.push(...await pushSeen(imapManager, account, message.account_id, copies.filter(r => r.id !== message.id), true));

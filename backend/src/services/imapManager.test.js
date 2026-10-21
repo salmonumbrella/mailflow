@@ -5447,7 +5447,10 @@ describe('setFlag routing (#474 round 4)', () => {
     getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
     resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
     query.mockReset();
-    query.mockResolvedValue({ rows: [account] });
+    let intentVersion = 0n;
+    query.mockImplementation(async sql => sql.includes('nextval(')
+      ? { rows: [{ version: String(++intentVersion) }], rowCount: 1 }
+      : { rows: [account], rowCount: 1 });
     ImapFlow.mockImplementation(function () {
       const c = new EventEmitter();
       c.usable = true;
@@ -5490,6 +5493,7 @@ describe('setFlag routing (#474 round 4)', () => {
     const { mgr, account } = arrange({ persistent });
 
     const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    while (!releaseA) await new Promise(resolve => setImmediate(resolve));
     const bDone = vi.fn();
     const bPromise = mgr.setFlag(account, 42, 'INBOX', '\\Seen', false).then(bDone);
     await new Promise(r => setTimeout(r, 80));
