@@ -6,6 +6,7 @@ import { resolveConversationMode, groupsMessageList, conversationModeTransition,
 import { api } from '../utils/api.js';
 import { mergeCountSnapshots, mergeFolderSnapshots } from '../utils/countSnapshots.js';
 import { resolveSelectedAccount, pruneFolders } from '../utils/accountScope.js';
+import { accountAffectsUnifiedInbox } from '../utils/unifiedInbox.js';
 import { aiRuns } from '../utils/aiRunRegistry.js';
 import { applyTheme, applyCustomCss, getInitialTheme } from '../themes.js';
 import { applyFontSet, applyFontSize, effectiveFontSet, isRetroFont, THEME_FONT } from '../fonts.js';
@@ -322,7 +323,11 @@ export const useStore = create((set, get) => ({
       if (m.id === id && Object.hasOwn(updates, 'unread_count')) return { ...updated, representative_is_read: updates.representative_is_read ?? updates.is_read };
       const tid = m.thread_id || m.id;
       const subs = threadMessages[tid];
-      const counted = state.selectedAccountId ? subs?.filter(s => s.account_id === m.account_id) : subs;
+      // Post-send context may cache copies outside this row's unified membership.
+      // Preserve their flags, but never aggregate them into the current view.
+      const counted = state.selectedAccountId
+        ? subs?.filter(s => s.account_id === m.account_id)
+        : subs?.filter(s => accountAffectsUnifiedInbox(state.accounts, s.account_id));
       if (counted?.some(s => s.id === id)) {
         const unread_count = counted.filter(s => !s.is_read).length;
         const representative_is_read = counted.find(s => s.id === m.id && s.account_id === m.account_id)?.is_read

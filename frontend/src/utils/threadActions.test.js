@@ -39,15 +39,16 @@ let failMutation = false;
 const countLease = { token: 'thread-actions.test.1', expiresInMs: 360000 };
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
-  if (u.endsWith('/mail/unread-counts') || u.endsWith('/mail/counts/refresh')) {
+  const folderObservation = opts.method === 'GET' && /^\/api\/accounts\/[^/]+\/folders$/.test(u);
+  if (u.endsWith('/mail/unread-counts') || u.endsWith('/mail/counts/refresh') || folderObservation) {
     metadataRequests.push(u);
     if (failNext) return { ok: false, status: 500, json: async () => ({ error: 'server said no' }) };
-    const body = u.endsWith('/mail/unread-counts')
+    const body = folderObservation ? [] : u.endsWith('/mail/unread-counts')
       ? { lease: countLease, byAccount: {}, snapshots: {} }
       : { epoch: 'thread-actions.test', lease: countLease, refreshSeq: '40' };
     return { ok: true, status: 200, json: async () => body };
   }
-  requests.push({ url: u, body: opts.body ? JSON.parse(opts.body) : null, headers: opts.headers });
+  requests.push({ method: opts.method, url: u, body: opts.body ? JSON.parse(opts.body) : null, headers: opts.headers });
   if (failNext || failMutation) return { ok: false, status: 500, json: async () => ({ error: 'server said no' }) };
   return { ok: true, status: 200, json: async () => ({}) };
 };
@@ -137,12 +138,19 @@ describe('archiveThread', () => {
   test('an actual mutation 500 stays uncertain after successful metadata admission', async () => {
     failMutation = true;
     archiveThread(THREAD, { t, addNotification });
+    assert.deepEqual(requests, [], 'the archive remains held before the Undo window closes');
     await tick(UNDO_WINDOW + 50);
     assert.ok(metadataRequests.some(url => url.endsWith('/mail/unread-counts')));
     assert.equal(requests.length, 1, 'the mutating request really was dispatched');
+    assert.equal(requests[0].method, 'POST');
+    assert.deepEqual(requests[0].body, { ids: ['a1', 'a2', 'a3'] }, 'the single archive targets both INBOX rows and the Sent copy');
     assert.match(requests[0].url, /bulk-archive/);
     assert.match(requests[0].headers['X-Count-Op'], /^thread-actions\.test\.1:/);
+    assert.ok(metadataRequests.includes('/api/accounts/acct/folders'), 'the unconfirmed Sent copy requests folder truth, separately from mutation traffic');
     assert.deepEqual(ids(), [], 'an uncertain write is not an owned inverse');
+    const unresolved = Object.values(useStore.getState().countOperations.operations);
+    assert.deepEqual(unresolved.map(op => op.targetId).sort(), ['a1', 'a2', 'a3'], 'UNKNOWN observations retain every uncertain physical target');
+    assert.ok(unresolved.every(op => op.state === 'awaiting-observation'), 'no unknown folder response certifies the cohort');
     assert.ok(notifications.some(n => n.type === 'error'), 'uncertainty is reported');
   });
 });

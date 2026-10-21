@@ -119,7 +119,13 @@ it('allowed and unknown both preserve the chosen alias, unavailable never reache
   offline = true; expect((await send({}, 'unknown')).status).toBe(200);
   expect(sendMail.mock.calls[1][0].from).toBe('Alias <alias@synthetic.test>');
 });
-it.each(['deleted alias', 'changed alias', 'revoked identity', 'deleted account', 'changed SMTP login'])('%s during hold fails visibly and preserves draft', async change => {
+it.each([
+  ['deleted alias', 'The selected sender is no longer available. Select a sender again.'],
+  ['changed alias', 'The selected sender account changed. Review it and send again.'],
+  ['revoked identity', 'Fastmail does not list this address as a sending identity.'],
+  ['deleted account', 'The selected sender account is no longer available.'],
+  ['changed SMTP login', 'The selected sender account changed. Review it and send again.'],
+])('%s during hold fails visibly and preserves draft', async (change, expectedError) => {
   const pending = await (await send({ undoSeconds: 10, draft: { accountId, uid: 8, folder: 'Drafts' } })).json();
   expect(pending.pending).toBe(true);
   if (change === 'deleted alias') alias = null;
@@ -129,7 +135,7 @@ it.each(['deleted alias', 'changed alias', 'revoked identity', 'deleted account'
   if (change === 'changed SMTP login') account = { ...account, smtp_auth_user: 'changed@synthetic.test' };
   await flushHeldSends(1000);
   const result = await status(pending.pendingId);
-  expect(result.status).toBe('failed'); expect(result.error).toMatch(/sender|account/i);
+  expect(result.status).toBe('failed'); expect(result.error).toBe(expectedError);
   expect(sendMail).not.toHaveBeenCalled(); expect(deleteSentDraft).not.toHaveBeenCalled();
 });
 it('token clear during hold uses fresh config and retains the exact SMTP From', async () => {

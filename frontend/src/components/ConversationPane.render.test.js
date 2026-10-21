@@ -565,6 +565,7 @@ describe('a conversation another account also received', () => {
   // The thread route serves [...THREAD, B3] unless a test serves a thread id of its own, and
   // answers only once a promise a test holds there resolves. It marks every message is_draft.
   const served = {};
+  const servedPhysical = new Map();
   const held = {};
   let realFetch;
   before(async () => {
@@ -582,7 +583,24 @@ describe('a conversation another account also received', () => {
       if (u.includes('/mail/thread?')) {
         const id = new URLSearchParams(u.split('?')[1]).get('id');
         if (held[id]) await held[id];
-        return { ok: true, status: 200, json: async () => ({ messages: (served[id] || [...THREAD, B3]).map(m => ({ is_draft: false, ...m })) }) };
+        const messages = (served[id] || [...THREAD, B3]).map(m => ({ is_draft: false, ...m }));
+        messages.forEach(message => servedPhysical.set(message.id, { ...message }));
+        return { ok: true, status: 200, json: async () => ({ messages }) };
+      }
+      if (new URL(u, 'https://synthetic.test').pathname === '/api/mail/messages/bulk-archive') {
+        const ids = JSON.parse(opts.body).ids;
+        // Model this cohort's successful archive response, using the same
+        // physical source snapshots returned by the authoritative thread fetch.
+        // An empty object is not an accepted archive: the real action restores
+        // any target absent from both archived and unconfirmed.
+        const countTargets = ids.map(id => {
+          const source = servedPhysical.get(id);
+          assert.ok(source, 'an archived target must exist in the served physical cohort');
+          const { account_id, folder, category, is_read } = source;
+          return { id, account_id, folder, category, is_read };
+        });
+        return { ok: true, status: 200, json: async () => ({ ok: true,
+          archived: [...ids], noArchiveFolder: [], unconfirmed: [], countTargets }) };
       }
       if (/\/accounts\/[^/]+\/folders/.test(u)) return { ok: true, status: 200, json: async () => [{ path: 'INBOX', name: 'INBOX' }, { path: 'Projects', name: 'Projects' }] };
       return realFetch(url, opts);

@@ -1237,22 +1237,33 @@ describe('MessageList — a conversation another account also received (#476)', 
     assert.deepEqual(idsSentTo(/bulk-read/), ['a-new-7', 'a-old-7', 'b-new-7']);
   });
 
-  test('in the unified inbox marking a row read still shows every cached copy read', async () => {
-    // A sent reply refreshes the cached conversation across every enabled account (ComposeModal),
-    // so it can hold a copy from an account left out of the unified inbox, which the unified
-    // action never fetches. Left unread, that copy would turn the row unread again on the next echo.
+  test('in the unified inbox a read keeps excluded cached flags truthful without a row bounce', async () => {
+    // Post-send context may include a live account excluded from the unified view.
+    // It is not a write target and must neither be falsely read nor count against this row.
     const row = conversation(8, { unified: true });
-    await start([row], { accountId: null });
+    await start([row], { accountId: null, accounts: [
+      { ...ACCOUNT, enabled: true }, { ...ACCOUNT_B, enabled: true },
+      { ...ACCOUNT, id: 'acct-3', enabled: true, include_in_unified_inbox: false },
+    ] });
     const served = ROUTES['/mail/thread?id=thr-8&folder=INBOX&unified=true'][1].messages;
     const leftOut = { ...served[1], id: 'c-new-8', account_id: 'acct-3' };
     await React.act(async () => { useStore.getState().setThreadMessages('thr-8', [...served, leftOut]); });
     await hoverClick(row.id, 'contextMenu.markRead');
-    const unread = useStore.getState().threadMessages['thr-8'].filter(m => !m.is_read).map(m => m.id);
-    assert.deepEqual(unread, [], 'every cached copy shows as read');
-    // The WebSocket echo of the mark-read, for a copy that is not the row.
+    assert.deepEqual(idsSentTo(/bulk-read/), ['a-new-8', 'a-old-8', 'b-new-8'], 'only the authoritative unified members are write targets');
+    const cached = useStore.getState().threadMessages['thr-8'];
+    const unread = cached.filter(m => m.account_id !== 'acct-3' && !m.is_read).map(m => m.id);
+    assert.deepEqual(unread, [], 'every acted cached copy shows as read');
+    assert.equal(cached.find(m => m.id === leftOut.id), leftOut, 'C remains the original unacted physical row');
+    assert.equal(leftOut.is_read, false, 'no cross-account read state is invented');
+    // Echoes from either the acted or excluded account cannot reintroduce a badge.
     await React.act(async () => { useStore.getState().updateMessage('a-old-8', { is_read: true }); });
-    const after = useStore.getState().messages.find(m => m.id === row.id);
-    assert.equal(after.unread_count, 0, 'and the row stays read');
+    let after = useStore.getState().messages.find(m => m.id === row.id);
+    assert.equal(after.unread_count, 0, 'the row stays read after its own echo');
+    assert.equal(after.is_read, true);
+    await React.act(async () => { useStore.getState().updateMessage(leftOut.id, { is_read: false }); });
+    after = useStore.getState().messages.find(m => m.id === row.id);
+    assert.equal(after.unread_count, 0, 'the excluded account echo does not count against this row');
+    assert.equal(after.is_read, true);
   });
 
   test('in the unified inbox starring a row still shows every cached copy starred', async () => {
