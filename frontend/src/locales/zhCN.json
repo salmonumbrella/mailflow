@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "隐藏电子邮件地址",
+    "alias": "电子邮件别名"
+  },
   "common": {
     "cancel": "取消",
     "save": "保存",

@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Masked email address",
+    "alias": "Email alias"
+  },
   "common": {
     "cancel": "Cancel",
     "save": "Save",
@@ -209,6 +213,7 @@
     }
   },
   "message": {
+    "unreadRequested": "Unread change requested",
     "find": {
       "title": "Search",
       "close": "Close search",

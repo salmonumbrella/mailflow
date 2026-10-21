@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "마스킹된 이메일 주소",
+    "alias": "이메일 별칭"
+  },
   "common": {
     "edit": "편집",
     "delete": "삭제",

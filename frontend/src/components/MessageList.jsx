@@ -1,6 +1,7 @@
 import { inboxReadMembers } from '../utils/readCountScope.js';
 import { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import AccountMark from './AccountMark.jsx';
+import PageSizeMenu from './PageSizeMenu.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
 import { api } from '../utils/api.js';
@@ -3254,22 +3255,12 @@ export default function MessageList() {
                   {t('messageList.unread')}
                 </button>
                 {/* Page size */}
-                <select
+                <PageSizeMenu
+                  scope={JSON.stringify([selectedAccountId, selectedFolder, searchQuery, searchAllFolders, unreadOnly, activeCategory, scrollMode, layout])}
                   value={pageSize}
-                  onChange={e => setPageSize(parseInt(e.target.value))}
-                  title={t('messageList.messagesPerPage')}
-                  style={{
-                    background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-                    borderRadius: 6, padding: '4px 6px',
-                    color: 'var(--text-tertiary)', cursor: 'pointer',
-                    fontSize: 11, outline: 'none',
-                  }}
-                >
-                  <option value={25}>25</option>
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                  <option value={200}>200</option>
-                </select>
+                  onChange={setPageSize}
+                  label={t('messageList.messagesPerPage')}
+                />
               </>
             )}
             {/* Select / cancel selection */}
@@ -3311,22 +3302,12 @@ export default function MessageList() {
             >
               {t('messageList.unread')}
             </button>
-            <select
+            <PageSizeMenu
+              scope={JSON.stringify([selectedAccountId, selectedFolder, searchQuery, searchAllFolders, unreadOnly, activeCategory, scrollMode, layout])}
               value={pageSize}
-              onChange={e => setPageSize(parseInt(e.target.value))}
-              title={t('messageList.messagesPerPage')}
-              style={{
-                background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-                borderRadius: 6, padding: '4px 6px',
-                color: 'var(--text-tertiary)', cursor: 'pointer',
-                fontSize: 11, outline: 'none',
-              }}
-            >
-              <option value={25}>25</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={200}>200</option>
-            </select>
+              onChange={setPageSize}
+              label={t('messageList.messagesPerPage')}
+            />
             <div style={{ position: 'relative', marginLeft: 'auto' }} ref={layoutPickerRef}>
               <button
                 onClick={() => {

@@ -1,3 +1,5 @@
+import FastmailAddressIndicator from './FastmailAddressIndicator.jsx';
+import { useReaderSenderIdentities } from '../hooks/useReaderSenderIdentities.js';
 import { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
 import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
@@ -157,6 +159,13 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // Antispam (v0.1) — toolbar visibility for the spam / ham buttons.
   // Mirrors the heuristic in ContextMenu.jsx so the toolbar matches the menu.
   const account = accounts.find(a => a.id === message?.account_id);
+  const readerUserId = useStore(state => state.user?.id);
+  const readerSessionGeneration = useStore(state => state.countGeneration);
+  const readerLocked = useStore(state => state.isLocked);
+  const readerInventory = useReaderSenderIdentities({
+    userId: readerUserId, account, configRevision: account?.fastmail_config_revision,
+    sessionGeneration: readerSessionGeneration, locked: readerLocked,
+  });
   const accountFolders = useStore(s => s.folders[message?.account_id] || []);
   // Dark email bodies (#228): the setting, and each message's own choice made with the toggle.
   const theme = useStore(s => s.theme);
@@ -747,6 +756,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }, [showMovePicker, message?.account_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleMarkUnread = useCallback(() => {
+    const wasRead = Boolean(message?.representative_is_read ?? message?.is_read);
     if (markMessageUnread(message, {
       cancel: () => {
         cancelScheduledMarkRead(autoMarkReadTimerRef.current);
@@ -758,7 +768,11 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       update: updateMessage, incrementUnread, decrementUnread, adjustCategoryCount,
       patch: api.bulkRead,
       onError: error => addNotification({ type: 'error', title: t('common.error', { message: error.message }) }),
-    }) && isMobile) setSelectedMessage(null);
+    })) {
+      // Acknowledge the local request, not provider confirmation or HTTP success.
+      if (wasRead) addNotification({ type: 'info', title: t('message.unreadRequested') });
+      if (isMobile) setSelectedMessage(null);
+    }
   }, [message, updateMessage, incrementUnread, decrementUnread, adjustCategoryCount, isMobile, setSelectedMessage, addNotification, t]);
 
   const handleEmailClick = useCallback((ev) => {
@@ -2024,7 +2038,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                     <span style={{ color: 'var(--text-secondary)' }}>
                       {toList.length > 0
                         ? toList.map((r, i) => (
-                            <span key={i}>{r.name || r.email}{i < toList.length - 1 ? ', ' : ''}</span>
+                            <span key={i}>{r.name || r.email}<FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />{i < toList.length - 1 ? ', ' : ''}</span>
                           ))
                         : (message.account_email || message.account_name || '')}
                     </span>
@@ -2034,7 +2048,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                       <span>Cc </span>
                       <span style={{ color: 'var(--text-secondary)' }}>
                         {ccList.map((r, i) => (
-                          <span key={i}>{r.name || r.email}{i < ccList.length - 1 ? ', ' : ''}</span>
+                          <span key={i}>{r.name || r.email}<FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />{i < ccList.length - 1 ? ', ' : ''}</span>
                         ))}
                       </span>
                     </div>
@@ -2044,7 +2058,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                       <span>Bcc </span>
                       <span style={{ color: 'var(--text-secondary)' }}>
                         {bccList.map((r, i) => (
-                          <span key={i}>{r.name || r.email}{i < bccList.length - 1 ? ', ' : ''}</span>
+                          <span key={i}>{r.name || r.email}<FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />{i < bccList.length - 1 ? ', ' : ''}</span>
                         ))}
                       </span>
                     </div>
@@ -2081,6 +2095,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                         ? toList.map((r, i) => (
                             <span key={i}>
                               {r.name ? `${r.name} <${r.email}>` : r.email}
+                              <FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />
                               {i < toList.length - 1 ? ', ' : ''}
                             </span>
                           ))
@@ -2094,6 +2109,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                         {ccList.map((r, i) => (
                           <span key={i}>
                             {r.name ? `${r.name} <${r.email}>` : r.email}
+                              <FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />
                             {i < ccList.length - 1 ? ', ' : ''}
                           </span>
                         ))}
@@ -2107,6 +2123,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                         {bccList.map((r, i) => (
                           <span key={i}>
                             {r.name ? `${r.name} <${r.email}>` : r.email}
+                              <FastmailAddressIndicator account={account} email={r.email} inventory={readerInventory} />
                             {i < bccList.length - 1 ? ', ' : ''}
                           </span>
                         ))}

@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Endereço de e-mail mascarado",
+    "alias": "Alias de e-mail"
+  },
   "common": {
     "cancel": "Cancelar",
     "save": "Salvar",

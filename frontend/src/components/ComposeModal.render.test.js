@@ -1129,3 +1129,47 @@ describe('pasting into the signature and the quoted message', () => {
     assertNoCopiedColor(await pasteAndSend({ phone: true }));
   });
 });
+
+// Feature 6b: actual selected-From icon in each layout, consuming validation's sole GET.
+for (const phone of [false, true]) test(`Fastmail selected From icon (${phone ? 'mobile' : 'desktop'})`, async () => {
+  const prior = useStore.getState(), oldGet = api.getSenderIdentities, width = window.innerWidth;
+  const alias = { id: 'icon-alias', email: 'mask@synthetic.test', name: 'Masked sender' };
+  const own = { id: 'icon-account', enabled: true, email_address: 'primary@synthetic.test',
+    name: 'Synthetic', fastmail_config_revision: 'icon-revision', fastmail_verification_supported: true,
+    fastmail_api_token_configured: true, aliases: [alias] };
+  let requests = 0;
+  api.getSenderIdentities = async (accountId, aliasId) => {
+    requests++;
+    assert.equal(accountId, own.id);
+    return { accountId, configRevision: 'icon-revision', provider: 'fastmail', identityStatus: 'ready',
+      maskedStatus: 'ready', identities: [{ email: alias.email }], maskedEmails: [{ email: alias.email }],
+      sender: { email: aliasId ? alias.email : own.email_address, status: 'allowed' } };
+  };
+  const container = document.createElement('div'); document.body.appendChild(container);
+  window.innerWidth = phone ? 375 : 1024;
+  const iconRoot = createRoot(container);
+  try {
+    useStore.setState({ user: { id: 'icon-user' }, isLocked: false, accounts: [own], plaintextEmail: true,
+      composing: false, composeData: null, prepareComposeSwitch: null });
+    useStore.getState().openCompose({ accountId: own.id, aliasId: alias.id, isReply: true,
+      to: ['external@synthetic.test'], subject: 'Synthetic reply', body: '' });
+    await React.act(async () => iconRoot.render(React.createElement(ComposeModal)));
+    const select = container.querySelector('select');
+    const icon = container.querySelector('[role="img"][aria-label="addressIndicator.masked"]');
+    assert.ok(icon, 'reply-as mask gets the icon beside selected From');
+    assert.equal(select.value, `alias:${alias.id}:${own.id}`);
+    assert.equal(select.nextElementSibling, icon);
+    assert.equal(select.querySelector('[role="img"]'), null, 'native options contain no icon');
+    assert.equal(requests, 1, 'icon does not issue a second lookup');
+    await React.act(async () => {
+      select.value = `account:${own.id}`;
+      select.dispatchEvent(new window.Event('change', { bubbles: true }));
+    });
+    assert.equal(container.querySelector('[role="img"][aria-label^="addressIndicator."]'), null, 'primary From remains unmarked');
+    assert.equal(requests, 2, 'only validation refreshes for the changed sender');
+  } finally {
+    await React.act(async () => iconRoot.unmount());
+    container.remove(); api.getSenderIdentities = oldGet; window.innerWidth = width;
+    useStore.setState(prior);
+  }
+});

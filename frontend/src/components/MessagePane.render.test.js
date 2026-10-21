@@ -1112,3 +1112,121 @@ describe('the arrows on a phone', () => {
     }
   });
 });
+
+// Feature 6b: render the real recipient mounts; the send-as warning is separate.
+for (const phone of [false, true]) test(`Fastmail recipient icons (${phone ? 'mobile' : 'desktop'})`, async () => {
+  const prior = useStore.getState(), oldGet = api.getSenderIdentities, width = window.innerWidth;
+  const own = { id: 'icon-account', enabled: true, email_address: 'primary@synthetic.test',
+    fastmail_config_revision: 'icon-revision', fastmail_verification_supported: true,
+    aliases: [{ email: 'alias@synthetic.test' }] };
+  const inventory = { accountId: own.id, configRevision: 'icon-revision', provider: 'fastmail',
+    identityStatus: 'ready', maskedStatus: 'ready', identities: [], maskedEmails: [{ email: 'mask@synthetic.test' }] };
+  let requests = 0;
+  api.getSenderIdentities = async (...args) => { requests++; assert.deepEqual(args, [own.id]); return inventory; };
+  const rows = Array.from({ length: 10 }, (_, i) => ({ ...MSG_A, id: `icon-message-${i}`, account_id: own.id,
+    to_addresses: [{ name: 'Mask recipient', email: 'mask@synthetic.test' }, { email: 'primary@synthetic.test' }, { email: 'external@synthetic.test' }],
+    cc_addresses: [{ name: 'Alias recipient', email: 'alias@synthetic.test' }], bcc_addresses: [] }));
+  try {
+    window.innerWidth = phone ? 375 : 1024;
+    await React.act(async () => {
+      useStore.setState({ user: { id: 'icon-user' }, isLocked: false, accounts: [own], messages: rows,
+        searchQuery: '', selectedMessageId: rows[0].id, threadMessages: {} });
+      root.render(React.createElement(MessagePane, { key: `icons-${phone}` }));
+    });
+    const labels = () => [...document.querySelectorAll('[role="img"][aria-label^="addressIndicator."]')].map(el => el.getAttribute('aria-label'));
+    assert.deepEqual(labels(), ['addressIndicator.masked', 'addressIndicator.alias']);
+    for (const row of rows.slice(1)) await React.act(async () => useStore.setState({ selectedMessageId: row.id }));
+    assert.equal(requests, 1, 'same-account j/k navigation reuses display evidence');
+    await React.act(async () => useStore.setState({ accounts: [{ ...own, name: 'Renamed' }] }));
+    assert.equal(requests, 1, 'polling the account object does not refetch');
+    await React.act(async () => useStore.setState({ isLocked: true }));
+    assert.deepEqual(labels(), [], 'locking synchronously removes address evidence');
+  } finally {
+    await React.act(async () => { root.render(null); useStore.setState(prior); });
+    api.getSenderIdentities = oldGet;
+    window.innerWidth = width;
+  }
+});
+
+
+// This acknowledgement means a local request was accepted, never provider success.
+// Use the actual pane, notification renderer, shared read protocol and HTTP admission.
+describe('explicit unread acknowledgement', () => {
+  for (const [position, status] of [['accepted request', 200], ['known refusal', 400], ['uncertain response', 500], ['already unread', null]]) {
+    test(`explicit unread acknowledgement: ${position}`, async t => {
+      const NotificationToasts = (await import('./NotificationToasts.jsx')).default;
+      const { setImmediate: flush } = await import('node:timers/promises');
+      const originalFetch = globalThis.fetch;
+      const preferences = { markReadBehavior: useStore.getState().markReadBehavior, markReadDelay: useStore.getState().markReadDelay };
+      const message = { ...MSG_A, id: `unread-feedback-${status}`, is_read: status !== null, category: 'primary' };
+      const writes = [];
+      let respond;
+      t.after(async () => {
+        await React.act(async () => {
+          respond?.({ ok: false, status: 400, json: async () => ({ error: 'fixture cleanup refusal' }) });
+          respond = null;
+          await flush();
+          root.render(null);
+          useStore.getState().setLocked(true);
+          useStore.setState({ notifications: [], ...preferences });
+        });
+        globalThis.fetch = originalFetch;
+      });
+      globalThis.fetch = async (url, options = {}) => {
+        const metadata = countMetadataResponse(url);
+        if (metadata) return metadata; // opaque lease, UNKNOWN observations, never fake certification
+        if (String(url).includes('/messages/bulk-read')) {
+          writes.push({ body: JSON.parse(options.body), op: options.headers?.['X-Count-Op'] });
+          return new Promise(resolve => { respond = resolve; });
+        }
+        return { ok: true, status: 200, json: async () => ({ html: '', text: 'Unread feedback body', attachments: [] }), text: async () => '' };
+      };
+      await React.act(async () => {
+        const state = useStore.getState();
+        state.setUser({ id: `feedback-${position}` });
+        state.setLocked(false);
+        state.setAccounts([{ id: 'acct', enabled: true, email_address: 'x@y.z' }]);
+        state.setSelectedAccount('acct');
+        useStore.setState({ markReadBehavior: 'delay', markReadDelay: 10, notifications: [], threadMessages: {}, searchResults: [], searchQuery: '' });
+        state.setUnreadCounts({ total: 1, byAccount: { acct: 1 }, snapshots: { acct: {
+          totalCount: 5, revision: '10', attemptRevision: '10', known: true, stale: false, observedAt: new Date().toISOString(),
+        } } });
+        state.setMessages([message]);
+        state.setSelectedMessage(message.id);
+        root.render(React.createElement(React.Fragment, null, React.createElement(MessagePane), React.createElement(NotificationToasts)));
+        await flush();
+      });
+      assert.equal(useStore.getState().markReadDelay, 10, 'the observed preference is retained');
+      const button = document.querySelector('button[title="contextMenu.markUnread"]');
+      const notices = () => useStore.getState().notifications;
+      const acknowledgements = () => notices().filter(n => n.title === 'message.unreadRequested');
+      if (status === null) {
+        assert.equal(button, null, 'an already-unread pane does not offer the read-to-unread control');
+        assert.equal(writes.length, 0, 'already-unread is a real no-op');
+        assert.equal(acknowledgements().length, 0, 'do not invent another request or success');
+        return;
+      }
+      assert.ok(button, 'the actual pane unread control is available');
+      await React.act(async () => { button.click(); await flush(); });
+      assert.equal(useStore.getState().messages[0].is_read, false, 'the actual row changes immediately');
+      assert.deepEqual(writes.map(write => write.body), [{ ids: [message.id], read: false }]);
+      assert.ok(writes[0].op, 'the actual write uses count admission');
+      assert.equal(acknowledgements().length, 1, 'one local request acknowledgement');
+      assert.equal(acknowledgements()[0].type, 'info', 'not a provider-success toast');
+      assert.ok(document.getElementById('root').textContent.includes('message.unreadRequested'), 'actual NotificationToasts renders the acknowledgement while HTTP is held');
+      assert.equal(useStore.getState().unreadCounts.byAccount.acct, 2, 'the sidebar input increments immediately for the physical INBOX row');
+      await React.act(async () => {
+        respond({ ok: status === 200, status, json: async () => status === 200 ? { ok: true } : { error: `mutation ${status}` } });
+        respond = null;
+        await flush();
+      });
+      assert.equal(writes.length, 1, 'no duplicate write or automatic read');
+      assert.equal(acknowledgements().length, 1, 'completion does not add a success confirmation');
+      assert.equal(notices().some(n => n.type === 'success'), false);
+      assert.equal(notices().filter(n => n.type === 'error').length, status === 200 ? 0 : 1, 'failure stays visible after successful admission');
+      assert.equal(useStore.getState().messages[0].is_read, status === 400, 'only a known refusal rolls the flag back');
+      assert.equal(useStore.getState().unreadCounts.byAccount.acct, status === 400 ? 1 : 2, 'uncertainty preserves the count intent');
+      assert.equal(useStore.getState().selectedMessageId, message.id, 'desktop selection stays in place');
+    });
+  }
+});

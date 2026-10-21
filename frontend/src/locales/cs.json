@@ -1,4 +1,8 @@
 {
+  "addressIndicator": {
+    "masked": "Maskovaná e-mailová adresa",
+    "alias": "E-mailový alias"
+  },
   "common": {
     "cancel": "Zrušit",
     "save": "Uložit",
