@@ -70,7 +70,31 @@ let textOnly = false;
 // What every fetched body carries as its attachment list; a test fills it to see the strip.
 const bodyAttachments = [];
 const remoteBodyRequests = [];
+// Admission metadata is separate from the business requests asserted below.
+// UNKNOWN observations admit the real HTTP tracker; they never certify a
+// fabricated unread baseline. Count certification has its own focused cases.
+const countMetadataRequests = [];
+const countLease = { token: 'fixture.1', expiresInMs: 360000 };
+function countMetadataResponse(url, opts = {}) {
+  const pathname = new URL(String(url), 'https://synthetic.test').pathname;
+  let data;
+  if (pathname === '/api/mail/unread-counts') data = { lease: countLease, byAccount: {}, snapshots: {} };
+  else if (pathname === '/api/mail/counts/refresh') data = { epoch: 'fixture', lease: countLease, refreshSeq: '40' };
+  else return null;
+  countMetadataRequests.push({ pathname, method: opts.method || 'GET' });
+  return { ok: true, status: 200, json: async () => data };
+}
+function assertCountWriteHeader(url, opts = {}) {
+  if (!['GET', 'HEAD'].includes(opts.method || 'GET') &&
+      new URL(String(url), 'https://synthetic.test').pathname.startsWith('/api/mail/messages')) {
+    assert.match(opts.headers?.['X-Count-Op'] || '', /^fixture\.1:/,
+      'actual message writes pass through the count tracker admission lease');
+  }
+}
 globalThis.fetch = async (url, opts = {}) => {
+  const metadata = countMetadataResponse(url, opts);
+  if (metadata) return metadata;
+  assertCountWriteHeader(url, opts);
   const u = String(url);
   if (u.includes('/mail/thread?')) return { ok: true, status: 200, json: async () => ({ messages: THREAD }) };
   if (u.includes('/mail/messages/bulk-read')) {
@@ -347,6 +371,9 @@ describe('conversation actions', () => {
   before(() => {
     realFetch = globalThis.fetch;
     globalThis.fetch = async (url, opts = {}) => {
+      const metadata = countMetadataResponse(url, opts);
+      if (metadata) return metadata;
+      assertCountWriteHeader(url, opts);
       requests.push({ url: String(url), method: opts.method || 'GET', body: opts.body });
       if (starAnswer && String(url).endsWith('/star')) {
         const ok = await starAnswer;
@@ -487,6 +514,10 @@ describe('conversation pane on a phone', () => {
     // phone this pane is the entire screen with no header of its own, so the thread
     // actions sat under the status bar a standalone PWA draws its content behind, and
     // there was no way back to the list at all.
+    // The preceding delete test intentionally leaves its undo window open.
+    // Undo that real pending action before mounting another copy of its thread;
+    // otherwise the delete guard correctly removes every mocked response row.
+    await React.act(async () => { useStore.getState().notifications.forEach(n => n.onUndo?.()); });
     const container = document.createElement('div');
     document.body.appendChild(container);
     dom.window.innerWidth = 375;
@@ -543,6 +574,9 @@ describe('a conversation another account also received', () => {
     await React.act(async () => { useStore.getState().notifications.forEach(n => n.onUndo?.()); });
     realFetch = globalThis.fetch;
     globalThis.fetch = async (url, opts = {}) => {
+      const metadata = countMetadataResponse(url, opts);
+      if (metadata) return metadata;
+      assertCountWriteHeader(url, opts);
       const u = String(url);
       requests.push({ url: u, body: opts.body ? JSON.parse(opts.body) : null });
       if (u.includes('/mail/thread?')) {

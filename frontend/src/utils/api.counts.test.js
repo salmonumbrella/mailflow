@@ -155,3 +155,42 @@ test('after server done-record purge, the funnel never replays completed UUIDs a
   assert.notEqual(headers[0].split(':')[1], headers[1].split(':')[1]);
   assert.equal(headers[1].split(':')[1], headers[2].split(':')[1]);
 });
+
+for (const phase of ['initial', 'after-explicit-epoch-refusal']) {
+  for (const outcome of ['network', 500]) {
+    test(`read-only lease ${phase} ${outcome} failure proves no mutation was applied`, async () => {
+      let reads = 0, commands = 0;
+      const metadataError = new TypeError('Lease connection reset');
+      const headers = [];
+      globalThis.fetch = async (url, opts) => {
+        if (url.endsWith('/unread-counts')) {
+          reads++;
+          if (phase === 'initial' || reads === 2) {
+            if (outcome === 'network') throw metadataError;
+            return response(500, { error: 'Lease unavailable' });
+          }
+          return response(200, lease('metadata.test.1'));
+        }
+        commands++; headers.push(opts.headers['X-Count-Op']);
+        return response(409, { code: 'count-epoch-expired', error: 'Refused before write' });
+      };
+      await assert.rejects(api.bulkArchive(['lease-failure.test']), error => {
+        assert.equal(isCountMutationKnownNotApplied(error), true, 'only metadata failed; no accepted write can be uncertain');
+        if (outcome === 'network') assert.equal(error, metadataError, 'preserve the actual transport error');
+        else assert.equal(error.httpStatus, 500, 'keep the failed read status');
+        return true;
+      });
+      assert.equal(reads, phase === 'initial' ? 1 : 2);
+      assert.equal(commands, phase === 'initial' ? 0 : 1, 'at most the explicitly refused admission attempt was dispatched');
+      globalThis.fetch = async (url, opts) => {
+        if (url.endsWith('/unread-counts')) return response(200, lease('metadata.test.2'));
+        commands++; headers.push(opts.headers['X-Count-Op']);
+        return response(200, { ok: true });
+      };
+      await api.bulkArchive(['fresh-action.test']);
+      assert.equal(commands, phase === 'initial' ? 1 : 2, 'a fresh action still dispatches after metadata recovers');
+      assert.ok(headers.at(-1).startsWith('metadata.test.2:'));
+      if (headers.length > 1) assert.notEqual(headers[0].split(':')[1], headers[1].split(':')[1], 'a fresh action uses a fresh UUID');
+    });
+  }
+}

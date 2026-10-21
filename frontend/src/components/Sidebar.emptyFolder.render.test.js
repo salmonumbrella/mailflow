@@ -59,7 +59,15 @@ dom.window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} 
 globalThis.matchMedia = dom.window.matchMedia;
 dom.window.Element.prototype.scrollIntoView = () => {};
 globalThis.__VITE_ENV__ = { MODE: 'test', DEV: false, PROD: true };
-globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({}), text: async () => '{}' });
+const countLease = { token: 'sidebar.fixture.1', expiresInMs: 360000 };
+const mutationRequests = [];
+globalThis.fetch = async (url, opts = {}) => {
+  const u = String(url);
+  const body = u.endsWith('/mail/unread-counts') ? { lease: countLease, byAccount: {}, snapshots: {} }
+    : u.endsWith('/mail/counts/refresh') ? { epoch: 'sidebar.fixture', lease: countLease, refreshSeq: '40' } : {};
+  if (opts.method && !['GET', 'HEAD'].includes(opts.method) && !u.endsWith('/mail/counts/refresh')) mutationRequests.push({ url: u, opts });
+  return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => body, text: async () => JSON.stringify(body) };
+};
 
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
@@ -76,6 +84,7 @@ const FOLDERS = [
 
 let root;
 async function mount(account = ACCOUNT, folders = FOLDERS) {
+  mutationRequests.length = 0;
   if (root) await React.act(async () => root.unmount());
   useStore.setState({
     accounts: [account], accountsReady: true,
@@ -85,6 +94,7 @@ async function mount(account = ACCOUNT, folders = FOLDERS) {
     collapsedFolders: [], hiddenFolders: {}, notifications: [],
   });
   await React.act(async () => {
+    useStore.getState().setFolders(account.id, folders);
     root = createRoot(dom.window.document.getElementById('root'));
     root.render(React.createElement(Sidebar));
   });
@@ -117,6 +127,9 @@ describe('Sidebar: emptying a role folder names it as the sidebar does (#623)', 
     const titles = useStore.getState().notifications.map(n => n.title);
     assert.ok(titles.includes('Emptying "Trash"…'), `notifications: ${JSON.stringify(titles)}`);
     assert.ok(!titles.some(title => title.includes('Deleted Items')));
+    assert.equal(mutationRequests.length, 1, 'the empty-folder command reached the HTTP boundary');
+    assert.match(mutationRequests[0].url, /\/mail\/folders\/empty$/);
+    assert.match(mutationRequests[0].opts.headers['X-Count-Op'], /^sidebar\.fixture\.1:/);
   });
 
   test('so is a spam folder, and one mapped in the account settings', async () => {

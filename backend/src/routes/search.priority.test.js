@@ -39,11 +39,21 @@ describe('search metadata priority route', () => {
       if (sql.startsWith('SELECT id, include')) return Promise.resolve({ rows: accounts });
       if (sql.startsWith('SELECT account_id, path')) return Promise.resolve({ rows: [] });
       if (sql.startsWith('/* search metadata priority */')) return probe(sql, values);
-      const bucket = [...sql.matchAll(/^\s*AND m\.date IS (NOT )?NULL\b/gm)];
-      const undated = bucket.length && bucket[0][1] === undefined;
-      if (sql.includes('WITH captured_snapshot')) return Promise.resolve({ rows: undated || !bodyRows.length
+      // The flat candidate clause is appended to select's last line; the
+      // grouped sibling guard also mentions m.date, so identify the complete
+      // candidate clause and cross-check its own ORDER BY, not a line prefix.
+      const buckets = [...sql.matchAll(/\bAND m\.date IS (NOT )?NULL(?=\s+(?:AND|ORDER BY))/g)];
+      expect(buckets).toHaveLength(1);
+      const undated = buckets[0][1] === undefined;
+      const grouped = sql.startsWith('WITH fence AS MATERIALIZED (');
+      expect(sql).toContain(`ORDER BY ${undated ? '' : 'm.date DESC, '}m.account_id, ${grouped ? 'm.thread_key, ' : ''}m.id`);
+      if (grouped) return Promise.resolve({ rows: undated || !bodyRows.length
         ? [{ id: null, _snapshot: '10:20:12' }] : bodyRows.map(row => ({ ...row, _snapshot: '10:20:12' })) });
-      return Promise.resolve({ rows: undated ? [] : bodyRows.map(({ thread_key, ...row }) => row) });
+      return Promise.resolve({ rows: undated ? [] : bodyRows.map(row => {
+        const physical = { ...row };
+        delete physical.thread_key;
+        return physical;
+      }) });
     });
   });
   afterEach(async () => {

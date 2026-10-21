@@ -70,7 +70,17 @@ Object.assign(globalThis, {
 dom.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} });
 dom.window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
 globalThis.__VITE_ENV__ = { MODE: 'test', DEV: false, PROD: true };
-globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => '' });
+const countMetadataCalls = [];
+const countMetadataResponse = url => {
+  const path = String(url), lease = { token: 'fixture.1', expiresInMs: 360000 };
+  const body = path.includes('/mail/unread-counts') ? { lease, byAccount: {}, snapshots: {} }
+    : path.includes('/mail/counts/refresh') ? { epoch: 'fixture', lease, refreshSeq: '40' } : null;
+  if (!body) return null;
+  countMetadataCalls.push(path);
+  return { ok: true, status: 200, json: async () => body, text: async () => '' };
+};
+globalThis.fetch = async url => countMetadataResponse(url)
+  ?? ({ ok: true, status: 200, json: async () => ({}), text: async () => '' });
 
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
@@ -818,24 +828,33 @@ describe('the next message opens after the pane removes the open one', () => {
     await React.act(async () => { useStore.getState().setSelectedMessage(id); });
     await React.act(async () => { root.render(React.createElement(MessagePane)); });
   };
-  const click = el => React.act(async () => { el.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); });
+  const click = async (el, t) => {
+    let ownedUndo;
+    t.after(async () => { if (ownedUndo) await React.act(async () => ownedUndo()); });
+    await React.act(async () => {
+      const previous = new Set(useStore.getState().notifications.map(n => n.id));
+      el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      ownedUndo = useStore.getState().notifications.find(n => !previous.has(n.id) && n.onUndo)?.onUndo;
+    });
+    assert.equal(typeof ownedUndo, 'function', 'the action owns an Undo lifecycle');
+  };
 
-  test('Delete opens the message below', async () => {
+  test('Delete opens the message below', async t => {
     await show('b2');
-    await click(paneButton('message.delete'));
+    await click(paneButton('message.delete'), t);
     assert.equal(useStore.getState().selectedMessageId, 'c3');
     assert.deepEqual(useStore.getState().messages.map(m => m.id), ['a1', 'c3']);
   });
 
-  test('Archive with "previous" opens the message above', async () => {
+  test('Archive with "previous" opens the message above', async t => {
     await show('b2', 'previous');
-    await click(paneButton('message.archive'));
+    await click(paneButton('message.archive'), t);
     assert.equal(useStore.getState().selectedMessageId, 'a1');
   });
 
-  test('"back to the list" leaves the pane empty, as before', async () => {
+  test('"back to the list" leaves the pane empty, as before', async t => {
     await show('b2', 'list');
-    await click(paneButton('message.delete'));
+    await click(paneButton('message.delete'), t);
     assert.equal(useStore.getState().selectedMessageId, null);
     useStore.setState({ afterRemove: 'next' });
   });
@@ -980,8 +999,11 @@ describe('the star button', () => {
   let answer;
   before(() => {
     originalFetch = globalThis.fetch;
-    globalThis.fetch = async (url) => {
+    globalThis.fetch = async (url, opts = {}) => {
+      const metadata = countMetadataResponse(url);
+      if (metadata) return metadata;
       if (String(url).endsWith('/star')) {
+        assert.ok(opts.headers?.['X-Count-Op'], 'the actual star write carries count admission');
         const ok = await new Promise(resolve => { answer = resolve; });
         return ok
           ? { ok: true, status: 200, json: async () => ({ ok: true }) }

@@ -235,7 +235,8 @@ describe('Done followed by Watch classification', () => {
     h.refresh();
     await doneGtdRow(headerless, ['watch'], h.deps);
     h.supply(sections(headerless));
-    const { message_id: _header, ...classificationMessage } = headerless;
+    const classificationMessage = { ...headerless };
+    delete classificationMessage.message_id;
     await h.classify({ ok: true, applied: true }, classificationMessage);
     assert.deepEqual(h.displayed.watch.threads, [headerless]);
   });

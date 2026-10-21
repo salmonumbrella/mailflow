@@ -35,6 +35,9 @@ test('actual store releases a selection whose account has been deleted', () => {
   assert.equal(after.selectedAccountId, null, 'falls back to the unified inbox');
   assert.equal(after.selectedFolder, 'INBOX', 'a folder scoped to the dead account is dropped too');
   assert.deepEqual(Object.keys(after.folders), ['live'], 'stops polling folders that 404');
+  assert.deepEqual(Object.keys(after.serverFolders), ['live'], 'the canonical folder cache drops the deleted account too');
+  after.setUnreadCounts({ byAccount: { live: 3 }, snapshots: {} });
+  assert.deepEqual(Object.keys(useStore.getState().folders), ['live'], 'a later count projection cannot resurrect the deleted folder cache');
   assert.equal(localStorage.getItem('mailflow_selected_account'), '',
     'the fallback must survive a reload, or localStorage restores the dead id');
 });

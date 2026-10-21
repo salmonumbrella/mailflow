@@ -261,10 +261,13 @@ async function groupedSearchPage({ select, params, siblingConditions, cap, curso
   if (rows.length < budget) rows.push(...await bucket(true, cursor?.bucket === 'undated' ? cursor : null, budget - rows.length));
   const page = collectGroupedSearchPage(rows, { limit: cap, exhausted: rows.length < budget });
   const nextCursor = page.hasMore ? encodeSearchCursor(page.lastConsumed, scope, { mode: 'grouped', snapshot }) : null;
-  const messages = page.messages.map(({ _cursor_date, _snapshot, thread_key, ...message }) => ({
-    ...message, matched_message_id: message.id, newest_match_date: _cursor_date,
-    reply_thread_id: message.thread_id, thread_id: JSON.stringify([message.account_id, thread_key]),
-  }));
+  const messages = page.messages.map(({ _cursor_date, thread_key, ...message }) => {
+    delete message._snapshot;
+    return {
+      ...message, matched_message_id: message.id, newest_match_date: _cursor_date,
+      reply_thread_id: message.thread_id, thread_id: JSON.stringify([message.account_id, thread_key]),
+    };
+  });
   return { messages, nextCursor, hasMore: page.hasMore };
 }
 

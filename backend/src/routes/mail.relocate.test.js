@@ -117,7 +117,9 @@ describe('label copy column list', () => {
     query.mockReset();
     query.mockResolvedValue({ rows: [] });
     await insertCopiedSibling('acct', 1, 'INBOX', 'Todo', 2);
-    const sql = query.mock.calls[0][0];
+    const insertCalls = query.mock.calls.filter(([sql]) => /^\s*INSERT INTO messages\s*\(/i.test(sql));
+    expect(insertCalls).toHaveLength(1);
+    const sql = insertCalls[0][0];
     const labelCols = sql.slice(sql.indexOf('(') + 1, sql.indexOf(')')).split(',').map(s => s.trim());
     const relocateCols = RELOCATE_INSERT_COLS.split(',').map(s => s.trim());
     expect([...labelCols].sort()).toEqual([...relocateCols].sort());

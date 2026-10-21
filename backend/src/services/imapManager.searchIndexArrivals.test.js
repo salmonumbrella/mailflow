@@ -180,8 +180,7 @@ describe('phase1 identity-union CTE committed-id handoff',()=>{
       expect(state.committed).toBe(false);expect(manager.enqueueCommittedSearchRows).not.toHaveBeenCalled();
       expect(manager._noteSecondaryRefusal).not.toHaveBeenCalled();
     });
-    it.each(['ordinary storage failure','disk quota storage failure','authentication-shaped storage failure'])
-      (`${mode}: preserves committed ingest after handoff throws %s`,async detail=>{
+    it.each(['ordinary storage failure','disk quota storage failure','authentication-shaped storage failure'])(`${mode}: preserves committed ingest after handoff throws %s`,async detail=>{
         state.legacyNew=true;
         manager.enqueueCommittedSearchRows.mockImplementation(async()=>{throw new Error(detail);});
         const value=await finish(invoke(mode),mode);

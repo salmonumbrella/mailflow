@@ -369,8 +369,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('search source producer
     await db.query(`INSERT INTO messages(id,account_id,folder,uid,date,provider_msgid,is_archive_residue)
       VALUES($1,$2,'Archive',5,$3,'902',true)`,[copyId,accountId,date]);
   };
-  it.each([['2026-10-21T00:00:00Z','2000-01-01T00:00:00Z'],['2099-01-01T00:00:00Z','2026-10-21T00:00:00Z']])
-    ('targets a committed back-dated arrival below high %s without an older wrap',async(high,date)=>{
+  it.each([['2026-10-21T00:00:00Z','2000-01-01T00:00:00Z'],['2099-01-01T00:00:00Z','2026-10-21T00:00:00Z']])('targets a committed back-dated arrival below high %s without an older wrap',async(high,date)=>{
       await ready();await db.query('UPDATE messages SET date=$1',[high]);
       await producer(account,{profile,limit:1});await arrival(date);
       expect(await rows()).toHaveLength(1);

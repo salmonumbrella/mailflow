@@ -42,7 +42,7 @@ registerHooks({
 const dom = new JSDOM('<div id="root"></div>', { url: 'https://mail.example.invalid', pretendToBeVisual: true });
 Object.assign(globalThis, {
   window: dom.window, document: dom.window.document,
-  localStorage: dom.window.localStorage, CustomEvent: dom.window.CustomEvent,
+  localStorage: dom.window.localStorage, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent,
   Node: dom.window.Node, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement,
   getComputedStyle: dom.window.getComputedStyle,
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },

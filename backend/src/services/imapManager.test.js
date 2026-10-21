@@ -1294,7 +1294,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
       parsedHeaders: {},
     });
 
-    const result = await ImapManager.prototype.syncMessages.call({}, account, client, 'Watch', 50, false, true);
+    const result = await ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'Watch', 50, false, true);
 
     expect(client.fetch).toHaveBeenCalledTimes(1);
     expect(client.fetch.mock.calls[0][0]).toBe('1:*');
@@ -1341,7 +1341,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
       return Promise.resolve({ rows: [] });
     });
 
-    await ImapManager.prototype.syncMessages.call({}, account, client, 'Watch', 50, false, true);
+    await ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'Watch', 50, false, true);
 
     expect(client.fetch).toHaveBeenCalledTimes(1);
     expect(client.fetch).toHaveBeenCalledWith(
@@ -1392,7 +1392,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
         snippet: 'hi', isRead: true, isStarred: false, hasAttachments: false, flags: ['\\Seen'], isBulk: false, parsedHeaders: {},
       });
 
-      const mgr = { pluginFacade: { __facade: true } };
+      const mgr = { pluginFacade: { __facade: true }, _isArchiveFolder: ImapManager.prototype._isArchiveFolder };
       await ImapManager.prototype.syncMessages.call(mgr, account, client, 'INBOX', 50, false, true);
 
       expect(hasActive).toHaveBeenCalledWith('inboxIngest', { account });
@@ -1433,7 +1433,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
         snippet: 'hi', isRead: true, isStarred: false, hasAttachments: false, flags: ['\\Seen'], isBulk: false, parsedHeaders: {},
       });
 
-      await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+      await ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'INBOX', 50, false, true);
       expect(runHook).not.toHaveBeenCalledWith('inboxIngest', expect.anything());
     } finally {
       hasActive.mockRestore();
@@ -1477,7 +1477,7 @@ describe('syncMessages — unread_count recompute ordering (folder badge fix)', 
         snippet: 'hi', isRead: true, isStarred: false, hasAttachments: false, flags: ['\\Seen'], isBulk: false, parsedHeaders: {},
       });
 
-      await ImapManager.prototype.syncMessages.call({ pluginFacade: {} }, account, client, 'Junk', 100, false, true);
+      await ImapManager.prototype.syncMessages.call({ pluginFacade: {}, _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'Junk', 100, false, true);
 
       const calls = query.mock.calls.map(c => c[0]);
       const insertIdx = calls.findIndex(sql => sql.includes('INSERT INTO messages'));
@@ -2946,7 +2946,7 @@ describe('syncMessages — empty mailbox still stamps last_sync', () => {
       getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       mailbox: { exists: 0 },
     };
-    const result = await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+    const result = await ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'INBOX', 50, false, true);
     expect(result).toEqual({ insertedCount: 0, broadcastedNewMessages: false });
     const stamps = query.mock.calls.filter(c => /UPDATE email_accounts SET last_sync/.test(c[0]));
     expect(stamps).toHaveLength(1);
@@ -2955,7 +2955,7 @@ describe('syncMessages — empty mailbox still stamps last_sync', () => {
 
   it('invalidates a previous UID epoch even when the rebuilt mailbox is empty', async () => {
     query.mockImplementation(async sql => ({ rows: sql.includes('SELECT uid_validity') ? [{ uid_validity: '7' }] : [], rowCount: 0 }));
-    const mgr = { _bgConnSem: createKeyedSemaphore(2), backfillMessages: vi.fn().mockResolvedValue() };
+    const mgr = { _bgConnSem: createKeyedSemaphore(2), backfillMessages: vi.fn().mockResolvedValue(), _isArchiveFolder: ImapManager.prototype._isArchiveFolder };
     const client = { noop: async () => true, getMailboxLock: async () => ({ release() {} }), mailbox: { exists: 0, uidValidity: 8n } };
     await ImapManager.prototype.syncMessages.call(mgr, account, client, 'INBOX', 50, false, true);
     await new Promise(resolve => setImmediate(resolve));
@@ -2969,14 +2969,14 @@ describe('syncMessages — empty mailbox still stamps last_sync', () => {
   it('still releases the mailbox lock on the empty path', async () => {
     const release = vi.fn();
     const client = { noop: async () => true, getMailboxLock: vi.fn().mockResolvedValue({ release }), mailbox: { exists: 0 } };
-    await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+    await ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'INBOX', 50, false, true);
     expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('does NOT stamp when the mailbox object is missing — unknown state, not a confirmed sync', async () => {
     const client = { noop: async () => true, getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }), mailbox: null };
     await expect(
-      ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true)
+      ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'INBOX', 50, false, true)
     ).resolves.toEqual({ insertedCount: 0, broadcastedNewMessages: false });
     expect(query.mock.calls.filter(c => /UPDATE email_accounts SET last_sync/.test(c[0]))).toHaveLength(0);
   });
@@ -3007,7 +3007,7 @@ describe('syncMessages refreshes a selected mailbox it did not re-select', () =>
       noop: vi.fn(async () => { mailbox.exists = 0; return true; }),
       getMailboxLock: vi.fn(async () => ({ release() {} })),
     };
-    await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+    await ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'INBOX', 50, false, true);
     expect(client.noop).toHaveBeenCalledTimes(1);
     expect(query.mock.calls.some(([sql]) => sql.includes('total_count=0'))).toBe(true);
   });
@@ -3018,7 +3018,7 @@ describe('syncMessages refreshes a selected mailbox it did not re-select', () =>
       noop: vi.fn(async () => true),
       getMailboxLock: vi.fn(async () => { client.mailbox = { exists: 0 }; return { release() {} }; }),
     };
-    await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+    await ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'INBOX', 50, false, true);
     expect(client.noop).not.toHaveBeenCalled();
   });
 
@@ -3028,7 +3028,7 @@ describe('syncMessages refreshes a selected mailbox it did not re-select', () =>
       noop: vi.fn(async () => true),
       getMailboxLock: vi.fn(async () => { client.mailbox = { exists: 0 }; return { release() {} }; }),
     };
-    await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+    await ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'INBOX', 50, false, true);
     expect(client.noop).not.toHaveBeenCalled();
   });
 
@@ -3040,7 +3040,7 @@ describe('syncMessages refreshes a selected mailbox it did not re-select', () =>
       getMailboxLock: vi.fn(async () => ({ release })),
     };
     await expect(
-      ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true)
+      ImapManager.prototype.syncMessages.call({ _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'INBOX', 50, false, true)
     ).rejects.toThrow(/NOOP/);
     expect(release).toHaveBeenCalledTimes(1);
     expect(query).not.toHaveBeenCalled();
@@ -4080,7 +4080,7 @@ describe('ingest paths pass isBulk to computeThreadId (#649)', () => {
     });
     parseMessage.mockResolvedValue(parsedMessage(isBulk));
 
-    await ImapManager.prototype.syncMessages.call({ maybeClassifyNewMessage: vi.fn() }, account, client, 'Watch', 50, false, true);
+    await ImapManager.prototype.syncMessages.call({ maybeClassifyNewMessage: vi.fn(), _isArchiveFolder: ImapManager.prototype._isArchiveFolder }, account, client, 'Watch', 50, false, true);
 
     expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO messages'))).toBe(true);
     expect(subjectFallbackRan()).toBe(!isBulk);
@@ -4196,6 +4196,7 @@ describe('backfill — a reconnect that cannot succeed', () => {
   let acct, serverUids;
   const TEN_MINUTES = 10 * 60 * 1000;
   const manager = () => ({ backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {},
+    _isArchiveFolder: ImapManager.prototype._isArchiveFolder,
     _secondaryConnectBlocked: () => null, _noteSecondaryRefusal: vi.fn(), maybeClassifyNewMessage: vi.fn() });
   // The whole walk, with the real backoff so the walk's own refusal is what its finally sees.
   // The follow-up jobs are spies: what matters is whether they start.
@@ -4204,6 +4205,7 @@ describe('backfill — a reconnect that cannot succeed', () => {
     _connectCooldown: new Map(), _secondaryCooldown: new Map(),
     _secondaryConnectBlocked: ImapManager.prototype._secondaryConnectBlocked,
     _noteSecondaryRefusal: ImapManager.prototype._noteSecondaryRefusal,
+    runArchiveCoverageBatch: vi.fn(ImapManager.prototype.runArchiveCoverageBatch),
     refreshBulkFlags: vi.fn().mockResolvedValue(), startSnippetIndexer: vi.fn().mockResolvedValue() });
   const rejectedLogin = () => Object.assign(new Error('Command failed'), {
     responseText: 'Invalid credentials (Failure)', serverResponseCode: 'AUTHENTICATIONFAILED' });
@@ -4357,6 +4359,7 @@ describe('backfill — a reconnect that cannot succeed', () => {
     expect(run.settled).toBe(true);
     expect(mgr._bgConnSem.activeCount('imap.example.com')).toBe(0);
     // Each would log in to the disabled account, the snippet indexer to download message bodies.
+    expect(mgr.runArchiveCoverageBatch).not.toHaveBeenCalled();
     expect(mgr.refreshBulkFlags).not.toHaveBeenCalled();
     expect(mgr.startSnippetIndexer).not.toHaveBeenCalled();
   });
@@ -4372,6 +4375,7 @@ describe('backfill — a reconnect that cannot succeed', () => {
     expect(ImapFlow).toHaveBeenCalledTimes(4);
     // The walk armed the backoff as it ended; another rejected login inside it helps nobody.
     expect(mgr._secondaryCooldown.get(acct.id)?.failures).toBe(1);
+    expect(mgr.runArchiveCoverageBatch).not.toHaveBeenCalled();
     expect(mgr.refreshBulkFlags).not.toHaveBeenCalled();
     expect(mgr.startSnippetIndexer).not.toHaveBeenCalled();
   });
@@ -4391,6 +4395,7 @@ describe('backfill — a reconnect that cannot succeed', () => {
     await vi.advanceTimersByTimeAsync(TEN_MINUTES);
 
     expect(run.settled).toBe(true);
+    expect(mgr.runArchiveCoverageBatch).toHaveBeenCalledWith(acct);
     expect(mgr.refreshBulkFlags).toHaveBeenCalledWith(acct);
     expect(mgr.startSnippetIndexer).toHaveBeenCalledWith(acct);
   });
@@ -6158,7 +6163,7 @@ describe('syncMessages — tells the client when a Drafts folder gained rows', (
     });
     // An unread arrival also schedules a body prefetch (setImmediate) and classification; stub
     // both, or the prefetch throws after the test has finished.
-    const mgr = { pluginFacade: {}, broadcast: vi.fn(), prefetchNewMessageBodies: vi.fn(async () => {}), maybeClassifyNewMessage: vi.fn() };
+    const mgr = { pluginFacade: {}, broadcast: vi.fn(), prefetchNewMessageBodies: vi.fn(async () => {}), maybeClassifyNewMessage: vi.fn(), _isArchiveFolder: ImapManager.prototype._isArchiveFolder };
     await ImapManager.prototype.syncMessages.call(mgr, account, client, folder, 100, false, true);
     return mgr.broadcast.mock.calls.map(([event, userId]) => [event.type, event.accountId, userId]);
   }

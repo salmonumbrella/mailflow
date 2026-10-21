@@ -26,8 +26,11 @@ export default function SearchCoverage({ accountId, sessionGeneration, refreshRe
     }
   }, [accountId, scope]);
   useEffect(() => {
+    // Capture the stable counter object, not its current numeric ticket: cleanup
+    // must invalidate whichever request is latest when this scope is disposed.
+    const requestSequence = sequence;
     if (accountId && sessionGeneration != null) void load();
-    return () => { sequence.current++; };
+    return () => { requestSequence.current++; };
   }, [accountId, sessionGeneration, refreshRevision, load]);
 
   const action = async kind => {

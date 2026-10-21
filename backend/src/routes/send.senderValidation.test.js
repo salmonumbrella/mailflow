@@ -25,7 +25,8 @@ vi.mock('./draft.js', () => ({ deleteSentDraft: vi.fn() }));
 // This focused route fixture isolates the pre-existing sanitizer/parser stack;
 // it does not establish sanitizer integration or actual provider/SMTP evidence.
 vi.mock('../services/emailSanitizer.js', () => ({ sanitizeSignature: value => value }));
-vi.mock('../services/imapManager.js', () => ({ providerProfile: () => ({ labelStore: false }) }));
+// Use the real providerProfile/PROVIDERS pair, as the existing send.gmailSent
+// and send.view fixtures do; a partial manager mock broke the pre-hold branch.
 vi.mock('../services/searchCoverage.js', () => ({ getSearchCoverage: vi.fn() }));
 vi.mock('../services/searchIndexJobs.js', () => ({ setSearchCoverageAction: vi.fn() }));
 import express from 'express';

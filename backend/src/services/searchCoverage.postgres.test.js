@@ -91,8 +91,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('live body search cover
     expect((await one()).body).toMatchObject({ verified: 0, pending: 1, cachedComplete: false });
   });
 
-  it.each(['["7b","provider:901","1"]', '["7b","provider:902","0"]'])
-  ('rejects a live generation for the wrong source version %s', async version => {
+  it.each(['["7b","provider:901","1"]', '["7b","provider:902","0"]'])('rejects a live generation for the wrong source version %s', async version => {
     await publish(undefined, version);
     expect((await one()).body).toMatchObject({ verified: 0, pending: 1 });
   });

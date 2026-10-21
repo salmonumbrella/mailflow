@@ -70,15 +70,25 @@ let SERVED = [];
 let ROUTES = {};
 // Every request, with its JSON body, for tests that assert what reached the server.
 let CALLS = [];
+const COUNT_METADATA_CALLS = [];
 let listResponse = null;
 globalThis.fetch = async (url, opts = {}) => {
   const path = String(url);
   let sent = null;
   try { sent = typeof opts.body === 'string' ? JSON.parse(opts.body) : null; } catch { /* not JSON */ }
-  CALLS.push({ path, method: opts.method || 'GET', body: sent });
+  const call = { path, method: opts.method || 'GET', body: sent, countOp: opts.headers?.['X-Count-Op'] };
+  if (!['GET', 'HEAD'].includes(call.method) && /\/mail\/messages(?:\/|$)/.test(path)) {
+    assert.ok(call.countOp, 'actual message mutation carries X-Count-Op');
+  }
+  if (/\/mail\/(?:unread-counts|category-counts|counts\/refresh)/.test(path)) COUNT_METADATA_CALLS.push(call);
+  else CALLS.push(call);
   if (listResponse && path.includes('/mail/messages?')) return listResponse(new URL(path, window.location.origin));
   const [status, body] = Object.entries(ROUTES).find(([p]) => path.endsWith(p))?.[1]
-    ?? [200, path.includes('/mail/messages?') ? { messages: SERVED, total: SERVED.length } : {}];
+    ?? [200, path.includes('/mail/unread-counts')
+      ? { lease: { token: 'fixture.1', expiresInMs: 360000 }, byAccount: {}, snapshots: {} }
+      : path.includes('/mail/counts/refresh')
+        ? { epoch: 'fixture', lease: { token: 'fixture.1', expiresInMs: 360000 }, refreshSeq: '40' }
+        : path.includes('/mail/messages?') ? { messages: SERVED, total: SERVED.length } : {}];
   return { ok: status < 400, status, headers: { get: () => 'application/json' }, json: async () => body, text: async () => JSON.stringify(body) };
 };
 
@@ -108,6 +118,7 @@ let container, root;
 async function mount({ rows, threadedView, folder = 'INBOX', accountId = 'acct-1', accounts = [ACCOUNT], accountsReady = true, hasMoreMessages = false }) {
   SERVED = rows;
   if (root) await React.act(async () => root.unmount());
+  useStore.getState().setLocked(false);
   container = dom.window.document.getElementById('root');
   useStore.setState({
     accounts, accountsReady,
@@ -956,7 +967,7 @@ describe('MessageList — a conversation another account also received (#476)', 
       const row = { ...members[0], message_count: 5, unread_count: 4 };
       const truth = new Map(members.map(m => [m.id, { ...m }]));
       const gets = [];
-      let releaseRead, releaseObservation;
+      let releaseObservation;
       const observationGate = new Promise(resolve => { releaseObservation = resolve; });
       const ownedPendingTimers = new Set();
       const nativeSetTimeout = globalThis.setTimeout;
@@ -975,7 +986,6 @@ describe('MessageList — a conversation another account also received (#476)', 
             useStore.getState().setLocked(true);
             if (root) { root.unmount(); root = null; }
             gets.forEach(get => get.resolve({ messages: [] }));
-            releaseRead?.();
             releaseObservation();
           });
         } finally {
@@ -1107,7 +1117,9 @@ describe('MessageList — a conversation another account also received (#476)', 
       }
       if (mode === 'cross-account') { intent = localRead(ACCOUNT_B.id); completeReadIntent(intent); }
       if (mode === 'delete-first') setPendingDelete(member.id);
-      if (mode === 'cache-reuse') useStore.getState().setThreadMessages(row.thread_id, [{ ...member, is_read: true }, survivor]);
+      if (mode === 'cache-reuse') await React.act(async () => {
+        useStore.getState().setThreadMessages(row.thread_id, [{ ...member, is_read: true }, survivor]);
+      });
       const toggle = () => React.act(async () => {
         const button = container.querySelector(`[data-msgid="${row.id}"] button[aria-expanded]`);
         assert.ok(button, 'the real ThreadRow exposes its expansion action');

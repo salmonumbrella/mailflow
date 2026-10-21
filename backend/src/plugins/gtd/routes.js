@@ -553,7 +553,7 @@ async function archiveOtherInboxCopies(account, copy, rows, proofs) {
     console.warn('GTD done: a thread copy in INBOX has no Message-ID to resolve, leaving it');
     return { failed: true };
   }
-  let inboxCopy, pushedIds = [];
+  let inboxCopy, pushedIds;
   try {
     const result = await markSurvivingMessageRead(account, copy, rows, [], proofs);
     inboxCopy = result.inboxCopy;

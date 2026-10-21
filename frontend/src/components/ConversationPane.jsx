@@ -91,6 +91,8 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   // Read when the conversation arrives, without making the pick a reason to fetch it again.
   const pickedRef = useRef(selectedMessageId);
   pickedRef.current = selectedMessageId;
+  const searchScopeRef = useRef(searchScope);
+  searchScopeRef.current = searchScope;
   const searchScopeKey = searchScope ? JSON.stringify([
     searchScope.query, searchScope.accountId, searchScope.folder, searchScope.mode, searchScope.sessionGeneration,
   ]) : null;
@@ -99,6 +101,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
     if (!threadId) { setMessages([]); return; }
     let cancelled = false;
     const generation = useStore.getState().countGeneration;
+    const requestScope = searchScopeRef.current;
     setLoading(true);
     setError(null);
     if (searchScopeKey !== null) {
@@ -107,7 +110,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
     }
     Promise.resolve().then(async () => {
       const readToken = captureReadRequest();
-      const data = await api.getThread(threadId, folder, unified, searchScope ? { ...searchScope, matchedMessageId } : null);
+      const data = await api.getThread(threadId, folder, unified, requestScope ? { ...requestScope, matchedMessageId } : null);
       return { data, readToken };
     })
       .then(({ data, readToken }) => {

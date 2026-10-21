@@ -303,17 +303,20 @@ describe('Done route through plugin API and real mail engine', () => {
     selectionError = true;
     const response = await done(A); expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ archived: true });
-    expect(events).toEqual([['seen', 'INBOX'], ['delete', 'Watch', '42'], ['move', 'INBOX', 'Archive']]);
+    expect(events).toEqual([['delete', 'Watch', '42'], ['seen', 'INBOX'], ['move', 'INBOX', 'Archive']]);
+    expect(wire).toEqual([['INBOX', '11', true]]);
     expect(imapManager._pendingFlagPush.size).toBe(0);
   });
-  it('awaits a surviving copy before strip/archive, without STORE or retry for the stripped label', async () => {
+  it('awaits a surviving copy after stripping and before archive, without STORE or retry for the stripped label', async () => {
     rows.push(row(C, 'Todo', 99)); hold = 'Todo'; let finished = false;
     const response = done(B).then(r => { finished = true; return r; });
     for (let n = 0; n < 100 && !releaseHold; n++) await new Promise(resolve => setTimeout(resolve, 1));
     expect(releaseHold).toBeTypeOf('function'); expect(finished).toBe(false);
-    expect(events).toEqual([['seen', 'INBOX']]);
+    expect(events).toEqual([['delete', 'Watch', '42'], ['seen', 'INBOX']]);
+    expect(wire).toEqual([['INBOX', '11', true]]);
     hold = null; releaseHold(); expect((await response).status).toBe(200);
-    expect(events).toEqual([['seen', 'INBOX'], ['seen', 'Todo'], ['delete', 'Watch', '42'], ['move', 'INBOX', 'Archive']]);
+    expect(events).toEqual([['delete', 'Watch', '42'], ['seen', 'INBOX'], ['seen', 'Todo'], ['move', 'INBOX', 'Archive']]);
+    expect(wire).toEqual([['INBOX', '11', true], ['Todo', '99', true]]);
     expect(imapManager._pendingFlagPush.size).toBe(0);
   });
   it('writes the kept only copy exactly once before archiving it', async () => {

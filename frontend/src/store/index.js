@@ -240,7 +240,7 @@ export const useStore = create((set, get) => ({
         accounts, accountsReady: true, selectedAccountId,
         ...(reselected ? { selectedFolder: 'INBOX' } : {}),
         folders: pruneFolders(state.folders, accounts),
-        ...countProjection(state, { accounts, selectedAccountId, ...countPatch }),
+        ...countProjection(state, { accounts, selectedAccountId, serverFolders: pruneFolders(state.serverFolders, accounts), ...countPatch }),
       }));
     } finally { end?.(); }
   },

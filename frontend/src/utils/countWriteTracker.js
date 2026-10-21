@@ -52,8 +52,13 @@ export function createCountWriteTracker(callbacks) {
     valid(state);
     if (force) state.lease = null;
     if (!state.lease || state.lease.until <= performance.now()) {
-      state.loading ||= Promise.resolve(callbacks.loadLease(force)).then(payload => { if (!state.lease || state.lease.until <= performance.now()) observeLease(payload.lease, state.generation, state.leaseReadOrder || 0); }).finally(() => { state.loading = null; });
-      await state.loading;
+      try {
+        state.loading ||= Promise.resolve(callbacks.loadLease(force)).then(payload => { if (!state.lease || state.lease.until <= performance.now()) observeLease(payload.lease, state.generation, state.leaseReadOrder || 0); }).finally(() => { state.loading = null; });
+        await state.loading;
+      } catch (error) {
+        // This read failed before dispatch, including after an explicit epoch refusal.
+        throw Object.assign(error, { notApplied: true });
+      }
     }
     valid(state);
     if (!state.lease) throw Object.assign(new Error('Count session metadata unavailable; retry after refreshing counts'), { code: 'count-lease-unavailable', notApplied: true });

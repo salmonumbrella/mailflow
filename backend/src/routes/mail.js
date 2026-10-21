@@ -347,7 +347,7 @@ async function resolveSearchThreadAuthorization(req, groupId) {
   if (!Array.isArray(group) || group.length !== 2 ||
       typeof group[0] !== 'string' || !UUID_RE.test(group[0]) ||
       typeof group[1] !== 'string' || !group[1] || group[1].length > 4096 ||
-      /[\x00-\x1f\x7f]/.test(group[1])) {
+      Array.from(group[1]).some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) {
     throw searchContextError(400, 'Invalid search conversation');
   }
   if (typeof req.query.q !== 'string' || !req.query.q.trim() || req.query.q.trim().length > 500 ||
@@ -423,7 +423,11 @@ async function selectAuthorizedPhysicalThreadContext({ account, threadKey, match
     throw searchContextError(404, 'Matched message unavailable');
   }
   const physical = suppressVerifiedCrossFolderRepresentations(rows, matchedMessageId, providerProfile(account).labelStore);
-  return physical.map(({ _provider_identity_verified, ...message }) => message);
+  return physical.map(row => {
+    const message = { ...row };
+    delete message._provider_identity_verified;
+    return message;
+  });
 }
 
 async function getSearchThread(req, res, threadId) {

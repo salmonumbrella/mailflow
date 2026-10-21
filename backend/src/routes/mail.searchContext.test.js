@@ -35,7 +35,7 @@ describe('authorized search conversation context', () => {
   beforeEach(() => {
     accounts = [{ id: a, include_in_unified_inbox: true, imap_host: 'imap.gmail.com' }];
     rows = [message(1), message(2, { folder: 'Sent' })];
-    query.mockReset().mockImplementation(async (sql, values) => {
+    query.mockReset().mockImplementation(async sql => {
       if (sql.includes('FROM email_accounts WHERE user_id')) return { rows: accounts };
       if (sql.includes('AS _provider_identity_verified')) return { rows };
       if (sql.includes('FROM folders')) return { rows: [{ path: sql.includes('special_use = \'\\Trash\'') ? 'Trash' : 'Spam' }] };

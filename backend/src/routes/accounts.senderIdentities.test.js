@@ -23,7 +23,11 @@ let row, owned, alias, server, base;
 beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '71'.repeat(32);
   const app = express(); app.use(express.json()); app.use('/accounts', routes);
-  app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+  // Keep Express's four-argument error-handler contract and delegate after headers.
+  app.use((err, _req, res, next) => {
+    if (res.headersSent) return next(err);
+    return res.status(err.status || 500).json({ error: err.message });
+  });
   await new Promise(resolve => { server = app.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${server.address().port}/accounts`;
 });

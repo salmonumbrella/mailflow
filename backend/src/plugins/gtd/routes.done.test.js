@@ -1056,13 +1056,19 @@ describe('POST /api/gtd/done — strips every copy in the thread', () => {
     }
   });
 
-  it('sends no \\Seen to a duplicate INBOX row that is already read', async () => {
+  it('confirms Seen once for each unconfirmed duplicate INBOX row before its archive, even when the DB says read', async () => {
     const acted = row(6, 'Watch', B, { id: MSG_ID });
     stubThread([acted, row(77, 'INBOX', B), row(78, 'INBOX', B)], acted);
     imapManager.moveMessage.mockResolvedValue(88);
     await done({ id: MSG_ID, states: ['watch'] });
     expect(imapManager.moveMessage.mock.calls.map(c => c[1])).toEqual([77, 78]);
-    expect(imapManager.setFlag).not.toHaveBeenCalled();
+    expect(imapManager.setFlag.mock.calls).toEqual([
+      [account, 77, 'INBOX', '\\Seen', true],
+      [account, 78, 'INBOX', '\\Seen', true],
+    ]);
+    for (let i = 0; i < 2; i++) {
+      expect(imapManager.setFlag.mock.invocationCallOrder[i]).toBeLessThan(imapManager.moveMessage.mock.invocationCallOrder[i]);
+    }
   });
 
   // Archiving moves no unread, so a row may go only once its message is marked read.
@@ -1275,19 +1281,28 @@ describe('POST /api/gtd/done — strips every copy in the thread', () => {
     expect(removedCopies()).toEqual([]);
   });
 
-  // Message rows read by id: the acted message's load, then one per copy about to be archived.
+  // Owned-row reads cover live-witness selection and the separate archive readback.
   const byIdReads = () => query.mock.calls
     .filter(([sql]) => sql.includes('FROM messages m') && sql.includes('JOIN email_accounts'))
     .map(([, params]) => params[0]);
 
-  // A deleted copy needs no proof that the marking landed; only an archive does.
-  it('reads back only the copy it archives, not another message\'s deleted copy', async () => {
+  // Lookup probes must never become STOREs or archive moves on removed label copies.
+  it('proves the archived copy read after fan-out without writing to removed label copies', async () => {
     const acted = row(6, 'Watch', B, { id: MSG_ID });
     stubThread([row(5, 'Watch', A), row(15, 'Receipts', A), acted, row(77, 'INBOX', B)], acted);
     imapManager.moveMessage.mockResolvedValue(88);
-    await done({ id: MSG_ID, states: ['watch'] });
+    const res = await done({ id: MSG_ID, states: ['watch'] });
+    expect(await res.json()).toMatchObject({ ok: true, archived: true, archiveFailed: false, threadRemains: false });
     expect(removedCopies()).toEqual([[5, 'Watch'], [6, 'Watch']]);
-    expect(byIdReads()).toEqual([MSG_ID, 'row-77']);
+    expect(imapManager.moveMessage.mock.calls).toEqual([[account, 77, 'INBOX', 'Archive']]);
+    expect(imapManager.setFlag.mock.calls).toEqual([[account, 77, 'INBOX', '\\Seen', true]]);
+    const mark = query.mock.calls.findLastIndex(([sql]) => sql.startsWith('UPDATE messages SET is_read'));
+    const readback = query.mock.calls.findLastIndex(([sql, params]) => sql.includes('FROM messages m')
+      && sql.includes('JOIN email_accounts') && params[0] === 'row-77');
+    expect(mark).toBeGreaterThanOrEqual(0);
+    expect(readback).toBeGreaterThan(mark);
+    expect(query.mock.invocationCallOrder[readback]).toBeLessThan(imapManager.moveMessage.mock.invocationCallOrder[0]);
+    expect(byIdReads()).toEqual([MSG_ID, 'row-5', 'row-15', 'row-77', 'row-77']);
   });
 
   // The thread's rows can read as read while a same-Message-ID copy filed under another thread does not.
@@ -1309,12 +1324,15 @@ describe('POST /api/gtd/done — strips every copy in the thread', () => {
     }
   });
 
-  it('reads no copy back when nothing of the acted message is archived', async () => {
+  it('validates the non-INBOX survivor without archiving or flagging a removed copy', async () => {
     const acted = row(6, 'Watch', B, { id: MSG_ID });
     stubThread([acted, row(16, 'Receipts', B)], acted);
     const res = await done({ id: MSG_ID, states: ['watch'] });
-    expect(await res.json()).toMatchObject({ ok: true, archived: false });
-    expect(byIdReads()).toEqual([MSG_ID]);
+    expect(await res.json()).toMatchObject({ ok: true, archived: false, archiveFailed: false, threadRemains: false });
+    expect(removedCopies()).toEqual([[6, 'Watch']]);
+    expect(byIdReads()).toContain('row-16');
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
+    expect(imapManager.setFlag).not.toHaveBeenCalled();
   });
 });
 
