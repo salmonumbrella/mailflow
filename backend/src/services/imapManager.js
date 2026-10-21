@@ -2,7 +2,8 @@ import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
 import { extractImapError } from './imapError.js';
 import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
 import { ImapFlow } from 'imapflow';
-import { query } from './db.js';
+import { uniqueMessageUid } from './imapIdentity.js';
+import { query, withTransaction } from './db.js';
 import { parseMessage, parseMailboxList, snippetFromBody, detectBulkFromParsedHeaders, ALIAS_FORWARDER_HEADERS, parseHeadersInput, headersToRawString, decodeMimeWords, enrichParsedMetadata, renderCalendarInvite } from './messageParser.js';
 import { headerIds, searchReplyDraftUids, draftFolderPaths } from './replyDraftLookup.js';
 import { classifyMessage, loadSocialDomains, getGlobalCategorizationEnabled } from './categorizer.js';
@@ -6232,14 +6233,10 @@ export class ImapManager {
 
   async findUidByMessageId(account, folder, messageId) {
     if (!messageId || !folder) return null;
-    const mid = String(messageId).replace(/[<>]/g, '').trim();
-    if (!mid) return null;
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
-        const uids = await client.search({ header: ['Message-ID', mid] }, { uid: true });
-        if (!uids?.length) return null;
-        return uids[uids.length - 1];
+        return await uniqueMessageUid(client, messageId);
       } finally {
         lock.release();
       }
@@ -6922,7 +6919,7 @@ export class ImapManager {
     });
   }
 
-  async setFlag(account, uid, folder, flag, value) {
+  async setFlag(account, uid, folder, flag, value, options = {}) {
     // Serialized per account. Review found a cross-call inversion: call A's persistent
     // STORE could be granted its lock just before the 5s deadline, linger on the wire
     // while the fallback also stored, and land AFTER a newer call B stored the opposite
@@ -6930,7 +6927,7 @@ export class ImapManager {
     // an older op). Two flag operations for one account never overlap now, so a stale
     // STORE cannot outlive a newer one. Waiters are short: the inner attempt is bounded.
     const prev = this._flagOpChains.get(account.id) || Promise.resolve();
-    const run = prev.catch(() => {}).then(() => this._setFlagInner(account, uid, folder, flag, value));
+    const run = prev.catch(() => {}).then(() => this._setFlagInner(account, uid, folder, flag, value, options));
     this._flagOpChains.set(account.id, run);
     try {
       return await run;
@@ -6939,8 +6936,17 @@ export class ImapManager {
     }
   }
 
-  async _setFlagInner(account, uid, folder, flag, value) {
+  async _setFlagInner(account, uid, folder, flag, value, options = {}) {
     console.log(`setFlag: uid=${uid} folder=${folder} flag=${flag} value=${value}`);
+
+    const verify = async client => {
+      if (Object.hasOwn(options, 'expectMessageId') &&
+          await uniqueMessageUid(client, options.expectMessageId) !== Number(uid)) {
+        const error = new Error('Flag target identity could not be confirmed');
+        error.unsafeMessageIdentity = true;
+        throw error;
+      }
+    };
 
     // Attempt 0: the persistent IDLE connection, the way Thunderbird stores flags: DONE,
     // STORE on the same session, re-IDLE (ImapFlow breaks and resumes IDLE around any
@@ -6977,6 +6983,8 @@ export class ImapManager {
             // after the pool path's is the inversion described at setFlag.
             await refreshSelectedMailbox(client);
             if (expired) throw new Error('persistent flag store timed out');
+            await verify(client);
+            if (expired) throw new Error('persistent flag store timed out');
             const applied = value
               ? await client.messageFlagsAdd(String(uid), [flag], { uid: true })
               : await client.messageFlagsRemove(String(uid), [flag], { uid: true });
@@ -6992,6 +7000,7 @@ export class ImapManager {
           // Mark the detached attempt dead BEFORE falling through: its late-arriving lock
           // must release-and-exit, not store a flag the pool path is about to store again.
           expired = true;
+          if (err.unsafeMessageIdentity) throw err;
           logger.debug(`setFlag persistent attempt failed, using pool: ${extractImapError(err)}`);
         }
       }
@@ -7020,6 +7029,7 @@ export class ImapManager {
         await withFreshClient(account, async (client) => {
           const lock = await client.getMailboxLock(folder);
           try {
+            await verify(client);
             const flagResult = value
               ? await client.messageFlagsAdd(String(uid), [flag], { uid: true })
               : await client.messageFlagsRemove(String(uid), [flag], { uid: true });
@@ -7033,6 +7043,7 @@ export class ImapManager {
         });
         return; // applied
       } catch (err) {
+        if (err.unsafeMessageIdentity) throw err;
         lastErr = err;
         if (attempt < 2) await new Promise(r => setTimeout(r, 400));
       }
@@ -7633,6 +7644,50 @@ export class ImapManager {
     return result.rows;
   }
 
+  async _recountSnoozeFolders(client, row) {
+    await client.query(`UPDATE folders f SET
+      total_count = (SELECT COUNT(*) FROM messages m WHERE m.account_id=f.account_id AND m.folder=f.path AND NOT m.is_deleted),
+      unread_count = (SELECT COUNT(*) FILTER (WHERE m.is_read = false) FROM messages m WHERE m.account_id=f.account_id AND m.folder=f.path)
+      WHERE f.account_id=$1 AND f.path=ANY($2::text[])`,
+    [row.account_id, [row.snoozed_folder, row.original_folder]]);
+  }
+
+  async _commitSnoozeMove(row, newUid, markUnread) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await withTransaction(async client => {
+          const { rows: [source] } = await client.query(
+            `SELECT id FROM messages WHERE account_id=$1 AND uid=$2 AND folder=$3
+             AND message_id IS NOT DISTINCT FROM $4 AND NOT is_deleted FOR UPDATE`,
+            [row.account_id, row.uid, row.snoozed_folder, row.message_id_header]);
+          if (source) {
+            if (newUid != null) {
+              await client.query('DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 AND id <> $4',
+                [row.account_id, newUid, row.original_folder, source.id]);
+              const updated = await client.query(
+                `UPDATE messages SET folder = $1, uid = $4${markUnread ? ', is_read = false, read_changed_at = NOW()' : ''} WHERE account_id = $2 AND message_id = $3 AND folder = $5 AND uid = $6`,
+                [row.original_folder, row.account_id, row.message_id_header, newUid, row.snoozed_folder, row.uid]);
+              if (updated.rowCount !== 1) throw new Error('Snoozed source changed during cache repoint');
+            } else {
+              // A source UID has no meaning at the destination. Drop only this
+              // stale cache row; destination sync will ingest its physical copy.
+              const removed = await client.query('DELETE FROM messages WHERE id = $1', [source.id]);
+              if (removed.rowCount !== 1) throw new Error('Snoozed source changed during cache removal');
+            }
+          }
+          await client.query('DELETE FROM snoozed_messages WHERE id = $1', [row.snooze_id]);
+          await this._recountSnoozeFolders(client, row);
+          return Boolean(source) && newUid != null;
+        });
+      } catch (err) {
+        // An INSERT after a destination gap can beat the UPDATE. Roll back the
+        // coalescing and recheck the source/destination once, without another MOVE.
+        if (attempt === 0 && ['23505', '40001', '40P01'].includes(err.code)) continue;
+        throw err;
+      }
+    }
+  }
+
   // Brings one snoozed message back to where it was snoozed from. On its own wake-up it comes back
   // unread, so the reader notices it; brought back by hand (#269) it keeps its read state.
   // `onlyIfDue` (the sweep) leaves a snooze that is no longer due. Returns whether it came back,
@@ -7668,59 +7723,49 @@ export class ImapManager {
           account, row.uid, row.snoozed_folder, row.original_folder
         );
 
-        // Mark as unread so the user notices it (not when the reader asked for it back).
-        if (markUnread && newUid) {
-          await this.setFlag(account, newUid, row.original_folder, '\\Seen', false);
-        } else if (markUnread && row.message_id_header) {
-          // No UIDPLUS — server moved the message but returned no UID map.
-          // Search the destination folder by Message-ID to locate and unflag \Seen.
+        // No UIDPLUS: bind only an exact, unique destination identity. A failed
+        // lookup must not turn the old source UID into an address for a retry.
+        if (markUnread && newUid == null) {
           try {
-            await withFreshClient(account, async (client) => {
-              const lock = await client.getMailboxLock(row.original_folder);
-              try {
-                const uids = await client.search({ header: ['Message-ID', row.message_id_header] }, { uid: true });
-                if (uids.length > 0) {
-                  const r = await client.messageFlagsRemove(String(uids[0]), ['\\Seen'], { uid: true });
-                  if (r === false) console.warn(`Snooze wakeup: messageFlagsRemove returned false for ${row.original_folder}`);
-                } else {
-                  console.warn(`Snooze wakeup: could not find message in ${row.original_folder} to mark unread (Message-ID: ${row.message_id_header})`);
-                }
-              } finally {
-                lock.release();
-              }
-            });
+            newUid = await this.findUidByMessageId(account, row.original_folder, row.message_id_header);
           } catch (err) {
-            console.warn(`Snooze wakeup: could not mark message unread on server (no UIDPLUS): ${err.message}`);
+            console.warn(`Snooze wakeup: destination lookup failed: ${err.message}`);
           }
         }
 
-        // Update DB: change folder (and mark unread, on its own wake-up), and update UID if the move returned one.
-        if (newUid != null) {
-          await query(
-            `UPDATE messages SET folder = $1, uid = $4${markUnread ? ', is_read = false, read_changed_at = NOW()' : ''} WHERE account_id = $2 AND message_id = $3 AND folder = $5`,
-            [row.original_folder, row.account_id, row.message_id_header, newUid, row.snoozed_folder]
-          );
-        } else {
-          // Non-UIDPLUS: DB holds the stale source UID at the destination. Guard it so
-          // reconcileDeletes does not treat it as an orphan before the next sync corrects it.
-          this._guardMoveUid(row.account_id, row.original_folder, row.uid);
-          await query(
-            `UPDATE messages SET folder = $1${markUnread ? ', is_read = false, read_changed_at = NOW()' : ''} WHERE account_id = $2 AND message_id = $3 AND folder = $4`,
-            [row.original_folder, row.account_id, row.message_id_header, row.snoozed_folder]
-          );
-          setTimeout(() => this._unguardMoveUid(row.account_id, row.original_folder, row.uid), 10_000);
+        let bound = false;
+        let needsSync = newUid == null;
+        try {
+          bound = await this._commitSnoozeMove(row, newUid, markUnread);
+          needsSync ||= !bound;
+        } catch (err) {
+          console.warn(`Snooze wakeup: cache reconciliation failed after MOVE: ${err.message}`);
+          // The transaction rolled back. Preserve its useful destination row,
+          // retire the already-committed server move, and recover both caches.
+          await query('DELETE FROM snoozed_messages WHERE id = $1', [row.snooze_id]);
+          await this._recountSnoozeFolders({ query }, row);
+          needsSync = true;
         }
+        if (markUnread && newUid != null) {
+          try {
+            await this.setFlag(account, newUid, row.original_folder, '\\Seen', false,
+              { expectMessageId: row.message_id_header });
+          } catch (err) {
+            needsSync = true;
+            console.warn(`Snooze wakeup: could not mark verified destination unread: ${err.message}`);
+          }
+        }
+        if (needsSync) {
+          console.warn('Snooze wakeup: destination state needs resync; no unverified unread retry queued');
+          for (const folder of new Set([row.snoozed_folder, row.original_folder])) {
+            this.syncFolderOnDemand(account, folder)
+              .catch(err => console.warn(`Snooze wakeup: recovery sync failed: ${err.message}`));
+          }
+        }
+
       } finally {
         this._unguardMoveUid(row.account_id, row.snoozed_folder, row.uid);
       }
-
-      // Remove snooze record
-      await query('DELETE FROM snoozed_messages WHERE id = $1', [row.snooze_id]);
-
-      // Update folder counts: message leaves Snoozed and re-enters original_folder (unread on its own wake-up).
-      // row.is_read reflects the read state in the Snoozed folder before the move.
-      adjustFolderCounts(row.account_id, row.snoozed_folder, -1, row.is_read ? 0 : -1);
-      adjustFolderCounts(row.account_id, row.original_folder, 1, markUnread || !row.is_read ? 1 : 0);
 
       // Notify the user's open clients so the message reappears
       this.broadcast({ type: 'snooze_wakeup', accountId: row.account_id }, row.user_id);
