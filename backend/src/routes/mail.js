@@ -30,6 +30,14 @@ import { updateIncrementalForUser } from '../services/spamModelStore.js';
 const router = Router();
 router.use(requireAuth);
 
+// Slice 5 supplies Gmail label actions. Until then an archive representation
+// must never reach the ordinary physical MOVE/DELETE/COPY paths.
+function rejectArchiveResidue(res, messages) {
+  if (!messages.some(message => message.is_archive_residue)) return false;
+  res.status(409).json({ error: 'This action is not supported for archive residue' });
+  return true;
+}
+
 // Whether an account-scoped plugin that maintains label sibling rows (currently GTD) is active for
 // this account — the modern replacement for the former email_accounts.gtd_enabled gate on the
 // read/star sibling fan-out. Core stays plugin-agnostic: it asks the registry, never GTD directly.
@@ -1505,6 +1513,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
 
     const owned = result.rows;
     if (!owned.length) return res.json({ ok: true, deleted: [] });
+    if (rejectArchiveResidue(res, owned)) return;
 
     // Guard source UIDs for the whole operation so reconcileDeletes can't delete a
     // trash-move source row between the IMAP move and the re-INSERT CTE (message vanishing
@@ -1776,6 +1785,7 @@ router.post('/messages/bulk-move', async (req, res) => {
 
     const owned = result.rows;
     if (!owned.length) return res.json({ ok: true, moved: [] });
+    if (rejectArchiveResidue(res, owned)) return;
 
     // Guard every source (account, folder, uid) for the whole bulk move. bulkMoveMessages
     // removes the UIDs from the server (seconds of wall-clock), and a concurrent
@@ -1899,12 +1909,13 @@ router.post('/messages/:id/copy', async (req, res) => {
     return res.status(400).json({ error: 'Invalid message or folder' });
   }
   const source = await query(`
-    SELECT m.id, m.account_id, m.uid, m.folder, a.folder_mappings
+    SELECT m.id, m.account_id, m.uid, m.folder, m.is_archive_residue, a.folder_mappings
     FROM messages m JOIN email_accounts a ON a.id = m.account_id
     WHERE m.id = $1 AND a.user_id = $2 AND a.enabled = true AND m.is_deleted = false
   `, [id, req.session.userId]);
   const message = source.rows[0];
   if (!message) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, [message])) return;
   const destination = await query(`
     SELECT path, name, special_use FROM folders
     WHERE account_id = $1 AND path = $2 AND no_select = false
@@ -1952,6 +1963,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
 
     const owned = result.rows;
     if (!owned.length) return res.json({ ok: true, archived: [], noArchiveFolder: [] });
+    if (rejectArchiveResidue(res, owned)) return;
 
     // Guard source UIDs for the whole operation so reconcileDeletes can't delete a source
     // row between the IMAP move and the re-INSERT CTE (message vanishing from both folders).
@@ -2128,7 +2140,7 @@ export async function gatherSnoozeConversation(msg) {
   // reply-chain walk below filters out the subject-only collisions that thread_id
   // also collects (e.g. identical automated-notification emails).
   const pool = (await query(
-    `SELECT id, uid, account_id, folder, message_id, in_reply_to, thread_references, is_read
+    `SELECT id, uid, account_id, folder, message_id, in_reply_to, thread_references, is_read, is_archive_residue
      FROM messages
      WHERE account_id = $1 AND thread_id = $2 AND message_id IS NOT NULL`,
     [msg.account_id, msg.thread_id]
@@ -2251,6 +2263,7 @@ router.post('/messages/:id/snooze', async (req, res) => {
   );
   if (!msgResult.rows.length) return res.status(404).json({ error: 'Message not found' });
   const msg = msgResult.rows[0];
+  if (rejectArchiveResidue(res, [msg])) return;
 
   if (!msg.message_id) return res.status(400).json({ error: 'Message has no Message-ID header — cannot snooze' });
 
@@ -2269,6 +2282,7 @@ router.post('/messages/:id/snooze', async (req, res) => {
   // gatherSnoozeConversation for why Gmail requires this and why it's bounded
   // to the header reply chain rather than thread_id).
   const convo = await gatherSnoozeConversation(msg);
+  if (rejectArchiveResidue(res, convo)) return;
 
   // Drop the leftover records of earlier snoozes of these messages, so the new snooze is the
   // only one and an old wake time cannot wake the message early.
@@ -2342,8 +2356,10 @@ router.patch('/messages/:id/snooze', async (req, res) => {
   if (untilError) return res.status(400).json({ error: untilError });
   const msg = await ownedMessage(id, req.session.userId);
   if (!msg) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, [msg])) return;
   const rows = msg.message_id ? await snoozedTogether(msg, req.session.userId) : [];
   if (!rows.length) return res.status(404).json({ error: 'Message is not snoozed' });
+  if (rejectArchiveResidue(res, rows)) return;
   await query('UPDATE snoozed_messages SET snooze_until = $1 WHERE id = ANY($2)',
     [untilDate.toISOString(), rows.map(r => r.snooze_id)]);
   imapManager.broadcast({ type: 'folder_updated', folder: msg.folder, accountId: msg.account_id }, req.session.userId);
@@ -2357,8 +2373,10 @@ router.post('/messages/:id/unsnooze', async (req, res) => {
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
   const msg = await ownedMessage(id, req.session.userId);
   if (!msg) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, [msg])) return;
   const rows = msg.message_id ? await snoozedTogether(msg, req.session.userId) : [];
   if (!rows.length) return res.status(404).json({ error: 'Message is not snoozed' });
+  if (rejectArchiveResidue(res, rows)) return;
   const notWoken = [];
   for (const row of rows) {
     if (!(await imapManager.wakeSnoozed(row, { markUnread: false }))) notWoken.push(row);
@@ -2385,6 +2403,7 @@ async function deleteMessage(req, res, id) {
 
   if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
   const message = result.rows[0];
+  if (rejectArchiveResidue(res, [message])) return;
 
   const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
   const account = accountResult.rows[0];
@@ -2673,12 +2692,13 @@ router.post('/messages/:id/spam', async (req, res) => {
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
   const lookup = await query(`
-    SELECT m.account_id, a.folder_mappings FROM messages m
+    SELECT m.account_id, m.is_archive_residue, a.folder_mappings FROM messages m
     JOIN email_accounts a ON m.account_id = a.id
     WHERE m.id = $1 AND a.user_id = $2
   `, [id, req.session.userId]);
 
   if (!lookup.rows.length) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, lookup.rows)) return;
   const spamFolder = await resolveSpamFolder(lookup.rows[0].account_id, lookup.rows[0].folder_mappings);
   if (!spamFolder) return res.status(422).json({ error: 'No spam folder configured for this account' });
 
@@ -2733,6 +2753,9 @@ router.patch('/messages/:id/category', async (req, res) => {
   if (!VALID_CATEGORIES.has(category)) {
     return res.status(400).json({ error: 'Invalid category' });
   }
+  const source = await ownedMessage(id, req.session.userId);
+  if (!source) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, [source])) return;
 
   // A chosen category is stored as itself, 'primary' included. NULL means "not chosen": the
   // ingest classifier leaves Primary that way, and the Recategorize backfill (which reads only
@@ -2759,13 +2782,14 @@ router.post('/messages/:id/unsubscribe', async (req, res) => {
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
   const result = await query(`
-    SELECT m.list_unsubscribe, m.list_unsubscribe_post
+    SELECT m.list_unsubscribe, m.list_unsubscribe_post, m.is_archive_residue
     FROM messages m
     JOIN email_accounts a ON m.account_id = a.id
     WHERE m.id = $1 AND a.user_id = $2 AND m.is_deleted = false
   `, [id, req.session.userId]);
 
   if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, result.rows)) return;
   const { list_unsubscribe: rawUnsub, list_unsubscribe_post: rawUnsubPost } = result.rows[0];
   if (!rawUnsub) return res.status(400).json({ error: 'No unsubscribe header' });
   const list_unsubscribe = decodeMimeWords(rawUnsub);
@@ -2831,12 +2855,13 @@ router.post('/messages/:id/ham', async (req, res) => {
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
   const lookup = await query(`
-    SELECT m.account_id, m.folder, a.folder_mappings FROM messages m
+    SELECT m.account_id, m.folder, m.is_archive_residue, a.folder_mappings FROM messages m
     JOIN email_accounts a ON m.account_id = a.id
     WHERE m.id = $1 AND a.user_id = $2
   `, [id, req.session.userId]);
 
   if (!lookup.rows.length) return res.status(404).json({ error: 'Message not found' });
+  if (rejectArchiveResidue(res, lookup.rows)) return;
   const allSpam = await resolveAllSpamPaths(lookup.rows[0].account_id, lookup.rows[0].folder_mappings);
   if (!allSpam.has(lookup.rows[0].folder)) {
     return res.status(400).json({ error: 'Message is not in the spam folder' });
