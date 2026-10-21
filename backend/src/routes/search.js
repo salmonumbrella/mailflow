@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { createHash } from 'node:crypto';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
@@ -112,22 +113,61 @@ export function trashFolderExclusionCondition() {
 export const FTS_BODY_CHAR_CAP = 600000;
 
 // Builds the per-term free-text OR-condition: a term matches if it appears in
-// the sender, the subject, the stored search_vector, or the length-capped body.
+// the sender, subject, stored metadata vector, or published body chunks. Legacy
+// cached bodies are considered only until a verified generation is available.
 // Extracted so the body cap is a single, testable source of truth.
 export function freeTextTermCondition(likeIdx, ftsIdx) {
+  const verified = (dictionary, column) => `(numnode(plainto_tsquery('${dictionary}', $${ftsIdx})) > 0
+            AND NOT EXISTS (
+              SELECT 1 FROM unnest(tsvector_to_array(to_tsvector('${dictionary}', $${ftsIdx}))) AS q(lexeme)
+              WHERE NOT EXISTS (SELECT 1 FROM search_text_chunks c WHERE c.generation_id=m.search_generation_id
+                AND c.${column} @@ quote_literal(q.lexeme)::tsquery)))`;
   return `(
         m.from_name ILIKE $${likeIdx}
         OR m.from_email ILIKE $${likeIdx}
         OR m.subject ILIKE $${likeIdx}
         OR m.search_vector @@ plainto_tsquery('english', $${ftsIdx})
-        OR to_tsvector('english', LEFT(coalesce(m.body_text,''), ${FTS_BODY_CHAR_CAP})) @@ plainto_tsquery('english', $${ftsIdx})
+        OR CASE WHEN m.search_generation_id IS NOT NULL THEN
+          CASE WHEN numnode(plainto_tsquery('english', $${ftsIdx})) > 0
+            THEN ${verified('english', 'en_tsv')}
+            ELSE ${verified('simple', 'simple_tsv')}
+          END
+        ELSE CASE WHEN numnode(plainto_tsquery('english', $${ftsIdx})) > 0
+          THEN to_tsvector('english', LEFT(coalesce(m.body_text,''), ${FTS_BODY_CHAR_CAP})) @@ plainto_tsquery('english', $${ftsIdx})
+          ELSE to_tsvector('simple', LEFT(coalesce(m.body_text,''), ${FTS_BODY_CHAR_CAP})) @@ plainto_tsquery('simple', $${ftsIdx})
+        END END
       )`;
+}
+
+export function encodeSearchCursor(row, scope) {
+  return Buffer.from(JSON.stringify({ v: 1, scope, bucket: row._cursor_date === null ? 'undated' : 'dated',
+    date: row._cursor_date, accountId: row.account_id, id: row.id })).toString('base64url');
+}
+
+export function decodeSearchCursor(raw, scope) {
+  if (raw === undefined || raw === '') return null;
+  try {
+    if (typeof raw !== 'string' || raw.length > 2048 || !/^[\w-]+$/.test(raw)) throw new Error();
+    const bytes = Buffer.from(raw, 'base64url');
+    if (bytes.toString('base64url') !== raw) throw new Error();
+    const cursor = JSON.parse(bytes.toString());
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (cursor.v !== 1 || cursor.scope !== scope || typeof cursor.accountId !== 'string' ||
+        !uuid.test(cursor.accountId) || typeof cursor.id !== 'string' || !uuid.test(cursor.id)) throw new Error();
+    if (cursor.bucket === 'dated') {
+      if (typeof cursor.date !== 'string' || !/^(?!0000)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(cursor.date) ||
+          new Date(cursor.date).toISOString() !== `${cursor.date.slice(0, 23)}Z`) throw new Error();
+    } else if (cursor.bucket !== 'undated' || cursor.date !== null) throw new Error();
+    return cursor;
+  } catch {
+    throw new Error('Invalid search cursor');
+  }
 }
 
 router.get('/', searchLimiter, async (req, res) => {
   const { q, accountId, limit = 50, offset = 0 } = req.query;
   const trimmed = (q || '').trim();
-  if (!trimmed) return res.json({ messages: [] });
+  if (!trimmed) return req.query.cursor ? res.status(400).json({ error: 'Invalid search cursor' }) : res.json({ messages: [], nextCursor: null });
   if (trimmed.length > 500) return res.status(400).json({ error: 'Search query too long' });
 
   const accountsResult = await query(
@@ -135,10 +175,19 @@ router.get('/', searchLimiter, async (req, res) => {
     [req.session.userId]
   );
   const { accountIds: targetIds } = resolveAccountScope(accountsResult.rows, accountId);
-  if (!targetIds.length) return res.json({ messages: [] });
-
   const cap = Math.max(1, Math.min(parseInt(limit) || 50, 200));
   const { filters, terms } = parseSearchQuery(trimmed);
+  const { folderScope, folderFuzzy } = resolveSearchFolderScope(filters, req.query.folder || '');
+  const scope = createHash('sha256').update(JSON.stringify([req.session.userId, trimmed, accountId || null,
+    [...targetIds].sort(), folderScope, folderFuzzy, req.query.mode || 'flat'])).digest('hex');
+  let cursor;
+  try {
+    cursor = decodeSearchCursor(req.query.cursor, scope);
+    if (req.query.cursor !== undefined && Number(offset) !== 0) throw new Error('Invalid search cursor');
+  } catch {
+    return res.status(400).json({ error: 'Invalid search cursor' });
+  }
+  if (!targetIds.length) return res.json({ messages: [], nextCursor: null });
 
   const conditions = [];
   const params = [targetIds];
@@ -210,10 +259,9 @@ router.get('/', searchLimiter, async (req, res) => {
 
   // Require at least one real search condition before applying folder scope, so a
   // bare `in:inbox` (or a lone folder param) never dumps an entire folder.
-  if (!conditions.length) return res.json({ messages: [], query: q });
+  if (!conditions.length) return res.json({ messages: [], query: q, nextCursor: null });
 
   // Resolve folder scope: in: operator wins; otherwise use the param.
-  const { folderScope, folderFuzzy } = resolveSearchFolderScope(filters, req.query.folder || '');
   if (folderScope) {
     if (folderFuzzy) {
       // in:<name> — case-insensitive match on a folder named exactly that, or a
@@ -235,26 +283,48 @@ router.get('/', searchLimiter, async (req, res) => {
   }
 
   const off = Math.max(0, parseInt(offset) || 0);
-  params.push(cap);
-  params.push(off);
 
   try {
-    const result = await query(`
+    const select = `
       SELECT
         m.id, m.uid, m.folder, m.message_id, m.subject, m.from_name, m.from_email,
-        m.to_addresses, m.cc_addresses, m.in_reply_to, m.thread_references,
-        m.date, m.snippet, m.is_read, m.is_starred, m.has_attachments, m.account_id,
+        m.to_addresses, m.cc_addresses, m.reply_to, m.delivery_addresses, m.thread_id,
+        m.in_reply_to, m.thread_references,
+        m.date, to_char(m.date AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS _cursor_date,
+        m.snippet, m.is_read, m.is_starred, m.has_attachments, m.account_id,
         a.name as account_name, a.email_address as account_email, a.color as account_color
       FROM messages m
       JOIN email_accounts a ON m.account_id = a.id
       WHERE m.account_id = ANY($1)
         AND m.is_deleted = false
-        AND ${conditions.join('\n        AND ')}
-      ORDER BY m.date DESC
-      LIMIT $${p} OFFSET $${p + 1}
-    `, params);
-
-    res.json({ messages: result.rows, query: q });
+        AND ${conditions.join('\n        AND ')}`;
+    let rows;
+    if (req.query.cursor === undefined) {
+      rows = (await query(`${select} ORDER BY m.date DESC NULLS LAST, m.account_id, m.id
+        LIMIT $${p} OFFSET $${p + 1}`, [...params, cap + 1, off])).rows;
+    } else {
+      const bucket = async (undated, position, count) => {
+        const values = [...params];
+        let boundary = '';
+        if (position) {
+          if (!undated) {
+            values.push(position.date);
+            boundary = ` AND m.date <= $${values.length}::timestamptz AND NOT (m.date = $${values.length}::timestamptz AND`;
+          } else boundary = ' AND';
+          values.push(position.accountId, position.id);
+          boundary += ` (m.account_id, m.id) ${undated ? '>' : '<='} ($${values.length - 1}::uuid, $${values.length}::uuid)${undated ? '' : ')'}`;
+        }
+        values.push(count);
+        return (await query(`${select} AND m.date IS ${undated ? '' : 'NOT '}NULL${boundary}
+          ORDER BY ${undated ? '' : 'm.date DESC, '}m.account_id, m.id LIMIT $${values.length}`, values)).rows;
+      };
+      rows = cursor?.bucket === 'undated' ? [] : await bucket(false, cursor, cap + 1);
+      if (rows.length < cap + 1) rows.push(...await bucket(true, cursor?.bucket === 'undated' ? cursor : null, cap + 1 - rows.length));
+    }
+    const nextCursor = rows.length > cap ? encodeSearchCursor(rows[cap - 1], scope) : null;
+    const messages = rows.slice(0, cap);
+    for (const message of messages) delete message._cursor_date;
+    res.json({ messages, query: q, nextCursor });
   } catch (err) {
     console.error('Search error:', err);
     res.status(500).json({ error: 'Search failed' });

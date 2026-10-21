@@ -23,7 +23,7 @@ import {
 import { formatDate, formatDateTime, formatSnoozeUntil } from '../utils/formatDate.js';
 import { SNOOZED_FOLDER, unsnooze, changeSnooze, refreshCounts } from '../utils/snoozeActions.js';
 import { advanceSelectionAfterRemoval, registerRowOpener } from '../utils/listSelection.js';
-import { openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
+import { pickMessageReplyAlias, resolveReplyRecipients, openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
 import { selectedMessage, markMessageUnread } from '../utils/messageHotkeys.js';
 import { cancelScheduledMarkReadFor } from '../utils/markRead.js';
 import { saveSenderCategory } from '../utils/senderCategory.js';
@@ -213,7 +213,8 @@ export default function MessageList() {
   const [searchFocused, setSearchFocused] = useState(false);
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [searchLoadingMore, setSearchLoadingMore] = useState(false);
-  const searchFetchedOffsetRef = useRef(0);
+  const searchCursorRef = useRef(null);
+  const searchPageRequestRef = useRef(null);
   const listRef = useRef(null);
   const searchInputRef = useRef(null); // for focusSearch shortcut
   const pendingDeleteTimers = useRef(new Map()); // id/thread key -> pending delete metadata
@@ -554,13 +555,15 @@ export default function MessageList() {
   // Search
   useEffect(() => {
     clearTimeout(searchTimer.current);
+    searchCursorRef.current = null;
+    searchPageRequestRef.current = null;
+    setSearchLoadingMore(false);
     if (!searchQuery.trim()) {
       searchSeq.current += 1;
       setIsSearching(false);
       setSearchResults([]);
       setSearchHasMore(false);
       setSearchError(null);
-      searchFetchedOffsetRef.current = 0;
       return;
     }
     setIsSearching(true);
@@ -569,11 +572,11 @@ export default function MessageList() {
     const seq = ++searchSeq.current;
     searchTimer.current = setTimeout(async () => {
       try {
-        const data = await api.search(searchQuery, selectedAccountId || undefined, { offset: 0, limit: searchPageSize, folder: searchFolder });
+        const data = await api.search(searchQuery, selectedAccountId || undefined, { cursor: '', limit: searchPageSize, folder: searchFolder });
         if (searchSeq.current !== seq) return;
-        searchFetchedOffsetRef.current = data.messages.length;
+        searchCursorRef.current = data.nextCursor || null;
         setSearchResults(applyReadGuard(data.messages));
-        setSearchHasMore(data.messages.length === searchPageSize);
+        setSearchHasMore(Boolean(data.nextCursor));
       } catch (err) {
         if (searchSeq.current === seq) {
           console.error('Search failed:', err);
@@ -581,7 +584,6 @@ export default function MessageList() {
           // the new query text, and surface the failure (a swallowed rate-limit
           // 429 otherwise reads as "no results").
           setSearchResults([]);
-          searchFetchedOffsetRef.current = 0;
           setSearchError(err.message || 'Search failed');
         }
       } finally {
@@ -608,49 +610,37 @@ export default function MessageList() {
   }, []);
 
   const loadMoreSearch = useCallback(async () => {
-    if (searchLoadingMore) return;
-    const qSnapshot = searchQuery; // capture before async gap
+    if (searchPageRequestRef.current || !searchCursorRef.current || useStore.getState().isSearching ||
+        useStore.getState().searchQuery !== searchQuery) return;
+    const qSnapshot = searchQuery;
     const seq = searchSeq.current;
+    const request = { cursor: searchCursorRef.current };
+    searchPageRequestRef.current = request;
     setSearchLoadingMore(true);
     try {
-      const offset = searchFetchedOffsetRef.current;
-      const data = await api.search(qSnapshot, selectedAccountId || undefined, { offset, limit: searchPageSize, folder: searchFolder });
-      // Discard results if the query, account or folder changed while we were fetching
+      const data = await api.search(qSnapshot, selectedAccountId || undefined, { cursor: request.cursor, limit: searchPageSize, folder: searchFolder });
       if (searchSeq.current !== seq || useStore.getState().searchQuery !== qSnapshot) return;
-      searchFetchedOffsetRef.current = offset + data.messages.length;
-      const current = useStore.getState().searchResults;
-      useStore.setState({ searchResults: [...current, ...applyReadGuard(data.messages)] });
-      setSearchHasMore(data.messages.length === searchPageSize);
+      searchCursorRef.current = data.nextCursor || null;
+      const additions = applyReadGuard(data.messages);
+      useStore.setState(state => {
+        const existing = new Set(state.searchResults.map(m => m.id));
+        const missing = additions.filter(m => {
+          if (!m || existing.has(m.id)) return false;
+          existing.add(m.id);
+          return true;
+        });
+        return { searchResults: [...state.searchResults, ...missing] };
+      });
+      setSearchHasMore(Boolean(data.nextCursor));
     } catch (err) {
       console.error('Search load more failed:', err);
     } finally {
-      setSearchLoadingMore(false);
-    }
-  }, [searchQuery, selectedAccountId, searchFolder, searchPageSize, searchLoadingMore, applyReadGuard]);
-
-  const prefetchSearchAfterRemoval = useCallback(async (offset) => {
-    const qSnapshot = useStore.getState().searchQuery;
-    if (!qSnapshot.trim()) return;
-    const seq = searchSeq.current;
-    try {
-      const data = await api.search(qSnapshot, selectedAccountId || undefined, { offset, limit: searchPageSize, folder: searchFolder });
-      if (searchSeq.current !== seq || useStore.getState().searchQuery !== qSnapshot) return;
-      searchFetchedOffsetRef.current = Math.max(searchFetchedOffsetRef.current, offset + data.messages.length);
-      const additions = applyReadGuard(data.messages);
-      if (!additions.length) {
-        setSearchHasMore(data.messages.length === searchPageSize);
-        return;
+      if (searchPageRequestRef.current === request) {
+        searchPageRequestRef.current = null;
+        setSearchLoadingMore(false);
       }
-      useStore.setState(state => {
-        const existing = new Set(state.searchResults.map(m => m.id));
-        const missing = additions.filter(m => m && !existing.has(m.id));
-        return missing.length ? { searchResults: [...state.searchResults, ...missing] } : {};
-      });
-      setSearchHasMore(data.messages.length === searchPageSize);
-    } catch (err) {
-      console.error('Search prefetch after delete failed:', err);
     }
-  }, [selectedAccountId, searchFolder, searchPageSize, applyReadGuard]);
+  }, [searchQuery, selectedAccountId, searchFolder, searchPageSize, applyReadGuard]);
 
   // Infinite scroll + scroll-to-top visibility
   const handleScroll = useCallback(() => {
@@ -1299,54 +1289,9 @@ export default function MessageList() {
   }, [setMessagesStarredState]);
 
   const handleSwipeReply = useCallback((message, replyAll = false) => {
-    const replyToArr = Array.isArray(message.reply_to)
-      ? message.reply_to
-      : (() => { try { return JSON.parse(message.reply_to || '[]'); } catch { return []; } })();
-    const replyTarget = (replyToArr.length && replyToArr[0].email)
-      ? replyToArr[0]
-      : { name: message.from_name || '', email: message.from_email || '' };
-    const sender = replyTarget.email ? [replyTarget] : [];
-
     const myAccount = accounts.find(a => a.id === message.account_id);
-    const myEmail = myAccount?.email_address || '';
-    const myAddresses = new Set([
-      myEmail.toLowerCase(),
-      ...(myAccount?.aliases || []).map(al => al.email.toLowerCase()),
-    ]);
-
-    const replyAliasId = (() => {
-      const aliases = myAccount?.aliases || [];
-      if (!aliases.length) return null;
-      try {
-        const toArr = Array.isArray(message.to_addresses)
-          ? message.to_addresses
-          : JSON.parse(message.to_addresses || '[]');
-        const ccArr = Array.isArray(message.cc_addresses)
-          ? message.cc_addresses
-          : JSON.parse(message.cc_addresses || '[]');
-        const allEmails = [...toArr, ...ccArr].map(t => t.email?.toLowerCase()).filter(Boolean);
-        const fromEmail = (message.from_email || '').toLowerCase();
-        const match = aliases.find(al => {
-          const aliasEmail = al.email.toLowerCase();
-          return allEmails.includes(aliasEmail) || fromEmail === aliasEmail;
-        });
-        return match ? match.id : null;
-      } catch { return null; }
-    })();
-
-    const allRecipients = (() => {
-      try {
-        const toArr = Array.isArray(message.to_addresses)
-          ? message.to_addresses
-          : JSON.parse(message.to_addresses || '[]');
-        const ccArr = Array.isArray(message.cc_addresses)
-          ? message.cc_addresses
-          : JSON.parse(message.cc_addresses || '[]');
-        return [...toArr, ...ccArr].filter(
-          t => t.email && !myAddresses.has(t.email.toLowerCase()) && t.email !== replyTarget.email
-        );
-      } catch { return []; }
-    })();
+    const { to: sender, allRecipients } = resolveReplyRecipients(message, myAccount);
+    const replyAliasId = pickMessageReplyAlias(message, myAccount);
 
     const referencesChain = [message.in_reply_to, message.message_id]
       .filter(Boolean).join(' ').trim() || null;
@@ -1366,6 +1311,7 @@ export default function MessageList() {
       isReplyAll: replyAll,
       originalFrom: sender,
       allRecipients,
+      threadId: message.thread_id,
     });
   }, [accounts, openCompose]);
   
@@ -1528,12 +1474,11 @@ export default function MessageList() {
     } catch (err) {
       console.error('Failed to load thread for bulk delete:', err.message);
     }
-    const searchOffsetBeforeRemoval = searchFetchedOffsetRef.current;
     const shouldPrefetchSearch = Boolean(useStore.getState().searchQuery.trim() && searchHasMore);
     deleteIds.forEach(id => setPendingDelete(id));
     ids.forEach(id => removeMessage(id));
     if (shouldPrefetchSearch) {
-      prefetchSearchAfterRemoval(searchOffsetBeforeRemoval);
+      loadMoreSearch();
     }
     msgs.forEach(msg => {
       const delta = parseInt(msg.unread_count) || (msg.is_read ? 0 : 1);
@@ -1588,7 +1533,7 @@ export default function MessageList() {
         });
       },
     });
-  }, [searchHasMore, removeMessage, prefetchSearchAfterRemoval, resolveMessagesForThreadAction, decrementUnread, incrementUnread, addNotification, t]);
+  }, [searchHasMore, removeMessage, loadMoreSearch, resolveMessagesForThreadAction, decrementUnread, incrementUnread, addNotification, t]);
 
   const handleBulkMove = useCallback(async (ids, msgs, folder) => {
     // Selected thread rows move the whole conversation. A folder path is

@@ -72,10 +72,10 @@ const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const MessageList = (await import('./MessageList.jsx')).default;
 
-const ACCOUNT = { id: 'acct-1', email_address: 'a@example.com', name: 'A', color: '#6366f1', include_in_unified_inbox: true };
+const ACCOUNT = { id: 'acct-1', email_address: 'a@example.test', name: 'A', color: '#6366f1', include_in_unified_inbox: true };
 const hit = (id) => ({
   id, account_id: 'acct-1', folder: 'INBOX', uid: 1, subject: `Synthetic search example ${id}`, snippet: '',
-  message_id: `<${id}@example.com>`, from_name: 'S', from_address: 's@example.com', date: new Date().toISOString(),
+  message_id: `<${id}@example.test>`, from_name: 'S', from_address: 's@example.test', date: new Date().toISOString(),
   is_read: true, is_starred: false, is_deleted: false, has_attachments: false,
 });
 
@@ -136,21 +136,67 @@ describe('MessageList search states (#592)', () => {
   // only the query text, so a page asked for in one folder could be added to another's results.
   test('drops a page of more results that arrives after the folder changed', async () => {
     await mount();
-    useStore.setState({ pageSize: 2, folders: { 'acct-1': [{ path: 'INBOX', name: 'INBOX' }, { path: 'Archive', name: 'Archive' }] } });
+    await React.act(async () => useStore.setState({ pageSize: 2, folders: { 'acct-1': [{ path: 'INBOX', name: 'INBOX' }, { path: 'Archive', name: 'Archive' }] } }));
     await search('Synthetic');
     await settle();
-    await respond({ messages: [hit('a'), hit('b')] });
+    await respond({ messages: [hit('a'), hit('b')], nextCursor: 'inbox-page-2' });
     const more = [...container().querySelectorAll('button')].find(b => /messageList\.loadMore/.test(b.textContent));
     assert.ok(more, 'a full page offers more');
     await React.act(async () => { more.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
     const page = pending.shift();
-    assert.match(page.path, /offset=2/);
+    assert.equal(new URL(page.path, dom.window.location).searchParams.get('cursor'), 'inbox-page-2');
     await React.act(async () => { useStore.setState({ selectedFolder: 'Archive' }); });
     await settle();
     await respond({ messages: [hit('archived')] });
     // The page asked for in INBOX arrives last.
     await React.act(async () => { page.resolve({ messages: [hit('stale')] }); await new Promise(r => setTimeout(r, 0)); });
     assert.deepEqual(useStore.getState().searchResults.map(m => m.id), ['archived']);
+  });
+});
+
+describe('MessageList search cursors', () => {
+  const moreButton = () => [...container().querySelectorAll('button')].find(b => /messageList\.loadMore/.test(b.textContent));
+  const clickMore = () => React.act(async () => moreButton().click());
+  async function firstPage() {
+    await mount();
+    await search('Synthetic');
+    await settle();
+    const path = await respond({ messages: [hit('a'), hit('b')], nextCursor: 'page-2' });
+    assert.equal(new URL(path, dom.window.location).searchParams.get('cursor'), '');
+  }
+
+  test('uses the cursor after newer insertions, deduplicates overlap, and ignores repeat clicks', async () => {
+    await firstPage();
+    const button = moreButton();
+    await React.act(async () => { button.click(); button.click(); });
+    assert.equal(pending.length, 1, 'one request per cursor even before React rerenders');
+    const params = new URL(pending[0].path, dom.window.location).searchParams;
+    assert.equal(params.get('cursor'), 'page-2');
+    assert.equal(params.has('offset'), false);
+    await respond({ messages: [hit('b'), hit('c'), hit('c')], nextCursor: 'page-3' });
+    assert.deepEqual(useStore.getState().searchResults.map(m => m.id), ['a', 'b', 'c']);
+    await clickMore();
+    assert.equal(new URL(pending[0].path, dom.window.location).searchParams.get('cursor'), 'page-3');
+    await respond({ messages: [hit('d')], nextCursor: null });
+    assert.deepEqual(useStore.getState().searchResults.map(m => m.id), ['a', 'b', 'c', 'd']);
+    assert.equal(moreButton(), undefined);
+  });
+
+  test('a pending page cannot replace a new query cursor or unlock its in-flight page', async () => {
+    await firstPage();
+    await clickMore();
+    const stale = pending.shift();
+    await search('Replacement');
+    await settle();
+    const freshPath = await respond({ messages: [hit('fresh')], nextCursor: 'fresh-2' });
+    assert.equal(new URL(freshPath, dom.window.location).searchParams.get('cursor'), '');
+    await clickMore();
+    await React.act(async () => { stale.resolve({ messages: [hit('stale')], nextCursor: 'stale-3' }); await new Promise(r => setTimeout(r, 0)); });
+    assert.deepEqual(useStore.getState().searchResults.map(m => m.id), ['fresh']);
+    assert.equal(moreButton(), undefined, 'stale finalizer must not clear current loading state');
+    assert.equal(new URL(pending[0].path, dom.window.location).searchParams.get('cursor'), 'fresh-2');
+    await respond({ messages: [hit('next')], nextCursor: null });
+    assert.deepEqual(useStore.getState().searchResults.map(m => m.id), ['fresh', 'next']);
   });
 });
 
