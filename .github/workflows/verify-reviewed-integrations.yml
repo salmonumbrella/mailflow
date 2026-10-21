@@ -1,0 +1,115 @@
+name: Verify reviewed integrations
+
+on:
+  push:
+    branches: ["verification/ci-pr24-mc7q-default"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mailflow-reviewed-integrations-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'salmonumbrella/mailflow'
+    name: PR24 default-timeout archive guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: salmonumbrella/mailflow
+          ref: efca8cdf2d0714dbfdca1fc341b179d91e3f4d37
+          persist-credentials: false
+
+      - name: Assert exact tested source
+        id: pin
+        env:
+          EXPECTED_SHA: efca8cdf2d0714dbfdca1fc341b179d91e3f4d37
+          EXPECTED_TREE: f43768d4977b8ce8ca4ab39f23623393fe74657e
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          if git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null; then
+            echo 'Unexpected persisted checkout credential header' >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v6
+        id: node
+        with:
+          node-version: "22"
+          package-manager-cache: false
+          token: ''
+
+      - name: Backend install
+        id: install
+        working-directory: backend
+        run: npm ci
+
+      - name: Archive guard with native default timeout
+        id: guard
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: backend
+        run: |
+          unset MAILFLOW_TEST_DATABASE_URL
+          node node_modules/vitest/vitest.mjs run src/routes/mail.archiveResidue.test.js --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$RUNNER_TEMP/pr24-guard.json"
+
+      - name: Archive refresh verdict with native default timeout
+        id: verdict
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: backend
+        run: |
+          unset MAILFLOW_TEST_DATABASE_URL
+          node node_modules/vitest/vitest.mjs run src/services/imapManager.archiveRefreshVerdict.test.js --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$RUNNER_TEMP/pr24-verdict.json"
+
+      - name: Record exact scoped outcomes
+        if: always()
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+          SOURCE_SHA: efca8cdf2d0714dbfdca1fc341b179d91e3f4d37
+          SOURCE_TREE: f43768d4977b8ce8ca4ab39f23623393fe74657e
+          NODE_VERSION: ${{ steps.node.outputs.node-version }}
+        run: |
+          python3 - <<'PYREPORT'
+          import json, os, platform
+          from pathlib import Path
+          steps = json.loads(os.environ['STEPS_JSON'])
+          outcomes = {key: steps.get(key, {}).get('outcome', 'missing')
+                      for key in ['pin', 'node', 'install', 'guard', 'verdict']}
+          reports = {}
+          for name in ['guard', 'verdict']:
+              path = Path(os.environ['RUNNER_TEMP']) / ('pr24-' + name + '.json')
+              if path.is_file():
+                  raw = json.loads(path.read_text())
+                  reports[name] = {key: raw.get(key) for key in
+                      ['success', 'numPassedTests', 'numFailedTests',
+                       'numPendingTests', 'numTodoTests', 'numTotalTests']}
+              else:
+                  reports[name] = {'missing': True}
+          passed = (all(value == 'success' for value in outcomes.values())
+                    and all(report.get('success') is True
+                            and report.get('numFailedTests') == 0
+                            and report.get('numPendingTests') == 0
+                            and report.get('numPassedTests', 0) > 0
+                            and report.get('numPassedTests') == report.get('numTotalTests')
+                            for report in reports.values()))
+          result = dict(sourceSha=os.environ['SOURCE_SHA'], tree=os.environ['SOURCE_TREE'],
+                        workflowSha=os.environ['GITHUB_SHA'], node=os.environ['NODE_VERSION'],
+                        architecture=platform.machine(), nativeTimeout='Vitest default; no override',
+                        rawOutcomes=outcomes, reports=reports,
+                        scope='Two mocked archive suites only; no PostgreSQL/provider/full-branch proof',
+                        status='passed' if passed else 'failed_or_incomplete')
+          print(json.dumps(result, indent=2))
+          fence = chr(96) * 3
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write('## Focused PR24 verification\n\n' + fence + 'json\n'
+                            + json.dumps(result, indent=2) + '\n' + fence + '\n')
+          raise SystemExit(0 if passed else 1)
+          PYREPORT
