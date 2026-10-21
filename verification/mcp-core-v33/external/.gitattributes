@@ -1,0 +1,2 @@
+# LF everywhere, so the #!/usr/bin/env node line in src/cli.js survives a Windows checkout.
+* text=auto eol=lf

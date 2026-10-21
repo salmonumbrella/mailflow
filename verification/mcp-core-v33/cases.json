@@ -1,0 +1,47 @@
+{
+  "status": "PROPOSED_SOURCE_ONLY_UNRUN",
+  "expectedNativeCaseCount": 8,
+  "nativeCaseIdentities": [
+    "tool discovery grants identity reads and writes independently",
+    "create requires explicit confirmation and rejects credentials, description markers and invalid origins before API access",
+    "masked create projects only allowlisted fields and sends one account-bound write with canonical request id",
+    "an uncertain write keeps a write-only identity grant unknown and performs no list or retry",
+    "Gmail list returns accepted inventory, and unavailable or cross-account inventory is an error",
+    "masked listing needs a complete account-bound list and retains only canonical correlation markers",
+    "origin validation accepts the same canonical HTTP(S) origin and root-slash forms as the producer",
+    "a local admission failure stays refused through the real client and SDK without a list or retry"
+  ],
+  "expectedJoinedCaseCount": 19,
+  "joinedCaseIdentities": [
+    "J01 actual token-self grants discover only their identity tools",
+    "J02 Fastmail listing crosses SDK, authenticated real route and provider parser without credential disclosure",
+    "J03 Gmail excludes pending/unspecified aliases and the real route leaves sender null",
+    "J04 Gmail disabled API and app-password accounts report actual capability gaps",
+    "J05 masked-only capability creates one enabled mask without reading inventory or requiring submission",
+    "J06 foreign and missing accounts give identical 404 before provider access or create budget",
+    "J07 SDK rejects invalid confirmation, extra credentials, marker and noncanonical origin before HTTP",
+    "J08 revoked/expired/malformed bearer credentials cannot be rescued by a cookie",
+    "J09 real PAT allowlist refuses cross-grants and settings even if client discovery is forged",
+    "J10 one account shares a ten-create budget across token identities, with Retry-After on the eleventh",
+    "J11 local admission failure remains a definite refusal through the matched external version",
+    "J12 408 after dispatch stays unknown with one write and no automatic list/retry",
+    "J12 500 after dispatch stays unknown with one write and no automatic list/retry",
+    "J12 network after dispatch stays unknown with one write and no automatic list/retry",
+    "J12 malformed after dispatch stays unknown with one write and no automatic list/retry",
+    "J13 dispatched 401 has a definite provider refusal and never retries",
+    "J13 dispatched 403 has a definite provider refusal and never retries",
+    "J13 dispatched 429 has a definite provider refusal and never retries",
+    "J14 explicit authorized reconciliation is correlation only and never sends a second creation"
+  ],
+  "negativeOracles": "Wrong scope/foreign ownership/noncanonical input cannot reach provider; unavailable capabilities never fabricate ready; unknown creation never sends a second set or automatic list; matching local admission refusal never becomes unknown. Expectations derive from accepted contract, not production helpers.",
+  "boundaries": "Synthetic query/storage and provider safeFetch, Redis offline boundary, audit/lastSeen sinks, app bootstrap and unexpected refresh stopped; actual SDK/client/token-self/auth middleware/allowlist/CSRF/lock/routes/encryption/facade/parser/creation/rateLimiter-memory fallback are exercised. No signed-cookie, app entry, actual SQL/Redis/SSRF/provider/UI proof.",
+  "carried": [
+    "N1",
+    "N3",
+    "N4",
+    "C20",
+    "F2 LOWs"
+  ],
+  "existingCoreCI": "39628205155 remains separate, no duplication or monitoring in this proposal",
+  "enforcement": "verify-source.py enforce requires exact native8 TAP titles/plan/counts and JSON19 assertion titles/counts/statuses, both exit0/oneattempt/no deadline, source pre/post and exact successful owned cleanup. Missing/incomplete/skip/cancel/todo/pending cannot pass."
+}

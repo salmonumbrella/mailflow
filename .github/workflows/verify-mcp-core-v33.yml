@@ -1,0 +1,105 @@
+name: Verify exact MCP-core v33 contract
+on:
+  push:
+    branches: [verification/ci-mailflow-mcp-core-v33]
+permissions:
+  contents: read
+concurrency:
+  group: verification-mcp-core-v33
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  contract:
+    if: github.repository == 'salmonumbrella/mailflow' && github.ref == 'refs/heads/verification/ci-mailflow-mcp-core-v33' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        id: checkout_payload
+        with:
+          ref: ${{ github.sha }}
+          path: proposal
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        id: checkout_core
+        with:
+          repository: salmonumbrella/mailflow
+          ref: c5ff51d2e7b09cca70c8bc23941eb913d34fec5d
+          path: core
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        id: node
+        with:
+          node-version: '22.23.3'
+          package-manager-cache: false
+          token: ''
+      - name: Bind exact sources and prepare isolated test-only files
+        id: pin
+        run: |
+          set -euo pipefail
+          payload="$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33"
+          mkdir -p "$RUNNER_TEMP/mcp-core-v33-logs" "$RUNNER_TEMP/mcp-core-v33-home"
+          python3 "$payload/verify-source.py" "$GITHUB_WORKSPACE/core" "$payload" > "$RUNNER_TEMP/mcp-core-v33-logs/pre-source.json"
+          cp "$payload/providerIdentities.mcpContract.test.js" core/backend/src/routes/
+          cp "$payload/vitest.mcpContract.config.mjs" core/backend/
+      - name: Install pinned core lock without lifecycle scripts
+        id: core_ci
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          nodebin=$(dirname "$(command -v node)")
+          cd "$GITHUB_WORKSPACE/core/backend"
+          timeout --signal=TERM --kill-after=5s 300s env -i "PATH=$nodebin:/usr/bin:/bin" "HOME=$RUNNER_TEMP/mcp-core-v33-home" CI=true npm_config_jobs=1 npm_config_maxsockets=2 npm_config_fetch_retries=0 npm ci --ignore-scripts --no-audit --no-fund > "$RUNNER_TEMP/mcp-core-v33-logs/core-install.log" 2>&1
+      - name: Install pinned external lock without lifecycle scripts
+        id: external_ci
+        if: ${{ !cancelled() && steps.pin.outcome == 'success' && steps.node.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          nodebin=$(dirname "$(command -v node)")
+          cd "$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33/external"
+          timeout --signal=TERM --kill-after=5s 300s env -i "PATH=$nodebin:/usr/bin:/bin" "HOME=$RUNNER_TEMP/mcp-core-v33-home" CI=true npm_config_jobs=1 npm_config_maxsockets=2 npm_config_fetch_retries=0 npm ci --ignore-scripts --no-audit --no-fund > "$RUNNER_TEMP/mcp-core-v33-logs/external-install.log" 2>&1
+      - name: Both distinct commands once in the loopback namespace as the unprivileged runner
+        id: batch
+        if: ${{ !cancelled() && steps.core_ci.outcome == 'success' && steps.external_ci.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          nodebin=$(dirname "$(command -v node)")
+          sudo unshare --net -- bash "$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33/run-isolated.sh" \
+            "$GITHUB_WORKSPACE/core" "$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33" "$nodebin" \
+            "$RUNNER_TEMP/mcp-core-v33-home" "$RUNNER_TEMP/mcp-core-v33-logs" "$(id -u)" "$(id -g)"
+      - name: Recheck product and lockfile bytes on every outcome
+        id: post
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 "$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33/verify-source.py" \
+            "$GITHUB_WORKSPACE/core" "$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33" after \
+            > "$RUNNER_TEMP/mcp-core-v33-logs/post-source.json"
+      - name: Remove exactly owned test copies, dependencies and home and retain cleanup receipt
+        id: cleanup
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/mcp-core-v33-logs"
+          python3 "$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33/verify-source.py" cleanup \
+            "$GITHUB_WORKSPACE/core" "$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33" \
+            "$RUNNER_TEMP/mcp-core-v33-home" "$RUNNER_TEMP/mcp-core-v33-logs"
+      - name: Enforce exact TAP8 and JSON19 identities, exits, source and owned cleanup
+        if: always()
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          python3 "$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33/verify-source.py" enforce \
+            "$GITHUB_WORKSPACE/proposal/verification/mcp-core-v33" "$RUNNER_TEMP/mcp-core-v33-logs"
+      - name: Retain native reports and receipts even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mcp-core-v33-contract-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mcp-core-v33-logs
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 7

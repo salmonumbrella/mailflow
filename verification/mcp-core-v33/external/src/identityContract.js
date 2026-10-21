@@ -1,0 +1,20 @@
+export const IDENTITY_ERRORS = Object.freeze({
+  unsupported_provider: 'The selected account does not support this provider operation.',
+  account_disabled: 'The selected account is disabled.',
+  credentials_missing: 'The selected account has no usable provider API credential. Gmail app-password accounts cannot provide Gmail API inventory.',
+  credentials_invalid: 'The selected account provider credential is invalid.',
+  account_mismatch: 'The provider credential does not match the selected account.',
+  insufficient_scope: 'The provider credential does not permit this operation.',
+  api_not_enabled: 'To read send-as identities, enable the Gmail API for the OAuth project.',
+  rate_limited: 'The provider identity operation is rate limited.',
+  invalid_input: 'Invalid provider identity input.',
+  invalid_response: 'The provider identity response could not be validated completely.',
+  provider_unavailable: 'The provider identity operation is unavailable.',
+  admission_unavailable: 'Creation could not be admitted. No provider request was made.',
+  read_only: 'The provider account is read-only.',
+  outcome_unknown: 'Creation may have completed. Do not automatically retry.',
+  account_not_found: 'Account not found.',
+  authorization_failed: 'MailFlow refused the API token or its identity scope.',
+  request_cancelled: 'The operation was cancelled before a write was issued.',
+});
+export const validRetryAfter = value => Number.isInteger(value) && value >= 0 && value <= 86400;
