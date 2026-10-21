@@ -1,0 +1,14 @@
+[
+  {
+    "id": "02-searchIndexSources.postgres.test.js",
+    "partition": "C",
+    "file": "backend/src/services/searchIndexSources.postgres.test.js",
+    "deadline_seconds": 360,
+    "expected_sql_passes": 40,
+    "expected_duplicate_unit_passes": 0,
+    "max_fixture_clients": 2,
+    "database": "mailflow_svtw",
+    "startup_options": "-c timezone=UTC",
+    "application_name_prefix": "pyws-"
+  }
+]

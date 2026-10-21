@@ -1,0 +1,9 @@
+{
+  "image": "postgres:16.15-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0",
+  "tag": "16.15-bookworm",
+  "index_digest": "sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0",
+  "linux_amd64_manifest": "sha256:e92e17ca202da4bb205f6f4a6c8cb30539edfbaa04987b506630f5d5851ff3c8",
+  "registry": "https://registry-1.docker.io/v2/library/postgres/manifests/16.15-bookworm",
+  "server_version_required": 160015,
+  "metadataOnly": true
+}
