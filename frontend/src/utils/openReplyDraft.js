@@ -11,7 +11,7 @@ export const replyDraftScope = state => ({ accountId: state.selectedAccountId ||
 const identity = draft => JSON.stringify([draft.account_id, draft.folder, draft.uid,
   draft.message_id, draft.uid_validity]);
 
-export async function openReplyDraft(messageId, { automatic = false, liveResult, liveScope, liveRevision } = {}) {
+export async function openReplyDraft(messageId, { automatic = false, liveResult, liveScope, liveRevision, onSavedRevision } = {}) {
   if (automatic && manualRequest) return false;
   const initial = useStore.getState();
   if (automatic && !initial.autoOpenReplyDrafts) return false;
@@ -24,13 +24,19 @@ export async function openReplyDraft(messageId, { automatic = false, liveResult,
   if (!automatic) manualRequest = sequence;
   let revision = initial.replyDraftRevision;
   let ownerChanged = false;
+  let contextChanged = false;
   let invalidated = false;
+  let unsubscribeDraftSaved;
   const unsubscribe = useStore.subscribe(state => {
     if (state.user?.id !== initial.user?.id) ownerChanged = true;
+    if (state.selectedFolder !== initial.selectedFolder || state.selectedAccountId !== initial.selectedAccountId
+      || state.selectedMessageId !== initial.selectedMessageId || state.conversationMode !== initial.conversationMode
+      || state.searchQuery !== initial.searchQuery || state.composing !== initial.composing
+      || state.composeSession !== initial.composeSession || (automatic && !state.autoOpenReplyDrafts)) contextChanged = true;
   });
   const ownsContext = () => {
     const state = useStore.getState();
-    return !ownerChanged && state.user?.id === initial.user?.id
+    return !ownerChanged && !contextChanged && state.user?.id === initial.user?.id
       && (!automatic || state.autoOpenReplyDrafts)
       && sequence === requestSequence && state.selectedFolder === initial.selectedFolder
       && state.selectedAccountId === initial.selectedAccountId && state.selectedMessageId === initial.selectedMessageId
@@ -46,6 +52,7 @@ export async function openReplyDraft(messageId, { automatic = false, liveResult,
       return;
     }
     revision = after;
+    onSavedRevision?.(after);
   };
   const notice = body => {
     if (!ownerChanged && useStore.getState().user?.id === initial.user?.id && sequence === requestSequence)
@@ -68,7 +75,10 @@ export async function openReplyDraft(messageId, { automatic = false, liveResult,
       return true;
     }
     if (initial.composing) {
-      if (!initial.prepareComposeSwitch || !(await initial.prepareComposeSwitch({ onDraftSaved }))) {
+      const prepare = initial.prepareComposeSwitch;
+      const subscribes = typeof prepare?.subscribeDraftSaved === 'function';
+      if (subscribes) unsubscribeDraftSaved = prepare.subscribeDraftSaved(onDraftSaved);
+      if (!prepare || !(await prepare(subscribes ? {} : { onDraftSaved }))) {
         notice(i18n.t('messageList.replyDraftKeepCurrent')); return false;
       }
       if (!current()) return cancelled();
@@ -82,7 +92,11 @@ export async function openReplyDraft(messageId, { automatic = false, liveResult,
     useStore.getState().setReplyDraftStatus(messageId, { exists: true, accountId: result.draft.account_id }, 'live', useStore.getState().replyDraftRevision);
     const opened = await useStore.getState().openCompose({ ...data, source: automatic ? 'automaticReplyDraft' : 'manualReplyDraft', sourceSelectionId: messageId },
       { preparedSession: initial.composeSession });
+    if (!opened && automatic && ownsContext()) notice(i18n.t('messageList.replyDraftKeepCurrent'));
     return opened || cancelled();
   } catch (error) { notice(error.message); return false; }
-  finally { unsubscribe(); if (manualRequest === sequence) manualRequest = 0; }
+  finally {
+    try { unsubscribeDraftSaved?.(); }
+    finally { unsubscribe(); if (manualRequest === sequence) manualRequest = 0; }
+  }
 }

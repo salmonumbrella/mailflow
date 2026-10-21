@@ -666,3 +666,149 @@ for (const outcome of ['saved', 'failed', 'unsupported']) test(`ordinary compose
     assert.equal(document.querySelector('input[placeholder="compose.subject"]').value, outcome === 'saved' ? 'New manual' : 'Unsaved edits');
   } finally { await React.act(async () => root.unmount()); api.saveDraft = original; }
 });
+
+test('mounted save subscription is idempotent and clears before a save completes after unmount', async () => {
+  const { api } = await import('../utils/api.js');
+  const originalSave = api.saveDraft;
+  let release;
+  api.saveDraft = () => new Promise(resolve => { release = () => resolve({ uid: 7, folder: 'Drafts' }); });
+  useStore.setState({ user: { id: 'cleanup-owner' }, accounts: [{ id: 'cleanup-account', email_address: 'me@synthetic.test', aliases: [] }],
+    plaintextEmail: true, composing: false, composeData: null });
+  useStore.getState().openCompose({ accountId: 'cleanup-account', body: 'Initial', signature: '',
+    to: ['recipient@synthetic.test'], source: 'automaticReplyDraft' });
+  const root = createRoot(document.getElementById('root'));
+  let saving; let mounted = true;
+  try {
+    await React.act(async () => root.render(React.createElement(ComposeModal)));
+    const prepare = useStore.getState().prepareComposeSwitch;
+    assert.equal(typeof prepare.subscribeDraftSaved, 'function');
+    let calls = 0;
+    const dispose = prepare.subscribeDraftSaved(() => calls++);
+    dispose(); dispose();
+    prepare.subscribeDraftSaved(() => calls++);
+    await React.act(async () => {
+      const body = document.querySelector('textarea[placeholder="compose.bodyPh"]');
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(body, 'Edited');
+      body.dispatchEvent(new window.Event('input', { bubbles: true }));
+    });
+    await React.act(async () => { saving = prepare(); await new Promise(resolve => setImmediate(resolve)); });
+    assert.equal(typeof release, 'function', 'save is pending when provider unmounts');
+    await React.act(async () => root.unmount()); mounted = false;
+    const disposeAfterUnmount = prepare.subscribeDraftSaved(() => calls++);
+    await React.act(async () => { release(); await saving; });
+    assert.equal(calls, 0, 'unmounted provider releases all save listeners');
+    dispose(); disposeAfterUnmount(); disposeAfterUnmount();
+  } finally {
+    if (release) release();
+    if (saving) await React.act(async () => saving);
+    if (mounted) await React.act(async () => root.unmount());
+    api.saveDraft = originalSave;
+  }
+});
+
+for (const lateChange of ['body', 'attachment', 'pending attachment', 'failed attachment', 'aborted attachment', 'visibility autosave']) {
+  test(lateChange === 'visibility autosave' ? 'visibility autosave during stalled final lookup preserves provenance and replaces only once'
+    : `a late ${lateChange} during final draft lookup stays in the mounted composer`, async () => {
+    const Observer = (await import('./InboxReplyDraftObserver.js')).default;
+    const { api } = await import('../utils/api.js');
+    const original = { saveDraft: api.saveDraft, getReplyDraft: api.getReplyDraft, getReplyDraftIndicators: api.getReplyDraftIndicators };
+    const originalReader = globalThis.FileReader;
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    let pendingReader;
+    let release; let calls = 0;
+    const writes = [];
+    const result = { draft: { id: 'next-draft', account_id: 'late-account', folder: 'Drafts', uid: 9,
+      message_id: '<next@synthetic.test>', in_reply_to: '<parent@synthetic.test>', attachments_complete: true },
+    body: { text: 'Next reply', attachments: [] } };
+    api.saveDraft = async value => { writes.push(value); return { uid: 6, folder: 'Drafts' }; };
+    api.getReplyDraftIndicators = async ids => ({ indicators: Object.fromEntries(ids.map(id => [id, { exists: true }])) });
+    api.getReplyDraft = async () => ++calls === 2 ? new Promise(resolve => { release = () => resolve(result); }) : result;
+    useStore.setState({ user: { id: 'late-owner' }, accounts: [{ id: 'late-account', email_address: 'me@synthetic.test', aliases: [] }],
+      plaintextEmail: true, selectedFolder: 'INBOX', selectedMessageId: null, selectedAccountId: null,
+      messages: [{ id: 'next', account_id: 'late-account', folder: 'INBOX', message_id: '<parent@synthetic.test>' }],
+      threadMessages: {}, searchQuery: '', conversationMode: 'off', autoOpenReplyDrafts: false,
+      composing: false, composeData: null, replyDraftRevision: 0, replyDrafts: {} });
+    useStore.getState().openCompose({ accountId: 'late-account', draftUid: 5, draftFolder: 'Drafts',
+      persistedKey: 'late-account:Drafts:5', source: 'automaticReplyDraft', subject: 'Current reply',
+      to: ['recipient@synthetic.test'], body: 'Initial body', signature: '' });
+    const session = useStore.getState().composeSession;
+    const Host = () => {
+      const composing = useStore(s => s.composing); const currentSession = useStore(s => s.composeSession);
+      return React.createElement(React.Fragment, null, React.createElement(Observer, { lookupDelayMs: 0 }),
+        composing ? React.createElement(ComposeModal, { key: currentSession }) : null);
+    };
+    const root = createRoot(document.getElementById('root'));
+    const editBody = value => {
+      const body = document.querySelector('textarea[placeholder="compose.bodyPh"]');
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(body, value);
+      body.dispatchEvent(new window.Event('input', { bubbles: true }));
+    };
+    try {
+      await React.act(async () => root.render(React.createElement(Host)));
+      await React.act(async () => editBody('Saved before lookup'));
+      await React.act(async () => {
+        useStore.setState({ autoOpenReplyDrafts: true, selectedMessageId: 'next' });
+        await new Promise(resolve => setImmediate(resolve));
+      });
+      assert.equal(calls, 2);
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].body, 'Saved before lookup');
+      await React.act(async () => {
+        if (lateChange === 'body' || lateChange === 'visibility autosave') editBody('Unsaved late body');
+        else {
+          globalThis.FileReader = class {
+            readAsDataURL() {
+              pendingReader = this;
+              if (lateChange === 'attachment') {
+                this.onload({ target: { result: 'data:text/plain;base64,bGF0ZQ==' } });
+                this.onloadend?.();
+              }
+            }
+          };
+          const input = document.querySelector('input[type="file"][multiple]');
+          Object.defineProperty(input, 'files', { configurable: true,
+            value: [new window.File(['late'], 'late.txt', { type: 'text/plain' })] });
+          input.dispatchEvent(new window.Event('change', { bubbles: true }));
+        }
+      });
+      if (lateChange === 'visibility autosave') {
+        await React.act(async () => {
+          Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+          document.dispatchEvent(new window.Event('visibilitychange'));
+          await new Promise(resolve => setImmediate(resolve));
+        });
+        assert.equal(writes.length, 2, 'tab-hidden autosave runs during the stalled lookup');
+        assert.equal(writes[1].body, 'Unsaved late body');
+      }
+      await React.act(async () => { release(); await new Promise(resolve => setImmediate(resolve)); });
+      if (lateChange === 'visibility autosave') {
+        assert.equal(calls, 2, 'own autosave must not create an external-change retry');
+        assert.equal(useStore.getState().composeSession, session + 1, 'only the intended replacement occurs');
+        assert.equal(document.querySelector('textarea[placeholder="compose.bodyPh"]').value, 'Next reply');
+        return;
+      }
+      assert.equal(useStore.getState().composeSession, session, 'late local content prevents replacement');
+      assert.equal(calls, 2, 'blocked replacement does not loop');
+      assert.equal(writes.length, 1, 'do not pretend a text save preserves the new attachment');
+      if (lateChange === 'body') assert.equal(document.querySelector('textarea[placeholder="compose.bodyPh"]').value, 'Unsaved late body');
+      else if (lateChange === 'attachment') assert.ok(document.getElementById('root').textContent.includes('late.txt'));
+      else {
+        await React.act(async () => assert.equal(await useStore.getState().prepareComposeSwitch(), false, 'pending reads block preparation'));
+        await React.act(async () => {
+          if (lateChange === 'pending attachment') pendingReader.onload({ target: { result: 'data:text/plain;base64,bGF0ZQ==' } });
+          else if (lateChange === 'failed attachment') pendingReader.onerror?.(new Error('Read failed'));
+          else pendingReader.onabort?.();
+          pendingReader.onloadend?.();
+        });
+        if (lateChange === 'pending attachment') assert.ok(document.getElementById('root').textContent.includes('late.txt'));
+        else await React.act(async () => assert.equal(await useStore.getState().prepareComposeSwitch(), true, 'error/abort releases the read count'));
+      }
+    } finally {
+      if (release) release();
+      await React.act(async () => root.unmount());
+      Object.assign(api, original); globalThis.FileReader = originalReader;
+      if (originalVisibility) Object.defineProperty(document, 'visibilityState', originalVisibility);
+      else delete document.visibilityState;
+    }
+  });
+}

@@ -33,6 +33,8 @@ const draft = id => ({ id: `draft-${id}`, account_id: 'acct', folder: 'Drafts', 
   message_id: `<draft-${id}@example.test>`, in_reply_to: `<${id}@example.test>`, attachments_complete: true,
   from_email: 'me@example.test', to_addresses: ['recipient@example.test'] });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
+// These fakes have no editor-local state; mounted-composer tests own the dirty check.
+const prepared = fn => Object.assign(fn, { canReplace: () => true });
 let root;
 before(async () => { root = createRoot(document.getElementById('root')); });
 after(async () => { await React.act(async () => root.unmount()); });
@@ -55,7 +57,7 @@ test('default selection and refresh use only synced indicators and leave compose
   await mount(); await select('0');
   assert.equal(useStore.getState().replyDrafts['0'].exists, true);
   assert.equal(useStore.getState().composing, false);
-  useStore.setState({ prepareComposeSwitch: async () => true });
+  useStore.setState({ prepareComposeSwitch: prepared(async () => true) });
   await React.act(async () => useStore.getState().openCompose({ subject: 'Manual' }));
   await select('1'); await select('2');
   await React.act(async () => useStore.getState().invalidateReplyDrafts());
@@ -87,7 +89,7 @@ test('rapid selection ignores stale live results and batching chunks at 100', as
 test('opt-in opens an automatic draft but never replaces an explicit/manual composer', async () => {
   await reset({ autoOpenReplyDrafts: true }); await mount(); await select('0');
   assert.equal(useStore.getState().composeData.source, 'automaticReplyDraft');
-  useStore.setState({ prepareComposeSwitch: async () => true });
+  useStore.setState({ prepareComposeSwitch: prepared(async () => true) });
   await React.act(async () => useStore.getState().openCompose({ subject: 'Manual' }));
   await select('1');
   assert.equal(useStore.getState().composeData.subject, 'Manual');
@@ -96,11 +98,11 @@ test('opt-in opens an automatic draft but never replaces an explicit/manual comp
 test('explicit opening revalidates after saving and keeps a failed save open', async () => {
   await reset(); await select('0');
   useStore.getState().openCompose({ subject: 'Old' });
-  useStore.setState({ prepareComposeSwitch: async () => false });
+  useStore.setState({ prepareComposeSwitch: prepared(async () => false) });
   assert.equal(await openReplyDraft('0'), false);
   assert.equal(useStore.getState().composeData.subject, 'Old');
   let calls = 0;
-  useStore.setState({ prepareComposeSwitch: async () => true });
+  useStore.setState({ prepareComposeSwitch: prepared(async () => true) });
   api.getReplyDraft = async () => ++calls === 1 ? { draft: draft('0'), body: { text: 'Reply', attachments: [] } } : { draft: null };
   assert.equal(await openReplyDraft('0'), false);
   assert.equal(calls, 2);
@@ -110,7 +112,7 @@ test('explicit opening revalidates after saving and keeps a failed save open', a
 test('a different manual compose opened during a pending save owns the composer', async () => {
   await reset(); await select('0');
   useStore.getState().openCompose({ subject: 'Old' });
-  const saving = deferred(); useStore.setState({ prepareComposeSwitch: () => saving.promise });
+  const saving = deferred(); useStore.setState({ prepareComposeSwitch: prepared(() => saving.promise) });
   const opening = openReplyDraft('0'); await Promise.resolve(); await Promise.resolve();
   useStore.getState().openCompose({ subject: 'New manual' });
   saving.resolve(true);
@@ -280,7 +282,7 @@ for (const stage of ['first lookup', 'after save']) for (const nextUser of [null
     const pending = deferred(); let calls = 0;
     if (stage === 'after save') {
       useStore.getState().openCompose({ subject: 'Existing' });
-      useStore.setState({ prepareComposeSwitch: async () => true });
+      useStore.setState({ prepareComposeSwitch: prepared(async () => true) });
     }
     api.getReplyDraft = async () => ++calls === (stage === 'after save' ? 2 : 1) ? pending.promise
       : { draft: draft('0'), body: { text: 'Reply', attachments: [] } };
@@ -300,7 +302,7 @@ for (const stage of ['first lookup', 'after save']) for (const nextUser of [null
 test('an unrelated indicator revision change while saving does not cancel an explicit handoff', async () => {
   await reset(); await select('0');
   useStore.getState().openCompose({ subject: 'Existing' });
-  useStore.setState({ prepareComposeSwitch: async () => { useStore.getState().invalidateReplyDrafts(); return true; } });
+  useStore.setState({ prepareComposeSwitch: prepared(async () => { useStore.getState().invalidateReplyDrafts(); return true; }) });
   assert.equal(await openReplyDraft('0'), true);
   assert.equal(useStore.getState().composeData.source, 'manualReplyDraft');
   assert.equal(useStore.getState().composeData.body, 'Reply 0');
@@ -327,7 +329,7 @@ for (const selections of [['1'], ['1', '0']]) test(`selection during automatic h
   const saving = deferred();
   const calls = [];
   useStore.getState().openCompose({ source: 'automaticReplyDraft', subject: 'Initial editor' });
-  useStore.setState({ prepareComposeSwitch: () => saving.promise });
+  useStore.setState({ prepareComposeSwitch: prepared(() => saving.promise) });
   api.getReplyDraft = async id => { calls.push(id); return { draft: draft(id), body: { text: 'Reply ' + id, attachments: [] } }; };
   await mount(); await select('0');
   assert.deepEqual(calls, ['0']);
@@ -342,7 +344,7 @@ for (const change of ['different owner', 'sign out and back', 'close']) test(`or
   await reset();
   useStore.getState().openCompose({ subject: 'Old' });
   const pending = deferred();
-  useStore.setState({ prepareComposeSwitch: () => pending.promise });
+  useStore.setState({ prepareComposeSwitch: prepared(() => pending.promise) });
   const opening = useStore.getState().openCompose({ subject: 'New manual' });
   if (change === 'close') useStore.getState().closeCompose();
   else if (change === 'different owner') useStore.getState().setUser({ id: 'new-reader' });
@@ -351,3 +353,379 @@ for (const change of ['different owner', 'sign out and back', 'close']) test(`or
   assert.equal(await opening, false);
   assert.notEqual(useStore.getState().composeData?.subject, 'New manual');
 });
+
+// Keep saves pending so a server notification can arrive after the observer owns a handoff.
+async function pendingAutomaticHandoff() {
+  await reset({ autoOpenReplyDrafts: true, count: 0 });
+  useStore.setState({ messages: ['0', '1'].map(id => ({ ...row(id), message_id: `<${id}@synthetic.test>` })) });
+  useStore.getState().openCompose({ source: 'automaticReplyDraft', subject: 'Edited current reply' });
+  const saves = [];
+  const lookups = [];
+  useStore.setState({ prepareComposeSwitch: prepared(options => {
+    const pending = deferred();
+    saves.push({ ...pending, options, session: useStore.getState().composeSession });
+    return pending.promise;
+  }) });
+  api.getReplyDraft = async id => {
+    lookups.push(id);
+    return { draft: { ...draft(id), message_id: `<draft-${id}@synthetic.test>`,
+      in_reply_to: `<${id}@synthetic.test>`, from_email: 'me@synthetic.test', to_addresses: ['recipient@synthetic.test'] },
+    body: { text: `External reply ${id}`, attachments: [] } };
+  };
+  await mount(); await select('0');
+  assert.equal(saves.length, 1);
+  return { saves, lookups };
+}
+
+const flushHandoff = () => React.act(async () => new Promise(resolve => setImmediate(resolve)));
+const selfSave = save => {
+  const before = useStore.getState().replyDraftRevision;
+  useStore.getState().invalidateReplyDrafts();
+  save.options.onDraftSaved({ before, after: useStore.getState().replyDraftRevision, session: save.session });
+};
+
+test('external invalidation during automatic handoff retries the selected draft once', async () => {
+  const { saves, lookups } = await pendingAutomaticHandoff();
+  await React.act(async () => useStore.getState().invalidateReplyDrafts());
+  assert.equal(saves.length, 1, 'no parallel handoff during refresh');
+  await React.act(async () => saves[0].resolve(true));
+  await flushHandoff();
+  assert.equal(saves.length, 2, 'external change retries the cancelled handoff');
+  assert.deepEqual(lookups, ['0', '0']);
+  await React.act(async () => saves[1].resolve(true));
+  await flushHandoff();
+  assert.equal(useStore.getState().composeData.sourceSelectionId, '0');
+  assert.equal(useStore.getState().composeData.body, 'External reply 0');
+  assert.deepEqual(lookups, ['0', '0', '0'], 'one retry plus its post-save validation');
+});
+
+for (const events of [[], ['self'], ['self', 'self'], ['self', 'external', 'self'], ['external', 'external']]) {
+  test(`automatic handoff classifies revision sequence ${events.join('/') || 'unchanged'}`, async () => {
+    const { saves, lookups } = await pendingAutomaticHandoff();
+    for (const event of events) await React.act(async () => {
+      if (event === 'self') selfSave(saves[0]);
+      else useStore.getState().invalidateReplyDrafts();
+    });
+    assert.equal(saves.length, 1, 'notifications never start a parallel opener');
+    await React.act(async () => saves[0].resolve(true));
+    await flushHandoff();
+    const external = events.includes('external');
+    assert.equal(saves.length, external ? 2 : 1);
+    if (external) {
+      await React.act(async () => saves[1].resolve(true));
+      await flushHandoff();
+    }
+    assert.equal(useStore.getState().composeData.sourceSelectionId, '0');
+    assert.equal(lookups.length, external ? 3 : 2);
+  });
+}
+
+test('successive external revisions each retry once and failed save without a new revision stops', async () => {
+  const { saves, lookups } = await pendingAutomaticHandoff();
+  for (let index = 0; index < 3; index++) {
+    await React.act(async () => useStore.getState().invalidateReplyDrafts());
+    assert.equal(saves.length, index + 1, 'one opener in flight');
+    await React.act(async () => saves[index].resolve(true));
+    await flushHandoff();
+    assert.equal(saves.length, index + 2, 'one retry for this external revision');
+  }
+  await React.act(async () => saves[3].resolve(false));
+  await flushHandoff(); await flushHandoff();
+  assert.equal(saves.length, 4, 'failed save cannot loop on the same revision');
+  assert.equal(lookups.length, 4);
+  assert.equal(useStore.getState().composeData.subject, 'Edited current reply');
+});
+
+for (const action of ['manual composer', 'sign out']) {
+  test(`external handoff retry does not reopen after ${action}`, async () => {
+    const { saves, lookups } = await pendingAutomaticHandoff();
+    await React.act(async () => useStore.getState().invalidateReplyDrafts());
+    await React.act(async () => {
+      if (action === 'sign out') useStore.getState().setUser(null);
+      else {
+        useStore.setState({ prepareComposeSwitch: prepared(async () => true) });
+        await useStore.getState().openCompose({ subject: 'Manual wins' });
+      }
+    });
+    await React.act(async () => saves[0].resolve(true));
+    await flushHandoff();
+    assert.equal(saves.length, 1);
+    assert.equal(lookups.length, 1);
+    assert.equal(useStore.getState().composeData?.subject, action === 'sign out' ? undefined : 'Manual wins');
+  });
+}
+
+for (const selections of [['1'], ['1', '0']]) {
+  test(`external invalidation during navigation retries only current selection ${selections.join('/')}`, async () => {
+    const { saves, lookups } = await pendingAutomaticHandoff();
+    await React.act(async () => useStore.getState().invalidateReplyDrafts());
+    for (const id of selections) await select(id);
+    await React.act(async () => saves[0].resolve(true));
+    await flushHandoff();
+    assert.equal(saves.length, 2);
+    assert.equal(lookups.at(-1), selections.at(-1));
+    await React.act(async () => saves[1].resolve(true));
+    await flushHandoff();
+    assert.equal(useStore.getState().composeData.sourceSelectionId, selections.at(-1));
+    assert.equal(lookups.length, 3);
+  });
+}
+
+for (const reportRevision of [false, true]) {
+  test(`saved revision callback is synchronous and preserves boolean result (callback=${reportRevision})`, async () => {
+    await reset({ autoOpenReplyDrafts: true }); await select('0');
+    useStore.getState().openCompose({ source: 'automaticReplyDraft', subject: 'Current' });
+    const revisions = [];
+    useStore.setState({ prepareComposeSwitch: prepared(async options => {
+      const save = { options, session: useStore.getState().composeSession };
+      for (let revision = 1; revision <= 2; revision++) {
+        selfSave(save);
+        assert.deepEqual(revisions, reportRevision ? Array.from({ length: revision }, (_, i) => i + 1) : [],
+          'save-owned revision is reported before the save yields');
+      }
+      return true;
+    }) });
+    const opened = await openReplyDraft('0', { automatic: true,
+      ...(reportRevision ? { onSavedRevision: revision => revisions.push(revision) } : {}) });
+    assert.equal(opened, true);
+  });
+}
+
+for (const count of [1, 2]) for (const failure of ['prepare', 'target changed']) {
+  test(`failed handoff after ${count} self saves does not retry (${failure})`, async () => {
+    const { saves, lookups } = await pendingAutomaticHandoff();
+    for (let i = 0; i < count; i++) await React.act(async () => selfSave(saves[0]));
+    if (failure === 'target changed') api.getReplyDraft = async id => {
+      lookups.push(id);
+      return { draft: null };
+    };
+    await React.act(async () => saves[0].resolve(failure !== 'prepare'));
+    await flushHandoff(); await flushHandoff();
+    assert.equal(saves.length, 1, 'self-save invalidations must not retry a failed handoff');
+    assert.equal(lookups.length, failure === 'prepare' ? 1 : 2);
+    assert.equal(useStore.getState().composeData.subject, 'Edited current reply');
+    assert.equal(useStore.getState().composeData.sourceSelectionId, undefined);
+  });
+}
+
+for (const source of ['own autosave', 'external invalidation']) test(`${source} during stalled final lookup keeps explicit save provenance`, async () => {
+  await reset({ autoOpenReplyDrafts: true });
+  useStore.getState().openCompose({ source: 'automaticReplyDraft', subject: 'Outgoing reply' });
+  const session = useStore.getState().composeSession;
+  const listeners = new Set();
+  const prepare = prepared(async ({ onDraftSaved } = {}) => {
+    if (onDraftSaved) listeners.add(onDraftSaved);
+    try { return true; }
+    finally { listeners.delete(onDraftSaved); }
+  });
+  // Proposed provider contract; prepare's existing callback remains short-lived.
+  prepare.subscribeDraftSaved = listener => {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  };
+  useStore.setState({ prepareComposeSwitch: prepare });
+  const pending = deferred(); let calls = 0;
+  const response = { draft: draft('0'), body: { text: 'Selected reply', attachments: [] } };
+  api.getReplyDraft = async () => ++calls === 2 ? pending.promise : response;
+  await mount(); await select('0');
+  assert.equal(calls, 2, 'preparation finished; final lookup is stalled');
+  await React.act(async () => {
+    const before = useStore.getState().replyDraftRevision;
+    useStore.getState().invalidateReplyDrafts();
+    if (source === 'own autosave') {
+      for (const listener of listeners) listener({ before, after: before + 1, session });
+    }
+  });
+  await React.act(async () => pending.resolve(response));
+  await flushHandoff(); await flushHandoff();
+  assert.equal(calls, source === 'own autosave' ? 2 : 4,
+    'only an explicitly reported own save avoids the external-change retry');
+  assert.equal(useStore.getState().composeData.body, 'Selected reply');
+  assert.equal(listeners.size, 0, 'handoff completion releases save subscription');
+});
+
+for (const outcome of ['success', 'cancel', 'throw']) {
+  test(`handoff save subscription is released after final lookup ${outcome}`, async () => {
+    await reset({ autoOpenReplyDrafts: true }); await select('0');
+    useStore.getState().openCompose({ source: 'automaticReplyDraft', subject: 'Outgoing reply' });
+    const listeners = new Set(); let registrations = 0; let legacyCallbacks = 0;
+    const prepare = prepared(async ({ onDraftSaved } = {}) => {
+      if (onDraftSaved) legacyCallbacks++;
+      return true;
+    });
+    prepare.subscribeDraftSaved = listener => {
+      registrations++; listeners.add(listener);
+      return () => listeners.delete(listener);
+    };
+    useStore.setState({ prepareComposeSwitch: prepare });
+    let release; let fail; let calls = 0;
+    const pending = new Promise((resolve, reject) => { release = resolve; fail = reject; });
+    const response = { draft: draft('0'), body: { text: 'Selected reply', attachments: [] } };
+    api.getReplyDraft = async () => ++calls === 2 ? pending : response;
+    const opening = openReplyDraft('0', { automatic: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 2);
+    const duringLookup = listeners.size;
+    if (outcome === 'cancel') useStore.setState({ selectedMessageId: '1' });
+    if (outcome === 'throw') fail(new Error('Synthetic final lookup failure'));
+    else release(response);
+    assert.equal(await opening, outcome === 'success');
+    assert.equal(registrations, 1);
+    assert.equal(duringLookup, 1, 'subscription remains live after prepare');
+    assert.equal(legacyCallbacks, 0, 'lifetime API must not also use transient callback cleanup');
+    assert.equal(listeners.size, 0);
+  });
+}
+
+test('owned automatic final replacement refusal explains keeping the current editor once', async () => {
+  await reset({ autoOpenReplyDrafts: true });
+  useStore.getState().openCompose({ source: 'automaticReplyDraft', subject: 'Keep local edits' });
+  const session = useStore.getState().composeSession;
+  let replaceable = true;
+  useStore.setState({ prepareComposeSwitch: Object.assign(async () => true, { canReplace: () => replaceable }) });
+  const pending = deferred(); let calls = 0;
+  const response = { draft: draft('0'), body: { text: 'Selected reply', attachments: [] } };
+  api.getReplyDraft = async () => ++calls === 1 ? response : pending.promise;
+  await mount(); await select('0');
+  assert.equal(calls, 2, 'prepared handoff is waiting on final validation');
+  replaceable = false;
+  await React.act(async () => pending.resolve(response));
+  await flushHandoff(); await flushHandoff();
+  assert.equal(useStore.getState().composeSession, session);
+  assert.equal(useStore.getState().composeData.subject, 'Keep local edits');
+  assert.equal(calls, 2, 'late edits must not trigger another automatic handoff');
+  assert.equal(useStore.getState().notifications.length, 1);
+  assert.equal(useStore.getState().notifications[0].body,
+    'Save the current message and resolve its attachments before opening this draft.');
+});
+
+for (const scope of ['selection', 'preference', 'selection with late edits']) {
+  test(`batched ${scope} round trip during mounted handoff opens only a fresh response or retains late edits`, async () => {
+    await reset({ autoOpenReplyDrafts: true });
+    useStore.getState().openCompose({ source: 'automaticReplyDraft', subject: 'Keep current editor' });
+    let replaceable = true;
+    useStore.setState({ prepareComposeSwitch: Object.assign(async () => true, { canReplace: () => replaceable }) });
+    const stale = deferred();
+    const fresh = deferred();
+    const calls = [];
+    const applied = [];
+    const response = text => ({ draft: draft('0'), body: { text, attachments: [] } });
+    api.getReplyDraft = async id => {
+      calls.push(id);
+      if (calls.length === 2) return stale.promise;
+      if (calls.length >= 3) return fresh.promise;
+      return response('Initial lookup');
+    };
+    const unsubscribe = useStore.subscribe(state => {
+      if (state.composeData?.sourceSelectionId === '0') applied.push(state.composeData.body);
+    });
+    try {
+      await mount(); await select('0');
+      assert.deepEqual(calls, ['0', '0'], 'old final lookup is pending');
+      await React.act(async () => {
+        const key = scope === 'preference' ? 'autoOpenReplyDrafts' : 'selectedMessageId';
+        useStore.setState({ [key]: scope === 'preference' ? false : '1' });
+        useStore.setState({ [key]: scope === 'preference' ? true : '0' });
+      });
+      if (scope === 'selection with late edits') replaceable = false;
+      await React.act(async () => stale.resolve(response('Stale response')));
+      await flushHandoff();
+      assert.equal(applied.length, 0, 'revoked response never reaches the composer');
+      assert.equal(calls.length, 3, 'one fresh lookup starts for the current selection');
+      await React.act(async () => fresh.resolve(response('Fresh response')));
+      await flushHandoff();
+      if (scope === 'selection with late edits') {
+        assert.equal(useStore.getState().composeData.subject, 'Keep current editor');
+        assert.equal(applied.length, 0);
+        assert.equal(useStore.getState().notifications.length, 1);
+        assert.equal(useStore.getState().notifications[0].body,
+          'Save the current message and resolve its attachments before opening this draft.');
+      } else {
+        assert.equal(useStore.getState().composeData.body, 'Fresh response');
+        assert.ok(applied.every(body => body === 'Fresh response'));
+      }
+      await flushHandoff(); await flushHandoff();
+      assert.equal(calls.length, 4, 'fresh handoff performs only its initial and final lookup');
+    } finally { unsubscribe(); }
+  });
+}
+
+test('captured context transition cannot retry after sign-out during a handoff', async () => {
+  const { saves, lookups } = await pendingAutomaticHandoff();
+  await React.act(async () => {
+    useStore.setState({ selectedMessageId: '1' });
+    useStore.setState({ selectedMessageId: '0' });
+    useStore.getState().setUser(null);
+  });
+  await React.act(async () => saves[0].resolve(true));
+  await flushHandoff(); await flushHandoff();
+  assert.equal(saves.length, 1);
+  assert.equal(lookups.length, 1);
+  assert.equal(useStore.getState().composing, false);
+  assert.equal(useStore.getState().notifications.length, 0);
+});
+
+test('automatic handoff releases its subscriptions after preparation throws', async () => {
+  await reset({ autoOpenReplyDrafts: true });
+  useStore.getState().openCompose({ source: 'automaticReplyDraft', subject: 'Keep current editor' });
+  let reject;
+  const pending = new Promise((resolve, fail) => { reject = fail; });
+  useStore.setState({ prepareComposeSwitch: prepared(() => pending) });
+  const subscribe = useStore.subscribe;
+  const active = new Set();
+  useStore.subscribe = listener => {
+    const unsubscribe = subscribe(listener);
+    active.add(listener);
+    return () => { active.delete(listener); unsubscribe(); };
+  };
+  try {
+    await mount();
+    const resting = active.size;
+    await select('0');
+    assert.ok(active.size > resting, 'handoff has active subscriptions');
+    await React.act(async () => reject(new Error('Synthetic preparation failure')));
+    await flushHandoff();
+    assert.equal(useStore.getState().composeData.subject, 'Keep current editor');
+    await React.act(async () => root.render(null));
+    assert.equal(active.size, 0, 'no handoff subscription survives the throw and observer cleanup');
+  } finally {
+    await React.act(async () => root.render(null));
+    useStore.subscribe = subscribe;
+  }
+});
+
+for (const scope of ['selection', 'account', 'search', 'conversation', 'preference']) {
+  test(`returning to original ${scope} during final draft lookup cannot revive the old handoff`, async () => {
+    await reset({ autoOpenReplyDrafts: true }); await select('0');
+    useStore.getState().openCompose({ source: 'automaticReplyDraft', subject: 'Current editor' });
+    useStore.setState({ prepareComposeSwitch: prepared(async () => true) });
+    const pending = deferred(); let calls = 0;
+    const result = { draft: { ...draft('0'), message_id: '<reply@synthetic.test>', in_reply_to: '<0@synthetic.test>' },
+      body: { text: 'Earlier selection response', attachments: [] } };
+    api.getReplyDraft = async () => ++calls === 1 ? result : pending.promise;
+    const opening = openReplyDraft('0', { automatic: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 2, 'final lookup is pending after preparation');
+    const key = { selection: 'selectedMessageId', account: 'selectedAccountId', search: 'searchQuery', conversation: 'conversationMode', preference: 'autoOpenReplyDrafts' }[scope];
+    const initial = useStore.getState()[key];
+    useStore.setState({ [key]: { selection: '1', account: 'other', search: 'query', conversation: 'pane', preference: false }[scope] });
+    useStore.setState({ [key]: initial });
+    pending.resolve(result);
+    assert.equal(await opening, false, 'a revoked handoff stays revoked after A/B/A');
+    assert.equal(useStore.getState().composeData.subject, 'Current editor');
+  });
+}
+
+for (const validator of [null, undefined, () => false, () => true, () => 'true']) {
+  test(`prepared replacement requires a synchronous true validator (${String(validator)})`, async () => {
+    await reset();
+    useStore.getState().openCompose({ subject: 'Keep editor' });
+    const session = useStore.getState().composeSession;
+    const prepare = validator === null ? null : Object.assign(async () => true,
+      validator === undefined ? {} : { canReplace: validator });
+    useStore.setState({ prepareComposeSwitch: prepare });
+    const opened = useStore.getState().openCompose({ subject: 'Next' }, { preparedSession: session });
+    assert.equal(opened, validator?.() === true);
+    assert.equal(useStore.getState().composeData.subject, opened ? 'Next' : 'Keep editor');
+  });
+}
