@@ -308,10 +308,41 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('search source producer
     await db.query(`INSERT INTO messages(id,account_id,folder,uid,date)
       SELECT ('00000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,$1,'INBOX',n,
         '2026-10-21T00:00:00Z'::timestamptz+n*interval '1 second' FROM generate_series(1,4)n`,[accountId]);
-    await producer(account,{profile,limit:2});await setSearchCoverageAction(accountId,'pause');
-    await producer(account,{profile,limit:2});expect(await rows()).toHaveLength(2);
-    await setSearchCoverageAction(accountId,'resume');await producer(account,{profile,limit:2,signal:AbortSignal.abort()});
-    expect(await rows()).toHaveLength(2);await producer(account,{profile,limit:2});expect(await rows()).toHaveLength(4);
+    // Observe the real bounded SQL without replacing the producer or its tracker.
+    const querySpy=vi.spyOn(db,'query');
+    const windows=()=>querySpy.mock.calls.filter(([sql])=>typeof sql==='string'&&sql.startsWith('WITH dated_window AS MATERIALIZED'));
+    try {
+      expect(await producer(account,{profile,limit:2})).toMatchObject({changed:2,deferred:false,reason:null});
+      const beforePause=await rows();expect(beforePause).toHaveLength(2);
+      expect(beforePause.map(j=>Number(j.uid)).sort()).toEqual([3,4]);
+      expect(windows()).toHaveLength(1);
+      const firstWindow=windows()[0];
+      const initialEpoch=(await db.query('SELECT run_epoch FROM search_index_accounts WHERE account_id=$1',[accountId])).rows[0].run_epoch;
+      const paused=await setSearchCoverageAction(accountId,'pause');
+      expect(paused).toMatchObject({paused:true});
+      expect(String(paused.run_epoch)).toBe((BigInt(initialEpoch)+1n).toString());
+      expect(await producer(account,{profile,limit:2})).toMatchObject({changed:0,deferred:true,reason:'stopped'});
+      expect(windows()).toHaveLength(1);expect(await rows()).toEqual(beforePause);
+      const resumed=await setSearchCoverageAction(accountId,'resume');
+      expect(resumed).toMatchObject({paused:false});
+      expect(String(resumed.run_epoch)).toBe((BigInt(paused.run_epoch)+1n).toString());
+      const queriesBeforeAbort=querySpy.mock.calls.length;
+      expect(await producer(account,{profile,limit:2,signal:AbortSignal.abort()})).toMatchObject({changed:0,deferred:true,reason:'stopped'});
+      expect(querySpy.mock.calls).toHaveLength(queriesBeforeAbort);
+      expect(windows()).toHaveLength(1);expect(await rows()).toEqual(beforePause);
+      // W4 deliberately restarts newest after a control epoch change. This is a
+      // bounded rescan of the original [4,3], not advancement of the older track.
+      expect(await producer(account,{profile,limit:2})).toMatchObject({changed:0,deferred:false,reason:null});
+      expect(windows()).toHaveLength(2);expect(windows()[1]).toEqual(firstWindow);
+      expect(await rows()).toEqual(beforePause);
+      // The next real window must retain the exact pre-pause older boundary and
+      // enqueue [2,1]. No polling/retry loop or weakened four-job oracle.
+      expect(await producer(account,{profile,limit:2})).toMatchObject({changed:2,deferred:false,reason:null});
+      expect(windows()).toHaveLength(3);
+      expect(windows()[2][1].slice(3)).toEqual(['2026-10-21T00:00:03.000000Z','00000000-0000-4000-8000-000000000003',2]);
+      expect(await rows()).toHaveLength(4);
+      expect((await rows()).map(j=>Number(j.uid)).sort()).toEqual([1,2,3,4]);
+    } finally {querySpy.mockRestore();}
   });
 
   it('recovers an invalid concurrent index and explains an ordered bounded account window',async()=>{
