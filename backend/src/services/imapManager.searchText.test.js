@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { Parser } from 'htmlparser2';
 import { extractHtmlSnippetText } from './messageParser.js';
+import { fetchSearchText } from './searchText.js';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('./aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
@@ -14,7 +15,7 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(async () => 
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn(async () => ({})) }));
 
 import { ImapFlow } from 'imapflow';
-import { ImapManager, acquirePooledClient, releasePooledClient, evictPool } from './imapManager.js';
+import { ImapManager, acquirePooledClient, releasePooledClient, evictPool, isConnectionRefusal, isAuthFailure } from './imapManager.js';
 
 const account = { id: 'search-account', imap_tls: true, imap_host: 'imap.example.test', email_address: 'reader@example.test' };
 const LIMIT = 16 * 1024 * 1024;
@@ -58,6 +59,295 @@ const texts = result => result.textParts.map(p => p.text).join('\n');
 
 beforeEach(() => {
   ImapFlow.mockReset().mockImplementation(() => { throw new Error('Unexpected new login'); });
+});
+
+describe('search extraction admission', () => {
+  const structureReservation = 264192;
+  const bodyBound = sizes => sizes.reduce((sum, size) => sum + size + 1088 * Math.max(1, Math.ceil(size / 65536)), 0);
+  const identity = { accountId: account.id, folder: 'INBOX', uid: 42, uidValidity: '19' };
+  const jsonBytes = value => Buffer.byteLength(JSON.stringify(value));
+  const sizedStructure = bytes => {
+    const structure = { ...leaf('1', 'Orion'), extra: '' };
+    structure.extra = 'x'.repeat(bytes - jsonBytes(structure));
+    return structure;
+  };
+
+  it('defers before acquiring a session even when a denied reservation was charged', async () => {
+    const { run, client } = fixture(leaf('1', 'Orion'), { '1': 'Orion' });
+    let charged = 0;
+    const admit = vi.fn(async ({ bytes }) => { charged += bytes; return { allowed: false, deferAt: 60000 }; });
+    expect(await run({ client: undefined, admit })).toMatchObject({
+      complete: false, status: 'deferred', reason: 'budget', deferAt: 60000,
+      bodyBytes: null, downloadBytes: 0, identity, requiredParts: [], textParts: [],
+    });
+    expect(admit).toHaveBeenCalledExactlyOnceWith({ messages: 1, bytes: structureReservation });
+    expect(charged).toBe(structureReservation);
+    expect(client.getMailboxLock).not.toHaveBeenCalled();
+    expect(client.fetch).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['budget database unavailable', undefined],
+    ['disk quota exceeded', 1093],
+    ['password authentication failed', undefined],
+  ])('keeps initial admission storage errors out of provider classification: %s', async (detail, reservedBodyBytes) => {
+    const acquire = vi.fn(async () => { throw new Error('Unexpected session acquisition'); });
+    const admit = vi.fn(async () => { throw new Error(detail); });
+    const result = await fetchSearchText(account, 42, 'INBOX', { admit, reservedBodyBytes, uidValidity: '19' },
+      { acquire, isConnectionRefusal, isAuthFailure });
+    expect(result).toMatchObject({
+      complete: false, status: 'retry', reason: 'budget-failed', detail, identity,
+      bodyBytes: reservedBodyBytes ?? null, downloadBytes: 0, structureOverrunBytes: 0,
+      textParts: [], requiredParts: [],
+    });
+    expect(admit).toHaveBeenCalledExactlyOnceWith({ messages: 1, bytes: structureReservation + (reservedBodyBytes ?? 0) });
+    expect(acquire).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+  });
+
+  it.each(['AbortError', 'aborted signal'])('preserves initial admission aborts: %s', async mode => {
+    const acquire = vi.fn(async () => { throw new Error('Unexpected session acquisition'); });
+    const controller = new AbortController();
+    const admit = vi.fn(async () => {
+      if (mode === 'aborted signal') controller.abort();
+      throw mode === 'AbortError' ? new DOMException('cancelled', 'AbortError') : new Error('disk quota exceeded');
+    });
+    const result = await fetchSearchText(account, 42, 'INBOX', { admit, signal: controller.signal, uidValidity: '19' },
+      { acquire, isConnectionRefusal, isAuthFailure });
+    expect(result).toMatchObject({
+      complete: false, status: 'cancelled', reason: 'cancelled', identity,
+      bodyBytes: null, downloadBytes: 0, structureOverrunBytes: 0, textParts: [], requiredParts: [],
+    });
+    expect(admit).toHaveBeenCalledOnce();
+    expect(acquire).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+  });
+
+  it('admits structure before selection, then the entire body once before any PEEK', async () => {
+    const { run, client } = fixture(leaf('1', 'Orion'), { '1': 'Orion' });
+    const admit = vi.fn(async () => {
+      expect(requested(client)).toEqual([]);
+      if (admit.mock.calls.length === 1) expect(client.getMailboxLock).not.toHaveBeenCalled();
+      else expect(client.fetch).toHaveBeenCalledOnce();
+      return { allowed: true };
+    });
+    const result = await run({ admit });
+    expect(result).toMatchObject({ complete: true, bodyBytes: 1093, identity });
+    expect(texts(result)).toBe('Orion');
+    expect(admit.mock.calls).toEqual([[{ messages: 1, bytes: structureReservation }], [{ messages: 0, bytes: 1093 }]]);
+  });
+
+  it('returns a body quotation and observed structure cost on denial without publishing a prefix', async () => {
+    const structure = leaf('1', '', 'text/plain', { size: LIMIT });
+    const { run, client } = fixture(structure);
+    const admit = vi.fn().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false, deferAt: 60000 });
+    expect(await run({ admit })).toMatchObject({
+      complete: false, status: 'deferred', reason: 'budget', deferAt: 60000,
+      bodyBytes: 17055744, downloadBytes: 2048 + jsonBytes(structure),
+      requiredParts: ['1'], identity, textParts: [],
+    });
+    expect(admit.mock.calls[1]).toEqual([{ messages: 0, bytes: 17055744 }]);
+    expect(requested(client)).toEqual([]);
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it('re-quotes nothing on a persisted-bound retry, allowing a sole fresh-window reservation', async () => {
+    const body = 'x'.repeat(LIMIT);
+    const { run } = fixture(leaf('1', body), { '1': body });
+    const admit = vi.fn().mockResolvedValueOnce({ allowed: true })
+      .mockResolvedValueOnce({ allowed: false, deferAt: 60000 }).mockResolvedValueOnce({ allowed: true });
+    const deferred = await run({ admit });
+    // The worker persists this quotation with identity/generation; it is not prepaid credit.
+    const quotation = JSON.parse(JSON.stringify({ bodyBytes: deferred.bodyBytes, identity: deferred.identity }));
+    const result = await run({ admit, reservedBodyBytes: quotation.bodyBytes });
+    expect(result).toMatchObject({ complete: true, bodyBytes: 17055744 });
+    expect(texts(result)).toHaveLength(LIMIT);
+    expect(admit.mock.calls).toEqual([
+      [{ messages: 1, bytes: 264192 }], [{ messages: 0, bytes: 17055744 }], [{ messages: 1, bytes: 17319936 }],
+    ]);
+    expect(result.downloadBytes).toBeLessThanOrEqual(17319936);
+  });
+
+  it.each([0, 1092])('rejects a recomputed body bound above quotation %i before any PEEK', async reservedBodyBytes => {
+    const { run, client } = fixture(leaf('1', 'Orion'), { '1': 'Orion' });
+    const admit = vi.fn(async () => ({ allowed: true }));
+    expect(await run({ admit, reservedBodyBytes })).toMatchObject({
+      complete: false, status: 'retry', reason: 'bound-changed', bodyBytes: 1093, identity, textParts: [],
+    });
+    expect(admit).toHaveBeenCalledExactlyOnceWith({ messages: 1, bytes: structureReservation + reservedBodyBytes });
+    expect(requested(client)).toEqual([]);
+  });
+
+  it('uses a larger quotation once without another body admission or treating it as credit', async () => {
+    const { run } = fixture(leaf('1', 'Orion'), { '1': 'Orion' });
+    const admit = vi.fn(async () => ({ allowed: true }));
+    expect(await run({ admit, reservedBodyBytes: 2000 })).toMatchObject({ complete: true, bodyBytes: 1093 });
+    expect(admit).toHaveBeenCalledExactlyOnceWith({ messages: 1, bytes: structureReservation + 2000 });
+  });
+
+  it.each([-1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER])('rejects unsafe quotation %s before admission or selection', async reservedBodyBytes => {
+    const { run, client } = fixture(leaf('1', 'Orion'), { '1': 'Orion' });
+    const admit = vi.fn(async () => ({ allowed: true }));
+    expect(await run({ admit, reservedBodyBytes })).toMatchObject({ complete: false, status: 'retry', reason: 'bound-changed' });
+    expect(admit).not.toHaveBeenCalled();
+    expect(client.getMailboxLock).not.toHaveBeenCalled();
+  });
+
+  it('keeps an initial denied quotation and identity without fetching or assuming a refund', async () => {
+    const { run, client } = fixture(leaf('1', 'Orion'));
+    const admit = vi.fn(async () => ({ allowed: false, deferAt: 120000 }));
+    expect(await run({ admit, reservedBodyBytes: 1093 })).toMatchObject({
+      complete: false, status: 'deferred', bodyBytes: 1093, deferAt: 120000, identity, downloadBytes: 0, textParts: [],
+    });
+    expect(admit).toHaveBeenCalledExactlyOnceWith({ messages: 1, bytes: structureReservation + 1093 });
+    expect(client.fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects required text over 16MiB before body admission', async () => {
+    const { run, client } = fixture(leaf('1', '', 'text/plain', { size: LIMIT + 1 }));
+    const admit = vi.fn(async () => ({ allowed: true }));
+    expect(await run({ admit })).toMatchObject({ complete: false, status: 'unsupported', reason: 'text-too-large', textParts: [] });
+    expect(admit).toHaveBeenCalledOnce();
+    expect(requested(client)).toEqual([]);
+  });
+
+  it('preserves the honest one-byte structure overrun and refuses before body admission', async () => {
+    const { run, client } = fixture(sizedStructure(262145), { '1': 'Orion' });
+    const admit = vi.fn(async () => ({ allowed: true }));
+    expect(await run({ admit })).toMatchObject({
+      complete: false, status: 'unsupported', reason: 'structure-too-large', downloadBytes: 264193,
+      structureOverrunBytes: 1, identity, textParts: [],
+    });
+    expect(admit).toHaveBeenCalledExactlyOnceWith({ messages: 1, bytes: 264192 });
+    expect(requested(client)).toEqual([]);
+    // Durable terminal identity/generation and zero-fetch second-pass behavior belong to 7b.
+  });
+
+  it('accepts the exact structure allowance and charges selection as well as the structure command', async () => {
+    const { run } = fixture(sizedStructure(262144), { '1': 'Orion' });
+    const admit = vi.fn().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false, deferAt: 60000 });
+    expect(await run({ admit })).toMatchObject({ downloadBytes: 264192, structureOverrunBytes: 0, status: 'deferred' });
+  });
+
+  it('does not classify an oversized structure as terminal after its selected epoch changes', async () => {
+    const { run, client } = fixture(sizedStructure(262145));
+    const fetch = client.fetch.getMockImplementation();
+    client.fetch.mockImplementation(async function* (...args) {
+      for await (const msg of fetch(...args)) {
+        client.mailbox.uidValidity = 20n;
+        yield msg;
+      }
+    });
+    const admit = vi.fn(async () => ({ allowed: true }));
+    expect(await run({ admit })).toMatchObject({ complete: false, status: 'retry', reason: 'stale-identity', textParts: [] });
+    expect(admit).toHaveBeenCalledOnce();
+    expect(requested(client)).toEqual([]);
+  });
+
+  it.each(['initial', 'body'])('checks cancellation after the %s admission await without a body read', async phase => {
+    const controller = new AbortController();
+    const { run, client } = fixture(leaf('1', 'Orion'), { '1': 'Orion' });
+    const admit = vi.fn(async () => {
+      if (admit.mock.calls.length === (phase === 'initial' ? 1 : 2)) controller.abort();
+      return { allowed: true };
+    });
+    expect(await run({ admit, signal: controller.signal })).toMatchObject({ status: 'cancelled', complete: false, textParts: [] });
+    expect(requested(client)).toEqual([]);
+    if (phase === 'initial') expect(client.getMailboxLock).not.toHaveBeenCalled();
+    else expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it('rechecks the selected epoch after body admission awaits', async () => {
+    const { run, client } = fixture(leaf('1', 'Orion'), { '1': 'Orion' });
+    const admit = vi.fn(async () => {
+      if (admit.mock.calls.length === 2) client.mailbox.uidValidity = 20n;
+      return { allowed: true };
+    });
+    expect(await run({ admit })).toMatchObject({ status: 'retry', reason: 'stale-identity', complete: false, textParts: [] });
+    expect(requested(client)).toEqual([]);
+  });
+
+  it.each(['abort', 'storage-error'])('returns a pooled client unchanged after body admission %s', async mode => {
+    const { manager, client } = fixture(leaf('1', 'Orion'), { '1': 'Orion' });
+    const pooledAccount = { ...account, id: `admission-${mode}` };
+    ImapFlow.mockImplementation(function () { return client; });
+    const initial = await acquirePooledClient(pooledAccount);
+    releasePooledClient(pooledAccount, initial);
+    ImapFlow.mockClear();
+    const controller = new AbortController();
+    const admit = vi.fn(async () => {
+      if (admit.mock.calls.length === 2) {
+        if (mode === 'storage-error') throw new Error('budget database unavailable');
+        controller.abort();
+      }
+      return { allowed: true };
+    });
+    try {
+      const result = await manager.fetchMessageBody(pooledAccount, 42, 'INBOX', {
+        purpose: 'search', uidValidity: '19', admit, signal: controller.signal,
+      });
+      expect(result).toMatchObject({ complete: false, status: mode === 'abort' ? 'cancelled' : 'retry', textParts: [] });
+      if (mode === 'storage-error') expect(result).toMatchObject({ reason: 'budget-failed', detail: 'budget database unavailable' });
+      expect(requested(client)).toEqual([]);
+      expect(client.release).toHaveBeenCalledOnce();
+      expect(client.logout).not.toHaveBeenCalled();
+      expect(client.close).not.toHaveBeenCalled();
+      const reused = await acquirePooledClient(pooledAccount);
+      expect(reused).toBe(client);
+      releasePooledClient(pooledAccount, reused);
+      expect(ImapFlow).not.toHaveBeenCalled();
+    } finally { evictPool(pooledAccount.id); }
+  });
+
+  it.each([undefined, { allowed: false }, { allowed: 'yes' }])('requires explicit allowed:true before selection (%j)', async admission => {
+    const { run, client } = fixture(leaf('1', 'Orion'));
+    expect(await run({ admit: async () => admission })).toMatchObject({ status: 'deferred', reason: 'budget', complete: false });
+    expect(client.getMailboxLock).not.toHaveBeenCalled();
+  });
+
+  it('bounds observed accounting across deterministic conforming part sizes, empty parts and batching', async () => {
+    for (let seed = 0; seed < 20; seed++) {
+      const edges = [0, 1, 65535, 65536, 65537, 131072];
+      const sizes = Array.from({ length: seed % 7 + 1 }, (_, i) => edges[(seed + i * 5) % edges.length]);
+      const bodies = Object.fromEntries(sizes.map((size, i) => [String(i + 1), 'x'.repeat(size)]));
+      const structure = mixed(...sizes.map((size, i) => leaf(String(i + 1), '', 'text/plain', { size })));
+      const { run } = fixture(structure, bodies);
+      const admit = vi.fn(async () => ({ allowed: true }));
+      const result = await run({ admit });
+      const reserved = admit.mock.calls.reduce((sum, [bounds]) => sum + bounds.bytes, 0);
+      expect(result.complete, `seed ${seed}`).toBe(true);
+      expect(result.bodyBytes).toBe(bodyBound(sizes));
+      expect(result.downloadBytes).toBeLessThanOrEqual(reserved);
+      expect(admit).toHaveBeenCalledTimes(2);
+      expect(result.textParts.map(p => p.text.length)).toEqual(sizes);
+    }
+  });
+
+  it.each(['partial', 'missing', 'failure', 'epoch'])('retains the accounting bound and no prefix on %s body reads', async mode => {
+    const { run, client } = fixture(leaf('1', 'Orion'), { '1': 'Orion' });
+    const fetch = client.fetch.getMockImplementation();
+    client.fetch.mockImplementation(async function* (uid, query, options) {
+      if (query.bodyParts && mode === 'failure') throw new Error('connection lost');
+      for await (const msg of fetch(uid, query, options)) {
+        if (query.bodyParts) {
+          if (mode === 'partial') msg.bodyParts.set('1', Buffer.from('Or'));
+          if (mode === 'missing') msg.bodyParts.clear();
+          if (mode === 'epoch') client.mailbox.uidValidity = 20n;
+        }
+        yield msg;
+      }
+    });
+    const admit = vi.fn(async () => ({ allowed: true }));
+    const result = await run({ admit });
+    expect(result).toMatchObject({ complete: false, status: 'retry', textParts: [], bodyBytes: 1093 });
+    expect(result.downloadBytes).toBeLessThanOrEqual(structureReservation + 1093);
+  });
+
+  it('preserves extraction without an admission callback or a valid quotation', async () => {
+    const { run } = fixture(sizedStructure(262145), { '1': 'Orion' });
+    expect(texts(await run({ reservedBodyBytes: -1 }))).toBe('Orion');
+  });
 });
 
 describe('complete search-only body extraction', () => {
