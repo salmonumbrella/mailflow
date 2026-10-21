@@ -201,6 +201,11 @@
     "recipientMenu": {
       "copy": "Kopiuj adres",
       "copyAll": "Kopiuj wszystkie adresy z tego pola"
+    },
+    "senderValidation": {
+      "unavailable": "Fastmail nie wymienia tego adresu jako tożsamości nadawcy.",
+      "unknown": "Nie udało się zweryfikować tego nadawcy w Fastmail.",
+      "missing": "Wybrany nadawca nie jest już dostępny. Wybierz nadawcę ponownie."
     }
   },
   "message": {
@@ -1012,7 +1017,13 @@
       "trustedAuthservDetected": "Widziane w ostatnich wiadomościach (kliknij, aby użyć):",
       "trustedAuthservDetectedNone": "Brak danych — wiadomości są analizowane, gdy antyspam jest włączony dla tego konta.",
       "trustedAuthservWarn": "Ufaj tylko identyfikatorowi, który rozpoznajesz jako serwer odbierający Twojego dostawcy.",
-      "enabledGlobally": "Włączone globalnie"
+      "enabledGlobally": "Włączone globalnie",
+      "fastmailVerification": {
+        "token": "Token API Fastmail",
+        "help": "Ogranicz token do wysyłania poczty (tożsamości) i opcjonalnie adresów maskowanych. Nie przyznawaj pełnego dostępu. Pozostaw bez zmian, aby zachować zapisany token.",
+        "configured": "Token został zapisany.",
+        "clear": "Usuń zapisany token"
+      }
     },
     "folderMappings": {
       "title": "Mapowania folderów",
@@ -1941,6 +1952,7 @@
     "done": "Oznacz jako wykonane",
     "doneFailed": "Nie udało się oznaczyć jako gotowe",
     "doneArchiveFailed": "Oznaczono jako gotowe, ale archiwizacja nie powiodła się — wiadomość nadal znajduje się w skrzynce odbiorczej",
+    "doneThreadRemains": "Nie udało się usunąć niektórych wiadomości z tej rozmowy, więc pozostaje ona w swojej sekcji GTD",
     "state": {
       "todo": "Do zrobienia",
       "watch": "Do obserwowania",

@@ -6,7 +6,10 @@ import { gzipSync } from 'zlib';
 vi.mock('../services/db.js', () => ({
   query: vi.fn(),
   pool: { connect: vi.fn() },
+  withTransaction: vi.fn(),
 }));
+vi.mock('../services/aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
+vi.mock('./oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAdmin: (req, _res, next) => {
     req.session = { userId: 'admin-1', username: 'admin' };
@@ -19,13 +22,22 @@ vi.mock('../services/backup.js', async importOriginal => {
   const actual = await importOriginal();
   return { ...actual, actual, writeBackup: vi.fn(), restoreBackup: vi.fn(), unclassifiedTables: vi.fn() };
 });
+vi.mock('../services/encryption.js', () => ({
+  encrypt: value => 'enc:' + value,
+  decrypt: value => typeof value === 'string' && value.startsWith('enc:') ? value.slice(4) : value,
+  isEncrypted: value => typeof value === 'string' && value.startsWith('enc:'),
+}));
 vi.mock('../index.js', () => ({
   APP_VERSION: '3.6.0',
-  imapManager: { disconnectUser: vi.fn(async () => {}), connectAllForUser: vi.fn(async () => {}) },
+  imapManager: { disconnectUser: vi.fn(async () => {}), connectAllForUser: vi.fn(async () => {}),
+    quiesceSearchIndex: vi.fn(async () => {}), resumeSearchIndexScheduling: vi.fn() },
   restartAfterRestore: vi.fn(),
 }));
 
 import express from 'express';
+import { ImapManager } from '../services/imapManager.js';
+import { createSearchIndexLifecycle } from '../services/searchIndexLifecycle.js';
+import { createSearchIndexWindowTracker } from '../services/searchIndexWindow.js';
 
 let server;
 let base;
@@ -53,6 +65,11 @@ beforeEach(async () => {
     router: (await import('./backup.js')).default,
   };
   vi.clearAllMocks();
+  client.query.mockReset().mockResolvedValue({ rows: [] });
+  m.index.imapManager.disconnectUser.mockReset().mockResolvedValue();
+  m.index.imapManager.connectAllForUser.mockReset().mockResolvedValue();
+  m.index.imapManager.quiesceSearchIndex.mockReset().mockResolvedValue();
+  m.index.imapManager.resumeSearchIndexScheduling.mockReset();
   m.db.pool.connect.mockResolvedValue(client);
   m.db.query.mockResolvedValue({ rows: [{ id: 'u1' }, { id: 'u2' }] });
   m.backup.unclassifiedTables.mockResolvedValue([]);
@@ -120,6 +137,62 @@ describe('GET /api/admin/backup', () => {
 });
 
 describe('POST /api/admin/backup/restore', () => {
+  it('waits for global index quiescence before disconnecting any user', async () => {
+    let finish;
+    const drain = new Promise(resolve => { finish = resolve; });
+    const order = [];
+    m.index.imapManager.quiesceSearchIndex.mockImplementation(async () => { await drain; order.push('drained'); });
+    m.index.imapManager.disconnectUser.mockImplementation(async id => { order.push(id); });
+    m.backup.restoreBackup.mockImplementation(async (_client, _input, { beforeWrite }) => {
+      await beforeWrite(); throw new Error('stop after beforeWrite');
+    });
+    const restoring = post('gz-bytes');
+    try {
+      await vi.waitFor(() => expect(m.index.imapManager.quiesceSearchIndex).toHaveBeenCalledOnce());
+      expect(order).toEqual([]);
+      finish();
+      expect(await ndjson(await restoring)).toEqual([{ error: 'stop after beforeWrite' }]);
+      expect(order).toEqual(['drained', 'u1', 'u2']);
+    } finally { finish(); await restoring; }
+  });
+
+  it.each(['global drain', 'user fence'])('prevents actual restore BEGIN and TRUNCATE after a failed %s', async failure => {
+    const order = [], statements = [];
+    client.query.mockImplementation(async text => {
+      statements.push(text);
+      if (text.startsWith('SELECT version FROM schema_migrations')) return { rows: [{ version: '0075_search_index_jobs' }] };
+      return { rows: [] };
+    });
+    m.index.imapManager.quiesceSearchIndex.mockImplementation(async () => {
+      if (failure === 'global drain') throw new Error('index drain failed');
+    });
+    if (failure === 'user fence') {
+      // The real ordinary path contains this failure; only the route forwarding
+      // strict:true makes beforeWrite reject. A throwing double misses that bug.
+      const manager = Object.create(ImapManager.prototype);
+      for (const name of ['connections', 'syncIntervals', 'pluginSyncIntervals', 'syncThrottleSkips', 'syncTickCount',
+        'lastSyncOkAt', '_idleMissStreak', '_syncErrorState', '_pendingFlagSync', '_pendingNewMail',
+        '_flagDebounceTimers', '_expungeDebounceTimers']) manager[name] = new Map();
+      manager._pollOnlyAccounts = new Set();
+      manager._searchIndex = createSearchIndexLifecycle({
+        runBatch: async () => { throw new Error('Unexpected index activation'); },
+        invalidateRun: async () => { throw new Error('index fence failed'); },
+      });
+      m.index.imapManager.disconnectUser.mockImplementation(manager.disconnectUser.bind(manager));
+    }
+    m.index.imapManager.resumeSearchIndexScheduling.mockImplementation(() => { order.push('scheduling'); });
+    m.index.imapManager.connectAllForUser.mockImplementation(async id => { order.push(id); });
+    m.backup.restoreBackup.mockImplementation(m.backup.actual.restoreBackup);
+    const manifest = { mailflow: 'backup', format: m.backup.BACKUP_FORMAT, scope: 'setup',
+      schemaVersion: '0075_search_index_jobs', tables: [], sequences: {}, keyCheck: 'enc:mailflow-backup-key-check' };
+    const response = await post(gzipSync(JSON.stringify(manifest) + '\n' + JSON.stringify({ end: true, rowCounts: {} }) + '\n'));
+    expect(await ndjson(response)).toEqual([{ error: failure === 'global drain' ? 'index drain failed' : 'index fence failed' }]);
+    expect(statements).not.toContain('BEGIN');
+    expect(statements.some(text => text.includes('TRUNCATE'))).toBe(false);
+    await vi.waitFor(() => expect(order).toEqual(['scheduling', 'u1', 'u2']));
+    expect(m.index.restartAfterRestore).not.toHaveBeenCalled();
+  });
+
   it('streams progress, then the result, and restarts once the reply is out', async () => {
     m.backup.restoreBackup.mockImplementation(async (_client, input, { beforeWrite, onProgress }) => {
       expect(typeof input.pipe).toBe('function');
@@ -136,6 +209,42 @@ describe('POST /api/admin/backup/restore', () => {
     expect(m.index.imapManager.connectAllForUser).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(m.index.restartAfterRestore).toHaveBeenCalledTimes(1), { timeout: 3000 });
     expect(client.release).toHaveBeenCalled();
+  });
+
+  it('keeps date discovery and committed-id handoff stopped after a committed restore until restart',async()=>{
+    const account={id:'restore-index-account'},produce=vi.fn(async()=>{}),handoff=vi.fn(async()=>{});
+    const lifecycle=createSearchIndexLifecycle({runBatch:produce,invalidateRun:async()=>{}});
+    const manager=Object.create(ImapManager.prototype);manager._searchIndex=lifecycle;
+    manager._searchIndexSources=Object.assign(produce,{enqueueRows:handoff,rescan:()=>{}});
+    await lifecycle.resume(account.id);
+    m.index.imapManager.quiesceSearchIndex.mockImplementation(()=>lifecycle.quiesce());
+    m.backup.restoreBackup.mockImplementation(async(_client,_input,{beforeWrite})=>{await beforeWrite();return RESULT;});
+    expect(await ndjson(await post('gz-bytes'))).toEqual([{ok:true,...RESULT}]);
+    expect(await manager.startSearchIndex(account)).toBeNull();
+    expect(await manager.enqueueCommittedSearchRows(account,['00000000-0000-4000-8000-000000000001']))
+      .toMatchObject({deferred:true,reason:'stopped'});
+    expect(produce).not.toHaveBeenCalled();expect(handoff).not.toHaveBeenCalled();
+    expect(m.index.imapManager.resumeSearchIndexScheduling).not.toHaveBeenCalled();
+    await vi.waitFor(()=>expect(m.index.restartAfterRestore).toHaveBeenCalledTimes(1),{timeout:3000});
+    expect((await post('gz-bytes')).status).toBe(409);expect(lifecycle.isOpen(account.id)).toBe(false);
+  });
+
+  it('resumes a newest rescan after a failed restore and the prior disconnect epoch change',async()=>{
+    const account={id:'restore-index-account'},tracker=createSearchIndexWindowTracker();let epoch=10n;
+    const rows=[{id:'b',cursor_date:'2026-10-21T00:00:00.000001Z'},{id:'a',cursor_date:'2026-10-21T00:00:00.000000Z'}];
+    tracker.commit(tracker.next(account.id,2,String(epoch)),rows);
+    tracker.commit(tracker.next(account.id,2,String(epoch)),[{id:'9',cursor_date:null},{id:'8',cursor_date:null}]);
+    const lifecycle=createSearchIndexLifecycle({runBatch:async()=>tracker.next(account.id,2,String(epoch)),invalidateRun:async()=>{epoch++;}});
+    await lifecycle.resume(account.id);
+    m.index.imapManager.quiesceSearchIndex.mockImplementation(()=>lifecycle.quiesce());
+    m.index.imapManager.resumeSearchIndexScheduling.mockImplementation(()=>lifecycle.resumeScheduling());
+    m.index.imapManager.connectAllForUser.mockImplementation(()=>lifecycle.resume(account.id));
+    m.backup.restoreBackup.mockImplementation(async(_client,_input,{beforeWrite})=>{await beforeWrite();throw new Error('simulated restore rollback');});
+    expect(await ndjson(await post('gz-bytes'))).toEqual([{error:'simulated restore rollback'}]);
+    await vi.waitFor(()=>expect(lifecycle.isOpen(account.id)).toBe(true));
+    const next=await lifecycle.run(account);expect(next).toMatchObject({track:'newest',after:null,above:null});
+    tracker.commit(next,rows);expect(tracker.next(account.id,2,String(epoch))).toMatchObject({track:'older',after:{id:'8'}});
+    expect(epoch).toBe(11n);expect(m.index.restartAfterRestore).not.toHaveBeenCalled();
   });
 
   it('still restarts when the browser went away before the result reached it', async () => {

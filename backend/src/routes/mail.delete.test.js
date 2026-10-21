@@ -1,20 +1,20 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
 vi.mock('../index.js', () => ({
   imapManager: {
     _guardMoveUid: vi.fn(), _unguardMoveUid: vi.fn(), moveMessage: vi.fn(),
-    permanentDeleteMessage: vi.fn(), broadcast: vi.fn(), scheduleCountRefresh: vi.fn(),
+    permanentDeleteMessage: vi.fn(), broadcast: vi.fn(), scheduleCountRefresh: vi.fn(), syncFolderOnDemand: vi.fn(),
   },
 }));
 
 import express from 'express';
 import mailRoutes from './mail.js';
-import { query } from '../services/db.js';
+import { query, withTransaction } from '../services/db.js';
 import { imapManager } from '../index.js';
 
 const ACCOUNT_ID = 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1';
@@ -25,7 +25,7 @@ const MSG_ID = 'b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2';
 let rows, server, uidplus, nextTrashUid;
 
 function reset({ trash = {}, withUidplus = true, folder = 'INBOX' } = {}) {
-  rows = new Map([[MSG_ID, { id: MSG_ID, account_id: ACCOUNT_ID, uid: 42, folder, is_read: false, message_id: '<a@example.com>' }]]);
+  rows = new Map([[MSG_ID, { id: MSG_ID, account_id: ACCOUNT_ID, uid: 42, folder, is_read: false, provider_msgid: null, source_uid_validity: null, is_archive_residue: false, is_deleted: false, message_id: '<a@example.com>' }]]);
   server = { [folder]: new Map([[42, 'MAIL-A']]), Trash: new Map(Object.entries(trash).map(([u, m]) => [Number(u), m])) };
   uidplus = withUidplus;
   nextTrashUid = 900;
@@ -83,6 +83,22 @@ function selectFolders(rawSql, folders) {
 function fakeQuery(rawSql, params = []) {
   const sql = rawSql.replace(/\s+/g, ' ').trim();
   const result = (r, rowCount = r.length) => Promise.resolve({ rows: r, rowCount });
+  if (sql.includes('jsonb_to_recordset')) {
+    return result(JSON.parse(params[0]).flatMap(s => { const row = rows.get(s.id); return row && row.folder === s.folder && row.uid === s.uid && (row.provider_msgid ?? null) === s.provider_msgid ? [{ ...row }] : []; }));
+  }
+  if (sql.startsWith('WITH source AS')) {
+    const written = [];
+    for (const id of params[0]) {
+      const source = rows.get(id); if (!source || source.is_archive_residue) continue;
+      const next = { ...source, folder: params[1], uid: params[5][params[4].indexOf(id)] ?? source.uid, id: params[2] ? randomUUID() : id };
+      rows.delete(id); rows.set(next.id, next); written.push({ ...source, source_id: id, destination_id: next.id });
+    }
+    return result(written);
+  }
+  if (sql.startsWith('DELETE FROM messages WHERE id=ANY')) {
+    const written = params[0].flatMap(id => { const row = rows.get(id); if (!row || row.is_archive_residue) return []; rows.delete(id); return [{ ...row, source_id: id }]; });
+    return result(written);
+  }
   if (sql.includes('FROM messages m JOIN email_accounts a')) {
     const row = rows.get(params[0]);
     return result(row ? [{ ...row, user_id: 'user-1' }] : []);
@@ -143,6 +159,10 @@ describe('DELETE /api/mail/messages/:id', () => {
   beforeEach(() => {
     query.mockReset();
     query.mockImplementation(fakeQuery);
+    withTransaction.mockImplementation(async work => {
+      const before = new Map([...(rows || [])].map(([id, row]) => [id, { ...row }]));
+      try { return await work({ query }); } catch (error) { rows = before; throw error; }
+    });
     for (const fn of Object.values(imapManager)) fn.mockReset();
     wireImap();
   });
@@ -216,3 +236,8 @@ describe('DELETE /api/mail/messages/:id', () => {
     expect(trashRow()).toMatchObject({ uid: 900 });
   });
 });
+
+// Unexpected fence/programming failures must fail these positive fixtures.
+let fenceWarnings;
+beforeEach(() => { fenceWarnings = vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+afterEach(() => { try { expect(fenceWarnings).not.toHaveBeenCalled(); } finally { fenceWarnings.mockRestore(); } });

@@ -41,7 +41,10 @@ export const conversationMembershipKey = messages => normalizeConversation(messa
   .map(message => message.id)
   .join('\u0000');
 
-export const initialExpandedMessageIds = messages => {
+export const initialExpandedMessageIds = (messages, matchedMessageId = null) => {
+  if (matchedMessageId !== null) {
+    return new Set(messages.some(message => message.id === matchedMessageId) ? [matchedMessageId] : []);
+  }
   const newest = newestConversationMessage(messages);
   return new Set(newest ? [newest.id] : []);
 };
@@ -63,7 +66,7 @@ export function reconcileExpandedMessageIds({ previousMessages = [], nextMessage
 
 export const shouldUseConversationPane = ({ mode, searchQuery, message }) =>
   mode === 'pane'
-  && !searchQuery?.trim()
+  && (!searchQuery?.trim() || Boolean(message?.matched_message_id && message?.search_scope))
   && Boolean(message?.thread_id)
   && (message.message_count == null || Number(message.message_count) > 1);
 

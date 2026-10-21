@@ -1,19 +1,19 @@
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+import { afterEach, describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
 vi.mock('../index.js', () => ({
   imapManager: {
     ensureFolder: vi.fn(), moveMessage: vi.fn(), _guardMoveUid: vi.fn(), _unguardMoveUid: vi.fn(),
-    broadcast: vi.fn(), scheduleCountRefresh: vi.fn(),
+    broadcast: vi.fn(), scheduleCountRefresh: vi.fn(), syncFolderOnDemand: vi.fn(),
   },
 }));
 
 import express from 'express';
 import mailRoutes, { gatherSnoozeConversation, LIVE_SNOOZE_SQL } from './mail.js';
-import { query } from '../services/db.js';
+import { query, withTransaction } from '../services/db.js';
 import { imapManager } from '../index.js';
 
 // Column subset that the pool query selects.
@@ -138,10 +138,19 @@ function fakeQuery(rawSql, params = []) {
   const sql = rawSql.replace(/\s+/g, ' ').trim();
   const result = (rows) => Promise.resolve({ rows, rowCount: rows.length });
   const byId = (id) => messages.find(m => m.id === id);
+  if (sql.includes('jsonb_to_recordset')) return result(JSON.parse(params[0]).flatMap(s => {
+    const row = byId(s.id); return row && row.account_id === s.account_id && row.folder === s.folder && row.uid === s.uid && (row.provider_msgid ?? null) === s.provider_msgid && !row.is_archive_residue && !row.is_deleted ? [{ ...row }] : [];
+  }));
+  if (sql.startsWith('WITH source AS')) {
+    const written = [];
+    for (const id of params[0]) { const row = byId(id); if (!row || row.is_archive_residue) continue;
+      written.push({ ...row, source_id: id, destination_id: id }); row.folder = params[1]; row.uid = params[5][params[4].indexOf(id)] ?? row.uid; }
+    return result(written);
+  }
   if (sql.includes('FROM messages m JOIN email_accounts a')) {
     return result(byId(params[0]) ? [{ ...byId(params[0]), user_id: 'user-1' }] : []);
   }
-  if (sql === 'SELECT id, uid, account_id, folder, message_id, in_reply_to, thread_references, is_read FROM messages WHERE account_id = $1 AND thread_id = $2 AND message_id IS NOT NULL') {
+  if (sql.startsWith('SELECT m.id,m.uid,m.account_id,m.folder,m.message_id,m.in_reply_to,m.thread_references,m.is_read,') && sql.includes('m.thread_id = $2')) {
     return result(messages.filter(m => m.account_id === params[0] && m.thread_id === params[1] && m.message_id).map(m => ({ ...m })));
   }
   // A record counts only while its message still sits in the folder it was snoozed into (#269).
@@ -153,8 +162,8 @@ function fakeQuery(rawSql, params = []) {
   if (sql === `SELECT sm.message_id_header FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.message_id_header = ANY($2) AND ${LIVE}`) {
     return result(snoozes.filter(s => s.account_id === params[0] && params[1].includes(s.message_id_header) && live(s)));
   }
-  if (sql === `DELETE FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.message_id_header = ANY($2) AND NOT ${LIVE}`) {
-    snoozes = snoozes.filter(s => !(s.account_id === params[0] && params[1].includes(s.message_id_header) && !live(s)));
+  if (sql === `DELETE FROM snoozed_messages sm WHERE sm.account_id=$1 AND sm.message_id_header=$2 AND NOT ${LIVE}`) {
+    snoozes = snoozes.filter(s => !(s.account_id === params[0] && params[1] === s.message_id_header && !live(s)));
     return result([]);
   }
   if (sql.startsWith('SELECT * FROM email_accounts')) return result([ACCOUNT]);
@@ -167,7 +176,7 @@ function fakeQuery(rawSql, params = []) {
     }
     return result([]);
   }
-  const insert = sql.match(/^INSERT INTO snoozed_messages \((.+?)\) VALUES/);
+  const insert = sql.match(/^INSERT INTO snoozed_messages\s*\((.+?)\) VALUES/);
   if (insert) {
     snoozes.push(Object.fromEntries(insert[1].split(',').map((col, i) => [col.trim(), params[i]])));
     return result([]);
@@ -197,8 +206,12 @@ describe('POST /api/mail/messages/:id/snooze — Snoozed folder path', () => {
   beforeEach(() => {
     query.mockReset();
     query.mockImplementation(fakeQuery);
+    withTransaction.mockImplementation(async work => {
+      const beforeRows = messages.map(row => ({ ...row })), beforeSnoozes = snoozes.map(row => ({ ...row }));
+      try { return await work({ query }); } catch (error) { messages = beforeRows; snoozes = beforeSnoozes; throw error; }
+    });
     for (const fn of Object.values(imapManager)) fn.mockReset();
-    message = { id: MSG_ID, account_id: ACCOUNT_ID, uid: 42, folder: 'INBOX', is_read: false, message_id: '<a@example.com>', thread_id: null };
+    message = { id: MSG_ID, account_id: ACCOUNT_ID, uid: 42, folder: 'INBOX', is_read: false, provider_msgid: null, source_uid_validity: null, is_archive_residue: false, is_deleted: false, message_id: '<a@example.com>', thread_id: null };
     messages = [message];
     snoozes = [];
     unmodelled = [];
@@ -233,7 +246,7 @@ describe('POST /api/mail/messages/:id/snooze — Snoozed folder path', () => {
   it('files the rest of the reply chain under that path too', async () => {
     message.thread_id = 'thread-1';
     messages.push({
-      id: REPLY_ID, account_id: ACCOUNT_ID, uid: 43, folder: 'INBOX', is_read: true, thread_id: 'thread-1',
+      id: REPLY_ID, account_id: ACCOUNT_ID, uid: 43, folder: 'INBOX', is_read: true, provider_msgid: null, source_uid_validity: null, is_archive_residue: false, is_deleted: false, thread_id: 'thread-1',
       message_id: '<b@example.com>', in_reply_to: '<a@example.com>', thread_references: '<a@example.com>',
     });
     imapManager.moveMessage.mockResolvedValueOnce(7).mockResolvedValueOnce(8);
@@ -290,3 +303,8 @@ describe('POST /api/mail/messages/:id/snooze — Snoozed folder path', () => {
     expect(snoozes[0]).not.toBe(leftover);
   });
 });
+
+// Unexpected fence/programming failures must fail these positive fixtures.
+let fenceWarnings;
+beforeEach(() => { fenceWarnings = vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+afterEach(() => { try { expect(fenceWarnings).not.toHaveBeenCalled(); } finally { fenceWarnings.mockRestore(); } });

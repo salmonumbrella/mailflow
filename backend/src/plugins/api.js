@@ -1,3 +1,4 @@
+export { countMutation } from '../services/countCompletion.js';
 // The plugin API surface — the ONLY module a sandboxed (Tier-2) plugin is allowed to import
 // from (v3.0 plugin platform).
 //
@@ -17,6 +18,7 @@
 
 import { getMailEngine } from './mailEngine.js';
 import * as labelsWrite from '../services/labels.js';
+import { readCopyTargets as _readCopyTargets, pushSeen as _pushSeen } from '../utils/mailUtils.js';
 import { archiveInboxCopy as _archiveInboxCopy } from '../services/archiveInbox.js';
 
 // ── Labels (read) ─────────────────────────────────────────────────────────────
@@ -38,8 +40,12 @@ export const isLabelStoreAccount = (account) => getMailEngine().isLabelStore(acc
 export const applyLabel = (account, message, labelFolder, options) => labelsWrite.applyLabel(getMailEngine(), account, message, labelFolder, options);
 export const removeLabel = (message, labelFolder) => labelsWrite.removeLabel(getMailEngine(), message, labelFolder);
 export const removeExactLabelCopy = (message, labelFolder, uid) => labelsWrite.removeExactLabelCopy(getMailEngine(), message, labelFolder, uid);
-export const markThreadRead = (account, message) => labelsWrite.markThreadRead(getMailEngine(), account, message);
+export const markThreadRead = (account, message, options) => labelsWrite.markThreadRead(getMailEngine(), account, message, options);
 export const markCopySeen = (account, message) => labelsWrite.markCopySeen(getMailEngine(), account, message);
+// A destructive label action can capture conservative copy evidence before it removes
+// the label relationship, then push only surviving, revalidated physical rows.
+export const getMessageReadCopies = (account, message) => _readCopyTargets(account.id, message.message_id, message);
+export const pushReadCopies = (account, rows, read) => _pushSeen(getMailEngine(), account, account.id, rows.filter(row => row.account_id === account.id), read);
 export const ensureLabelFolders = (account, folderPaths) => labelsWrite.ensureLabelFolders(getMailEngine(), account, folderPaths);
 export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
 

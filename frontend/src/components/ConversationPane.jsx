@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
+import { captureReadRequest, reconcileReadState } from '../utils/pendingReads.js';
+import { applyDeleteGuard } from '../utils/pendingDeletes.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { useStore } from '../store/index.js';
 import {
@@ -65,7 +67,7 @@ function ThreadBtn({ onClick, title, children }) {
 // the actions and the card that opens to that account's copies; null keeps every copy.
 //
 // Design from #317 by YunQue0912.
-export default function ConversationPane({ threadId, folder, unified = false, accountId = null, selectedMessageId = null }) {
+export default function ConversationPane({ threadId, folder, unified = false, accountId = null, selectedMessageId = null, matchedMessageId = null, searchScope = null }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
   const addNotification = useStore(s => s.addNotification);
@@ -89,16 +91,31 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   // Read when the conversation arrives, without making the pick a reason to fetch it again.
   const pickedRef = useRef(selectedMessageId);
   pickedRef.current = selectedMessageId;
+  const searchScopeKey = searchScope ? JSON.stringify([
+    searchScope.query, searchScope.accountId, searchScope.folder, searchScope.mode, searchScope.sessionGeneration,
+  ]) : null;
 
   useEffect(() => {
     if (!threadId) { setMessages([]); return; }
     let cancelled = false;
+    const generation = useStore.getState().countGeneration;
     setLoading(true);
     setError(null);
-    api.getThread(threadId, folder, unified)
-      .then(data => {
-        if (cancelled) return;
-        const ordered = normalizeConversation(data?.messages || []);
+    if (searchScopeKey !== null) {
+      setMessages([]);
+      setExpanded(new Set());
+    }
+    Promise.resolve().then(async () => {
+      const readToken = captureReadRequest();
+      const data = await api.getThread(threadId, folder, unified, searchScope ? { ...searchScope, matchedMessageId } : null);
+      return { data, readToken };
+    })
+      .then(({ data, readToken }) => {
+        if (cancelled || useStore.getState().countGeneration !== generation || useStore.getState().isLocked) return;
+        const incoming = reconcileReadState(applyDeleteGuard(data?.messages || []), readToken);
+        // Search context is already authorized, ordered and provider-copy filtered by
+        // the server. Repeated RFC Message-IDs are still distinct physical messages.
+        const ordered = searchScopeKey !== null ? [...incoming] : normalizeConversation(incoming);
         setMessages(ordered);
         // A picker opened on the previous conversation's cards while this one loaded (below).
         setPicker(null);
@@ -109,14 +126,16 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
         // its own (the effect below): opening the row's copy beside it would mark that read too,
         // behind a list row whose unread count does not follow.
         const picked = ordered.find(message => message.id === pickedRef.current);
-        setExpanded(accountId && picked && picked.account_id !== accountId
+        if (matchedMessageId !== null) {
+          setExpanded(initialExpandedMessageIds(inAccount(ordered, accountId), matchedMessageId));
+        } else setExpanded(accountId && picked && picked.account_id !== accountId
           ? new Set()
           : initialExpandedMessageIds(inAccount(ordered, accountId)));
       })
       .catch(err => { if (!cancelled) setError(err.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [threadId, folder, unified, accountId]);
+  }, [threadId, folder, unified, accountId, matchedMessageId, searchScopeKey]);
 
   // The pane stays mounted from one conversation to the next, so an open picker would
   // otherwise apply its pick to a conversation it was not opened on. The previous

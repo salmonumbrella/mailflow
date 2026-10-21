@@ -9,6 +9,7 @@
 // established it owns (via one of the user-keyed reads) and only ever read within that account —
 // they never span accounts or users.
 import { query } from './db.js';
+import { pluginAccount } from '../plugins/accountProjection.js';
 
 // A message the user owns (joined through their accounts), or null. Full row (m.*).
 export async function loadOwnedMessage(userId, messageId) {
@@ -22,13 +23,13 @@ export async function loadOwnedMessage(userId, messageId) {
   return rows[0] || null;
 }
 
-// One of the user's accounts by id (ownership enforced), or null. Full row.
+// One of the user's accounts by id (ownership enforced), without the core-only Fastmail token.
 export async function getOwnedAccount(userId, accountId) {
   const { rows } = await query(
     'SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2',
     [accountId, userId]
   );
-  return rows[0] || null;
+  return rows[0] ? pluginAccount(rows[0]) : null;
 }
 
 // All of the user's accounts (light columns for listing/iteration). The caller filters by its
@@ -93,7 +94,7 @@ export async function getThreadKeysForMessageIdHeaders(accountId, messageIdHeade
 export async function getMessagesByThreadKeys(accountId, threadKeys) {
   if (!threadKeys || threadKeys.length === 0) return [];
   const { rows } = await query(
-    `SELECT thread_key, uid, folder, message_id, from_email, date, id
+    `SELECT thread_key, uid, folder, message_id, from_email, date, id, is_read
        FROM messages
       WHERE account_id = $1 AND thread_key = ANY($2::text[]) AND is_deleted = false`,
     [accountId, threadKeys]

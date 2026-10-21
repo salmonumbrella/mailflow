@@ -201,6 +201,11 @@
     "recipientMenu": {
       "copy": "复制地址",
       "copyAll": "复制此栏全部"
+    },
+    "senderValidation": {
+      "unavailable": "Fastmail 未将此地址列为发件身份。",
+      "unknown": "无法通过 Fastmail 验证此发件人。",
+      "missing": "所选发件人已不可用。请重新选择发件人。"
     }
   },
   "message": {
@@ -996,7 +1001,13 @@
       "trustedAuthservDetected": "在您最近的邮件中出现过（点击使用）：",
       "trustedAuthservDetectedNone": "暂无数据——为该账户启用反垃圾邮件后才会分析邮件。",
       "trustedAuthservWarn": "只信任您确认为邮件服务商接收服务器的 ID。",
-      "enabledGlobally": "已全局启用"
+      "enabledGlobally": "已全局启用",
+      "fastmailVerification": {
+        "token": "Fastmail API 令牌",
+        "help": "将令牌权限限制为邮件提交（发件身份），并按需启用掩码邮箱访问。请勿授予完整权限。保持不变可保留已保存的令牌。",
+        "configured": "已保存令牌。",
+        "clear": "移除已保存的令牌"
+      }
     },
     "folderMappings": {
       "title": "文件夹映射",
@@ -1923,6 +1934,7 @@
     "done": "标记为完成",
     "doneFailed": "无法标记为完成",
     "doneArchiveFailed": "已标记为完成，但归档失败——邮件仍在收件箱中",
+    "doneThreadRemains": "此会话中的部分邮件无法清除，因此它仍留在原 GTD 分区中",
     "state": {
       "todo": "待办",
       "watch": "关注",

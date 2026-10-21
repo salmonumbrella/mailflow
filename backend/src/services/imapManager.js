@@ -1,5 +1,15 @@
+import { countCompletion, installProviderCountTracking } from './countCompletion.js';
 import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
+import { bootstrapGmailIdentity, isBackfillFolder, withGmailIdentityWrite, assertNoArchiveResidue,
+  sanitizeArchiveMetadata, runArchiveCoverageBatch as scanArchiveCoverageBatch } from './archiveCoverage.js';
+import { recordBackgroundRefusal, reserveBackgroundBudget } from './backgroundDownloadBudget.js';
 import { extractImapError } from './imapError.js';
+import { fetchSearchText } from './searchText.js';
+import { createSearchIndexLifecycle } from './searchIndexLifecycle.js';
+import { runSearchIndexBatch } from './searchIndexWorker.js';
+import { prioritizeSearchMessages as prioritizeQueuedSearchMessages } from './searchIndexPriority.js';
+import { invalidateSearchIndexRun } from './searchIndexJobs.js';
+import { createSearchIndexSourceProducer } from './searchIndexSources.js';
 import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
@@ -7,6 +17,7 @@ import { parseMessage, parseMailboxList, snippetFromBody, detectBulkFromParsedHe
 import { headerIds, searchReplyDraftUids, draftFolderPaths } from './replyDraftLookup.js';
 import { classifyMessage, loadSocialDomains, getGlobalCategorizationEnabled } from './categorizer.js';
 import { pluginRegistry } from '../plugins/registry.js';
+import { pluginAccount } from '../plugins/accountProjection.js';
 import { createPluginMailFacade } from '../plugins/mailEngineFacade.js';
 import { refreshMicrosoftToken, refreshGoogleToken } from '../routes/oauth.js';
 import { sanitizeEmail } from './emailSanitizer.js';
@@ -17,6 +28,7 @@ import { decrypt } from './encryption.js';
 import { sendPushToUser } from './pushNotifications.js';
 import { redactEmail } from '../utils/redact.js';
 import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
+import { sanitizeStr } from '../utils/sanitizeStr.js';
 import { getAccountAddresses } from './mailAccess.js';
 import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
@@ -592,8 +604,8 @@ export function extractBodyFromMsg(msg) {
 // Key invariant: we work with Buffers of raw bytes until the very last step so
 // that multi-byte sequences (e.g. =E2=80=94 → em-dash in UTF-8) are reassembled
 // correctly before being interpreted as any character set.
-function decodeQuotedPrintableToBuffer(input) {
-  const qpStr = Buffer.isBuffer(input) ? input.toString('ascii') : String(input || '');
+function decodeQuotedPrintableToBuffer(input, { strict = false, diagnostics } = {}) {
+  const qpStr = Buffer.isBuffer(input) ? input.toString(strict ? 'latin1' : 'ascii') : String(input || '');
   const cleaned = qpStr.replace(/=\r\n/g, '').replace(/=\n/g, '');
   const bytes = [];
   let i = 0;
@@ -606,18 +618,26 @@ function decodeQuotedPrintableToBuffer(input) {
         continue;
       }
     }
+    if (cleaned[i] === '=') {
+      if (strict) throw new Error('Invalid quoted-printable body');
+      if (diagnostics) diagnostics.lossyDecode = true;
+    }
     bytes.push(cleaned.charCodeAt(i) & 0xFF);
     i++;
   }
   return Buffer.from(bytes);
 }
 
-function decodeBytes(rawBytes, charset) {
+function decodeBytes(rawBytes, charset, { strict = false, diagnostics } = {}) {
   let cs = (charset || 'utf-8').toLowerCase().trim().replace(/^['"]|['"]$/g, '');
   if (!cs || cs === 'us-ascii' || cs === 'ascii') cs = 'utf-8'; // ASCII ⊂ UTF-8
   try {
-    return new TextDecoder(cs, { fatal: false }).decode(rawBytes);
-  } catch {
+    const decoded = new TextDecoder(cs, { fatal: strict }).decode(rawBytes);
+    if (diagnostics && decoded.includes('\ufffd')) diagnostics.lossyDecode = true;
+    return decoded;
+  } catch (err) {
+    if (strict) throw err;
+    if (diagnostics) diagnostics.lossyDecode = true;
     return rawBytes.toString('utf8'); // unknown charset — best effort
   }
 }
@@ -647,10 +667,13 @@ function parseMimeHeaders(headerBlock) {
 // part is requested: the payload starts with a MIME boundary and embedded
 // Content-Type/Content-Transfer-Encoding headers. If passed to the sanitizer as
 // HTML, users see boundary lines and quoted-printable garbage (=D0=..., =3D).
-function unwrapEmbeddedMimeText(decoded, depth = 0) {
+function unwrapEmbeddedMimeText(decoded, depth = 0, diagnostics) {
   if (depth >= 5) return decoded;
   const start = String(decoded || '').trimStart();
   if (!/^--[^\r\n]+\r?\nContent-/i.test(start)) return decoded;
+  if (diagnostics) {
+    throw Object.assign(new Error('Embedded MIME recovery cannot account for all decoder input'), { code: 'decoder-discarded-input' });
+  }
 
   const firstLineEnd = start.search(/\r?\n/);
   if (firstLineEnd < 0) return decoded;
@@ -693,19 +716,42 @@ function unwrapEmbeddedMimeText(decoded, depth = 0) {
 // Key invariant: we work with Buffers of raw bytes until the very last step so
 // that multi-byte sequences (e.g. =E2=80=94 → em-dash in UTF-8) are reassembled
 // correctly before being interpreted as any character set.
-function decodeBody(buf, encoding, charset) {
+function decodeBody(buf, encoding, charset, { strict = false, diagnostics } = {}) {
   const enc = (encoding || '').toLowerCase();
   let rawBytes;
   if (enc === 'base64') {
-    const b64 = (Buffer.isBuffer(buf) ? buf : Buffer.from(buf)).toString('ascii').replace(/\s/g, '');
+    const b64 = (Buffer.isBuffer(buf) ? buf : Buffer.from(buf)).toString(strict ? 'latin1' : 'ascii')
+      .replace(strict ? /[ \t\r\n]/g : /\s/g, '');
+    if (strict || diagnostics) {
+      const padding = b64.indexOf('=');
+      const tail = padding < 0 ? '' : b64.slice(padding);
+      if (b64.length % 4 || /[^A-Za-z0-9+/=_-]/.test(b64) || (tail && tail !== '=' && tail !== '==')) {
+        if (strict) throw new Error('Invalid base64 body');
+        if (diagnostics) diagnostics.lossyDecode = true;
+      }
+    }
     try { rawBytes = Buffer.from(b64, 'base64'); } catch { rawBytes = buf; }
+    if (diagnostics) {
+      if (/[\u0080-\u00ff]/.test(Buffer.from(buf).toString('latin1'))) diagnostics.lossyDecode = true;
+      const segments = b64.replace(/[^A-Za-z0-9+/=_-]/g, '').split(/(?<==)(?=[^=])/);
+      const decoded = segments.map(segment => {
+        const letters = segment.replace(/=/g, '').length;
+        const bytes = Buffer.from(segment, 'base64');
+        if (letters % 4 === 1 || bytes.length !== Math.floor(letters * 3 / 4)) {
+          throw Object.assign(new Error('Base64 decoder discarded input'), { code: 'decoder-discarded-input' });
+        }
+        return bytes;
+      });
+      if (segments.length > 1) diagnostics.decodeRepair = 'interior-base64-padding';
+      rawBytes = Buffer.concat(decoded);
+    }
   } else if (enc === 'quoted-printable') {
-    rawBytes = decodeQuotedPrintableToBuffer(buf);
+    rawBytes = decodeQuotedPrintableToBuffer(buf, { strict, diagnostics });
   } else {
     rawBytes = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
   }
 
-  return unwrapEmbeddedMimeText(decodeBytes(rawBytes, charset));
+  return unwrapEmbeddedMimeText(decodeBytes(rawBytes, charset, { strict, diagnostics }), 0, diagnostics);
 }
 
 function looksLikeTextPayload(buf) {
@@ -1484,8 +1530,10 @@ export function relocateExemptGuard(exemptFolders, paramIndex) {
 // (RETURNING is empty if a sync beat us to it), and unread only when the copy is
 // unread. Extracted (like relocateExemptGuard) so the DB behavior is unit-testable
 // without a live IMAP pool.
-export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid) {
-  const res = await query(`
+export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid, proof = {}) {
+  const source = Object.hasOwn(proof, 'providerMsgid') ? { provider_msgid: proof.providerMsgid }
+    : (await query('SELECT provider_msgid FROM messages WHERE account_id=$1 AND folder=$2 AND uid=$3', [accountId, fromFolder, uid])).rows[0];
+  const res = await withGmailIdentityWrite(accountId, [source?.provider_msgid], db => db.query(`
     INSERT INTO messages (
       account_id, uid, folder, message_id, subject,
       from_name, from_email, to_addresses, cc_addresses,
@@ -1495,7 +1543,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations
+      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid, is_archive_residue
     )
     SELECT
       account_id, $4, $5, message_id, subject,
@@ -1506,12 +1554,17 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations
+      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid, is_archive_residue
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
+      AND provider_msgid IS NOT DISTINCT FROM $6::text AND NOT is_archive_residue
     ON CONFLICT (account_id, uid, folder) DO NOTHING
     RETURNING id, is_read
-  `, [accountId, fromFolder, uid, newUid, toFolder]);
+  `, [accountId, fromFolder, uid, newUid, toFolder, source?.provider_msgid || null]), {
+    folder: source?.provider_msgid ? toFolder : undefined, uidValidity: proof.destinationUidValidity,
+    source: source?.provider_msgid ? { folder: fromFolder, uid, providerMsgid: source.provider_msgid,
+      uidValidity: proof.sourceUidValidity } : undefined,
+  });
   const row = res.rows[0];
   if (row) {
     adjustFolderCounts(accountId, toFolder, 1, row.is_read ? 0 : 1);
@@ -1677,10 +1730,17 @@ export async function collectRelocateExemptFolders(account) {
   return [...new Set(sets.flat().filter(Boolean))];
 }
 
-// Strip null bytes that PostgreSQL's UTF-8 encoding rejects (some emails contain them)
-function sanitizeStr(str) {
-  if (typeof str !== 'string') return str;
-  return str.replace(/\0/g, '');
+// Shared with archive metadata preparation so malformed headers cannot stall a batch.
+export async function prepareArchiveRecord(account, raw, folder) {
+  const parsed = await parseMessage(raw);
+  enrichParsedMetadata(parsed, { accountEmail: account.email_address, accountName: account.name,
+    senderName: account.sender_name, folderPath: folder, sentFolderPath: account.folder_mappings?.sent });
+  // Enrichment may decode encoded header fallbacks. Sanitize its final output
+  // before threading can bind any of that text to PostgreSQL.
+  const safe = sanitizeArchiveMetadata(parsed);
+  safe.threadId = await computeThreadId(account.id, safe.messageId, safe.inReplyTo, safe.references, safe.subject,
+    { fromEmail: safe.fromEmail, to: safe.to, cc: safe.cc, own: account.email_address, isBulk: safe.isBulk });
+  return safe;
 }
 
 // Parse RFC 5322 References header into an ordered array of angle-bracketed Message-IDs.
@@ -2063,7 +2123,7 @@ export function registerPoolSecondaryGate(gate) { Object.assign(poolSecondaryGat
 export async function acquirePooledClient(account) {
   const id = account.id;
   if (!connectionPools.has(id)) {
-    connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], pending: 0 });
+    connectionPools.set(id, { host: (account.imap_host || '').toLowerCase(), clients: [], inUse: new Set(), waiters: [], pending: 0 });
   }
   const pool = connectionPools.get(id);
 
@@ -2482,6 +2542,7 @@ export async function noteDraftsChanged(mgr, account, folder) {
 export class ImapManager {
   constructor(wss) {
     this.wss = wss;
+    countCompletion.pending = installProviderCountTracking(this);
     // Snoozes being woken right now, by the sweep or by hand, so neither moves one twice.
     this._wakingSnoozes = new Set();
     this._statusSyncRunning = new Set();
@@ -2498,6 +2559,20 @@ export class ImapManager {
         .catch(err => console.warn('Folder status scheduler:', err.message));
     }, 10000);
     this.connections = new Map();   // accountId -> ImapFlow (persistent sync connection)
+    this._searchIndexSources = createSearchIndexSourceProducer({isOpen:id=>this._searchIndex.isOpen(id)});
+    this._searchIndex = createSearchIndexLifecycle({
+      runBatch: async (account, options) => {
+        const profile=providerProfile(account);
+        await this._searchIndexSources(account,{...options,profile});
+        if(!this._searchIndex.isOpen(account.id))return{processed:0};
+        return runSearchIndexBatch(account, { ...options,
+          fetchMessageBody: this.fetchMessageBody.bind(this), profile,
+          enqueueRows:this._searchIndexSources.enqueueRows,
+          foregroundPending: () => this._searchIndexForegroundPending(account),
+        });
+      },
+      invalidateRun: invalidateSearchIndexRun,
+    });
     this.syncIntervals = new Map();
     this.pluginSyncIntervals = new Map(); // `${accountId}::${pluginId}` -> timer for a plugin's periodic sync tick
     this.backfillRunning = new Set(); // `${accountId}:${folder}` — prevent duplicate folder backfills
@@ -3237,7 +3312,8 @@ export class ImapManager {
     }
   }
 
-  async disconnectAccount(accountId) {
+  async disconnectAccount(accountId, { strict = false } = {}) {
+    const indexDrain = this._searchIndex?.stop(accountId);
     const timer = this.syncIntervals.get(accountId);
     // clearTimeout works for both setTimeout and setInterval Timeout objects in Node.js
     if (timer) { clearTimeout(timer); this.syncIntervals.delete(accountId); }
@@ -3264,6 +3340,87 @@ export class ImapManager {
     const expungeTimer = this._expungeDebounceTimers.get(accountId);
     if (expungeTimer) { clearTimeout(expungeTimer); this._expungeDebounceTimers.delete(accountId); }
     evictPool(accountId);
+    // A FETCH may ignore abort until its transport closes. Evict first, then
+    // await both the durable fence and the real batch's cleanup.
+    if (strict) await indexDrain;
+    else await indexDrain?.catch(err => console.warn(`Index drain failed for account ${accountId}:`, err.message));
+  }
+
+  async quiesceSearchIndex() {
+    const drained = this._searchIndex.quiesce(); // Closes admission before any await.
+    for (const client of this.connections.values()) {
+      try { client.close(); } catch { /* already disconnected */ }
+    }
+    for (const accountId of [...connectionPools.keys()]) evictPool(accountId);
+    await drained;
+  }
+
+  resumeSearchIndexScheduling() { this._searchIndex.resumeScheduling(); }
+
+  _searchIndexForegroundPending(account) {
+    return Date.now() - (this.lastUserActivity.get(account.id) || 0) < QUIET_WINDOW_MS ||
+      [...connectionPools.values()].some(pool => pool.host === (account.imap_host || '').toLowerCase() && pool.waiters.length > 0);
+  }
+
+  // Arrival owners call this only with their actual committed row IDs. No
+  // arrival hook invokes it yet. This fast path never changes admission truth.
+  async enqueueCommittedSearchRows(account,ids) {
+    if(!Array.isArray(ids)||ids.length>500)throw new Error('Search index admission handoff accepts at most500 row IDs');
+    const unique=[...new Set(ids)];
+    const run=()=>this._searchIndex.runDiscovery(account,async(_account,{signal})=>{
+      const outcome={changed:0,rejected:0,deferred:false,reason:null};
+      for(let offset=0;offset<unique.length;offset+=50){
+        if(!this._searchIndex.isOpen(account.id))return{...outcome,deferred:true,reason:'stopped'};
+        const part=await this._searchIndexSources.enqueueRows(account,unique.slice(offset,offset+50),{profile:providerProfile(account),signal});
+        outcome.changed+=part.changed;
+        outcome.rejected+=part.rejected;
+        if(part.deferred){outcome.deferred=true;outcome.reason=part.reason;}
+      }
+      return outcome;
+    });
+    const result=await run();
+    const rescan=()=>this._searchIndexSources.rescan(account.id);
+    if(result.reason==='active-batch') {
+      // One detached continuation per busy call; the arrival does not wait for
+      // the active batch. Retry through the same gate and existing drain slot.
+      this._searchIndex.settled(account.id).then(run,run).then(retry=>{
+        if(['active-batch','stopped','search-index-handoff-failed'].includes(retry.reason))rescan();
+      }).catch(rescan);
+    } else if(['stopped','search-index-handoff-failed'].includes(result.reason))rescan();
+    return{rejected:0,...result};
+  }
+
+  // Existing scheduling will call this boundary; a failed stop remains closed
+  // until an explicit disconnect/stop retry successfully fences the old run.
+  async startSearchIndex(account) {
+    try {
+      if (!await this._searchIndex.resume(account.id)) return null;
+      return await this._searchIndex.run(account);
+    } catch (err) {
+      console.warn(`Search index batch deferred for account ${account.id}:`, err.message);
+      return null;
+    }
+  }
+
+
+  // Search owns the positive metadata probe. A busy/stopped batch declines the
+  // hint rather than making an HTTP request wait for body work or starting it.
+  async prioritizeSearchMessages(accountId, ids, { userId } = {}) {
+    if (!userId || !Array.isArray(ids) || ids.length > 50) throw new Error('Search priority needs an owner and at most50 IDs');
+    if (!this._searchIndex.isOpen(accountId)) return { changed: 0, deferred: true, reason: 'stopped' };
+    const { rows: [account] } = await query(`SELECT id,user_id,imap_host,oauth_provider FROM email_accounts
+      WHERE id=$1 AND user_id=$2 AND enabled AND protocol='imap'`, [accountId, userId]);
+    if (!account) return { changed: 0, deferred: true, reason: 'not-owned' };
+    return this._searchIndex.runDiscovery(account, async (_account, { signal }) => {
+      const profile = providerProfile(account);
+      const pending = await this._searchIndexSources.enqueueRows(account, ids, { profile, signal });
+      if (pending.reason === 'stopped' || pending.reason === 'search-index-handoff-failed') return pending;
+      const priority = await prioritizeQueuedSearchMessages(accountId, ids, {
+        userId, profile, signal, isOpen: id => this._searchIndex.isOpen(id),
+      });
+      return { ...priority, deferred: priority.deferred || pending.deferred,
+        reason: priority.reason || pending.reason };
+    });
   }
 
   // Effective per-host persistent-connection cap for an account: the tighter of the env default and
@@ -3375,18 +3532,22 @@ export class ImapManager {
       if (client) { try { client.close(); } catch { /* already closed */ } }
       if (slotHeld) this._bgConnSem.release(host);
       this.syncingAccounts.delete(account.id);
+      if (this.syncIntervals.has(account.id)) void this.startSearchIndex(account);
     }
   }
 
-  async disconnectUser(userId) {
+  async disconnectUser(userId, { strict = false } = {}) {
     try {
       const result = await query(
         "SELECT id FROM email_accounts WHERE user_id = $1 AND protocol = 'imap'",
         [userId]
       );
-      await Promise.all(result.rows.map(a => this.disconnectAccount(a.id)));
+      const drained = await Promise.allSettled(result.rows.map(a => this.disconnectAccount(a.id, { strict })));
+      const failed = drained.find(result => result.status === 'rejected');
+      if (failed) throw failed.reason;
     } catch (err) {
       console.error(`disconnectUser error for user ${userId}:`, err.message);
+      if (strict) throw err; // Restore must not proceed after a failed fence.
     }
   }
 
@@ -3714,6 +3875,8 @@ export class ImapManager {
           );
         });
       }
+      if (syncProfile.labelStore) setImmediate(() => this.runArchiveCoverageBatch(syncAccount).catch(err =>
+        console.warn('Archive coverage:', extractImapError(err))));
     } catch (err) {
       const detail = extractImapError(err);
       console.error(`Sync error for ${logAccount(account)}:`, detail);
@@ -3750,6 +3913,7 @@ export class ImapManager {
       this.syncingAccounts.delete(account.id);
       this.syncStartedAt.delete(account.id);
       this._syncAgainIfMailArrived(account);
+      if (this.syncIntervals.has(account.id)) void this.startSearchIndex(account);
     }
   }
 
@@ -3896,16 +4060,17 @@ export class ImapManager {
   // stay fully inert when unused. tick(ctx) owns its own error handling; we still guard the
   // dispatch so a throwing/rejecting tick can never crash the timer.
   async _startPluginSyncTimers(account) {
+    const exposedAccount = pluginAccount(account);
     for (const plugin of pluginRegistry.list()) {
       const sync = plugin.sync;
       if (!sync || typeof sync.tick !== 'function') continue;
       // isActive may be async (GTD's per-account enable now lives in the plugin config store, not
       // on the account row), so await it — a false gate arms nothing, keeping ticks inert when unused.
-      try { if (sync.isActive && !(await sync.isActive({ account }))) continue; } catch { continue; }
+      try { if (sync.isActive && !(await sync.isActive({ account: exposedAccount }))) continue; } catch { continue; }
       const key = `${account.id}::${plugin.id}`;
       const intervalMs = sync.intervalMs || DEFAULT_PLUGIN_SYNC_INTERVAL_MS;
       const fire = () => {
-        try { Promise.resolve(sync.tick({ mgr: this.pluginFacade, account })).catch(err => console.warn(`Plugin ${plugin.id} sync tick error for ${logAccount(account)}:`, err.message)); }
+        try { Promise.resolve(sync.tick({ mgr: this.pluginFacade, account: exposedAccount })).catch(err => console.warn(`Plugin ${plugin.id} sync tick error for ${logAccount(account)}:`, err.message)); }
         catch (err) { console.warn(`Plugin ${plugin.id} sync tick error for ${logAccount(account)}:`, err.message); }
       };
       const jitter = Math.floor(Math.random() * Math.min(intervalMs, 30000));
@@ -3949,6 +4114,7 @@ export class ImapManager {
   // use to refresh a label folder without disturbing the persistent IDLE sync client. Testable:
   // a plugin tick can mock this away instead of exercising a live IMAP pool.
   async syncFolderViaPool(account, folder) {
+    if (await this._isArchiveFolder(account, folder)) return this.runArchiveCoverageBatch(account);
     return withFreshClient(account, (client) =>
       this.syncMessages(account, client, folder, 100, false, true));
   }
@@ -3977,14 +4143,12 @@ export class ImapManager {
     this.userFolderSyncIntervalMs.set(userId, newMs);
   }
 
-  scheduleCountRefresh(accountId) {
-    if (!accountId || this._statusAccountTimers.has(accountId)) return;
-    this._statusAccountTimers.set(accountId, setTimeout(() => {
-      this._statusAccountTimers.delete(accountId);
-      query("SELECT * FROM email_accounts WHERE id=$1 AND enabled AND protocol='imap'", [accountId])
-        .then(({ rows }) => { if (rows[0]) return this.folderStatusMonitor.refresh(rows[0], { force: true }); })
-        .catch(err => console.warn('Post-mutation count refresh:', err.message));
-    }, 5000));
+  scheduleCountRefresh(accountId, paths = ['INBOX']) {
+    if (!accountId) return;
+    this.folderStatusMonitor.scheduleTrailingStatus({ id: accountId }, paths, async () => {
+      const { rows } = await query("SELECT * FROM email_accounts WHERE id=$1 AND enabled AND protocol='imap'", [accountId]);
+      return rows[0];
+    });
   }
 
   async _withCountClient(account, fn) {
@@ -4083,6 +4247,10 @@ export class ImapManager {
   }
 
   async _refreshObservedFolder(account, path, observed) {
+    if (await this._isArchiveFolder(account, path)) {
+      const result = await this.runArchiveCoverageBatch(account);
+      return result != null;
+    }
     let complete = false;
     let missing = false;
     let expired = false;
@@ -4402,11 +4570,13 @@ export class ImapManager {
   }
 
   async syncMessages(account, client, folder = 'INBOX', limit = 50, prefetchBody = true, noBodyParts = false) {
+    if (await this._isArchiveFolder(account, folder)) return this.runArchiveCoverageBatch(account);
     const provider = providerProfile(account);
 
     try {
       const selectedBefore = client.mailbox;
       const lock = await client.getMailboxLock(folder);
+      const indexArrivalIds = new Set();
       try {
         // The same mailbox object means no SELECT ran, so on a long-lived session the view
         // may be frozen and the UID phase below would see no new mail (see
@@ -4577,7 +4747,9 @@ export class ImapManager {
               } catch { /* non-fatal — leave category NULL */ }
             }
 
-            const result = await query(`
+            const result = await withGmailIdentityWrite(account.id, [provider.labelStore ? parsed.providerMsgid : null], db => db.query(`
+              WITH prior AS (SELECT id, provider_msgid FROM messages
+                WHERE account_id=$1 AND uid=$2 AND folder=$3), written AS (
               INSERT INTO messages (
                 account_id, uid, folder, message_id, subject,
                 from_name, from_email, to_addresses, cc_addresses,
@@ -4587,10 +4759,11 @@ export class ImapManager {
                 thread_references, thread_id, is_bulk, category,
                 list_unsubscribe, list_unsubscribe_post, delivery_addresses,
                 sender_name, sender_email,
-                forwarded_from_name, forwarded_from_email, forwarded_via
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
+                forwarded_from_name, forwarded_from_email, forwarded_via, provider_msgid
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
               ON CONFLICT (account_id, uid, folder) DO UPDATE
-              SET subject = CASE
+              SET provider_msgid = COALESCE(EXCLUDED.provider_msgid, messages.provider_msgid),
+                  subject = CASE
                     WHEN EXCLUDED.subject IS NOT NULL
                          AND EXCLUDED.subject != ''
                          AND EXCLUDED.subject != '(no subject)'
@@ -4650,7 +4823,9 @@ export class ImapManager {
                   forwarded_from_name = COALESCE(EXCLUDED.forwarded_from_name, messages.forwarded_from_name),
                   forwarded_from_email = COALESCE(EXCLUDED.forwarded_from_email, messages.forwarded_from_email),
                   forwarded_via = COALESCE(EXCLUDED.forwarded_via, messages.forwarded_via)
-              RETURNING id, (xmax = 0) as is_new
+              RETURNING id, account_id, provider_msgid, is_deleted, is_archive_residue, (xmax = 0) as is_new
+              ) SELECT w.*, p.id IS NULL AS inserted_row, p.provider_msgid AS prior_provider_msgid
+                FROM written w LEFT JOIN prior p ON p.id=w.id
             `, [
               account.id, parsed.uid, folder,
               msgId, sanitizeStr(parsed.subject),
@@ -4667,7 +4842,16 @@ export class ImapManager {
               JSON.stringify(parsed.deliveryAddresses || []),
               sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
               sanitizeStr(parsed.forwardedFromName), sanitizeStr(parsed.forwardedFromEmail), sanitizeStr(parsed.forwardedVia),
-            ]);
+              providerProfile(account).labelStore ? parsed.providerMsgid || null : null,
+            ]), { folder: provider.labelStore ? folder : undefined, uidValidity: client.mailbox?.uidValidity });
+            // The outer identity writer has resolved its COMMIT (or autocommit
+            // fallback). Never enqueue from its SQL callback.
+            const indexArrival = result.rows[0];
+            if (indexArrival?.account_id === account.id && !indexArrival.is_deleted &&
+                (indexArrival.inserted_row === true ||
+                 (indexArrival.prior_provider_msgid ?? null) !== (indexArrival.provider_msgid ?? null))) {
+              indexArrivalIds.add(indexArrival.id);
+            }
             if (result.rows[0]?.is_new) {
               insertedCount++;
               // Inbox-ingest candidate: any newly-inserted INBOX row, read OR unread (read state
@@ -5049,6 +5233,19 @@ export class ImapManager {
         return { insertedCount, broadcastedNewMessages };
       } finally {
         lock.release();
+        await ImapManager.prototype.bootstrapProviderIdentity.call(this, account, client, folder).catch(err =>
+          console.warn(`Identity bootstrap incomplete for ${logAccount(account)}/${folder}:`, extractImapError(err)));
+        // Flush only completed metadata writes, once per bounded batch. This
+        // finally also retains committed arrivals if a later read/write fails.
+        const committedIds = [...indexArrivalIds];
+        for (let offset = 0; offset < committedIds.length; offset += 500) {
+          try {
+            await this.enqueueCommittedSearchRows(account, committedIds.slice(offset, offset + 500));
+          } catch (handoffError) {
+            this._searchIndexSources.rescan(account.id);
+            console.warn('Search index handoff failed after committed sync batch:', handoffError.message);
+          }
+        }
       }
     } catch (err) {
       console.error(`Message sync error for ${logAccount(account)}/${folder}:`, extractImapError(err));
@@ -5067,6 +5264,7 @@ export class ImapManager {
   //   4. For non-Gmail providers also store body_html/body_text during backfill so
   //      clicking an old email never needs a live IMAP round-trip.
   async backfillMessages(account, folder = 'INBOX') {
+    if (await this._isArchiveFolder(account, folder)) return this.runArchiveCoverageBatch(account);
     const backfillKey = `${account.id}:${folder}`;
     if (this.backfillRunning.has(backfillKey)) return;
     // Backfill opens its own login per run, so it honors the secondary backoff like the
@@ -5270,6 +5468,7 @@ export class ImapManager {
         // Declared outside the lock block: the bookkeeping below runs after the lock is
         // released and needs to know what the server returned.
         const receivedUids = new Set();
+        const indexArrivalIds = new Set();
         try {
           const lock = await bfClient.getMailboxLock(folder);
           try {
@@ -5327,7 +5526,9 @@ export class ImapManager {
                   } catch { /* non-fatal */ }
                 }
 
-                const bfInsert = await query(`
+                const bfInsert = await withGmailIdentityWrite(account.id, [cfg.labelStore ? parsed.providerMsgid : null], db => db.query(`
+                  WITH prior AS (SELECT id, provider_msgid FROM messages
+                    WHERE account_id=$1 AND uid=$2 AND folder=$3), written AS (
                   INSERT INTO messages (
                     account_id, uid, folder, message_id, subject,
                     from_name, from_email, to_addresses, cc_addresses,
@@ -5337,10 +5538,11 @@ export class ImapManager {
                     thread_references, thread_id, is_bulk, category,
                     list_unsubscribe, list_unsubscribe_post, delivery_addresses,
                     sender_name, sender_email,
-                    forwarded_from_name, forwarded_from_email, forwarded_via
-                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
+                    forwarded_from_name, forwarded_from_email, forwarded_via, provider_msgid
+                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
                   ON CONFLICT (account_id, uid, folder) DO UPDATE
-                  SET subject = CASE
+                  SET provider_msgid = COALESCE(EXCLUDED.provider_msgid, messages.provider_msgid),
+                      subject = CASE
                         WHEN EXCLUDED.subject IS NOT NULL
                              AND EXCLUDED.subject != ''
                              AND EXCLUDED.subject != '(no subject)'
@@ -5398,7 +5600,9 @@ export class ImapManager {
                       forwarded_from_name = COALESCE(EXCLUDED.forwarded_from_name, messages.forwarded_from_name),
                       forwarded_from_email = COALESCE(EXCLUDED.forwarded_from_email, messages.forwarded_from_email),
                       forwarded_via = COALESCE(EXCLUDED.forwarded_via, messages.forwarded_via)
-                  RETURNING id, (xmax = 0) as is_new
+                  RETURNING id, account_id, provider_msgid, is_deleted, is_archive_residue, (xmax = 0) as is_new
+                  ) SELECT w.*, p.id IS NULL AS inserted_row, p.provider_msgid AS prior_provider_msgid
+                    FROM written w LEFT JOIN prior p ON p.id=w.id
                 `, [
                   account.id, parsed.uid, folder,
                   bfMsgId, sanitizeStr(parsed.subject),
@@ -5415,7 +5619,16 @@ export class ImapManager {
                   JSON.stringify(parsed.deliveryAddresses || []),
                   sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
                   sanitizeStr(parsed.forwardedFromName), sanitizeStr(parsed.forwardedFromEmail), sanitizeStr(parsed.forwardedVia),
-                ]);
+                  providerProfile(account).labelStore ? parsed.providerMsgid || null : null,
+                ]), { folder: cfg.labelStore ? folder : undefined, uidValidity: bfUidValidity });
+                // The outer identity writer has resolved its COMMIT (or autocommit
+                // fallback). Never enqueue from its SQL callback.
+                const indexArrival = bfInsert.rows[0];
+                if (indexArrival?.account_id === account.id && !indexArrival.is_deleted &&
+                    (indexArrival.inserted_row === true ||
+                     (indexArrival.prior_provider_msgid ?? null) !== (indexArrival.provider_msgid ?? null))) {
+                  indexArrivalIds.add(indexArrival.id);
+                }
                 backfilledRows++;
                 // v0.2 antispam: classify genuinely-new rows — the same hook the
                 // sync path uses, so a manual reindex (or the initial population
@@ -5443,6 +5656,17 @@ export class ImapManager {
             }
           } finally {
             lock.release();
+            // Flush only completed metadata writes, once per bounded batch. This
+            // finally also retains committed arrivals if a later read/write fails.
+            const committedIds = [...indexArrivalIds];
+            for (let offset = 0; offset < committedIds.length; offset += 500) {
+              try {
+                await this.enqueueCommittedSearchRows(account, committedIds.slice(offset, offset + 500));
+              } catch (handoffError) {
+                this._searchIndexSources.rescan(account.id);
+                console.warn('Search index handoff failed after committed backfill batch:', handoffError.message);
+              }
+            }
           }
 
           // Whatever the server refused climbs toward the write-off threshold; whatever it
@@ -5525,6 +5749,8 @@ export class ImapManager {
       // for this run instead of paying one refused login per remaining folder.
       if (isConnectionRefusal(detail) || isAuthFailure(detail)) this._noteSecondaryRefusal(account);
     } finally {
+      if (bfClient) await ImapManager.prototype.bootstrapProviderIdentity.call(this, account, bfClient, folder).catch(err =>
+        console.warn(`Identity bootstrap incomplete for ${logAccount(account)}/${folder}:`, extractImapError(err)));
       if (bfClient) { try { bfClient.close(); } catch { /* already disconnected */ } }
       this.backfillRunning.delete(backfillKey);
     }
@@ -5663,21 +5889,20 @@ export class ImapManager {
       // catch-up — live sync (IDLE + the periodic interval) is unaffected and keeps flowing.
       await this._bgConnSem.acquire(host);
       slotHeld = true;
-      const { skipFolderPatterns, skipFolderNames } = providerProfile(account);
+      const profile = providerProfile(account);
 
       // INBOX first — highest priority, existing behaviour
       await this.backfillMessages(account, 'INBOX');
 
       // Then all other known folders (discovered at connect time by syncFolders)
       const folderResult = await query(
-        "SELECT path FROM folders WHERE account_id = $1 AND path != 'INBOX' ORDER BY path",
+        "SELECT path,special_use FROM folders WHERE account_id = $1 AND path != 'INBOX' ORDER BY path",
         [account.id]
       );
 
-      for (const { path } of folderResult.rows) {
-        const pathLower = path.toLowerCase();
-        if (skipFolderPatterns.some(pat => pathLower.includes(pat))) continue;
-        if (skipFolderNames.includes(pathLower)) continue;
+      for (const { path, special_use } of folderResult.rows) {
+        if (profile.labelStore && special_use === '\\All') continue;
+        if (!isBackfillFolder(path, profile)) continue;
         await this.backfillMessages(account, path).catch(err =>
           console.warn(`Backfill skipped ${logAccount(account)}/${path}: ${err.message}`)
         );
@@ -5693,6 +5918,7 @@ export class ImapManager {
       const canLogIn = !this._secondaryConnectBlocked(account.id)
         && (await query('SELECT id FROM email_accounts WHERE id = $1 AND enabled', [account.id])).rows.length > 0;
       if (canLogIn) {
+        this.runArchiveCoverageBatch(account).catch(err => console.warn('Archive coverage:', extractImapError(err)));
         // Both run as background jobs after the complete signal — neither should block the UI.
         this.refreshBulkFlags(account).catch(err =>
           console.warn(`Bulk flag refresh failed for ${logAccount(account)}:`, err.message)
@@ -5933,6 +6159,8 @@ export class ImapManager {
   // wipe subject/from/to.
   async upsertSentMessageRecord(account, folder, uid, {
     messageId,
+    providerMsgid = null,
+    uidValidity = null,
     subject,
     fromName,
     fromEmail,
@@ -5954,13 +6182,14 @@ export class ImapManager {
       ? await computeThreadId(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references), sanitizeStr(subject),
         { fromEmail, to, cc, own: account.email_address })
       : null;
-    await query(`
+    const written = await withGmailIdentityWrite(account.id, [providerProfile(account).labelStore ? providerMsgid : null], db => db.query(`
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
-        date, snippet, is_read, is_starred, has_attachments, flags, thread_id, bcc_addresses
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,true,false,false,'[]',$12,$13::jsonb)
+        date, snippet, is_read, is_starred, has_attachments, flags, thread_id, bcc_addresses, provider_msgid
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,true,false,false,'[]',$12,$13::jsonb,$14)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
+        provider_msgid = EXCLUDED.provider_msgid,
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
           WHEN EXCLUDED.subject IS NOT NULL AND EXCLUDED.subject <> '' AND EXCLUDED.subject <> '(no subject)'
@@ -5993,7 +6222,12 @@ export class ImapManager {
       JSON.stringify(to), JSON.stringify(cc),
       safeDate(date), sanitizeStr(snippet || ''), threadId,
       Array.isArray(bcc) && bcc.length ? JSON.stringify(bcc) : null,
-    ]);
+      providerProfile(account).labelStore ? providerMsgid : null,
+    ]), { folder: providerProfile(account).labelStore ? folder : undefined, uidValidity });
+    if (written.pending) {
+      await this.syncFolderOnDemand?.(account, folder);
+      return { pending: true };
+    }
   }
 
   // Persist a local Drafts row immediately after appending a draft to IMAP, so the
@@ -6006,6 +6240,8 @@ export class ImapManager {
   // (its own upsert COALESCEs the existing body/subject/recipients).
   async upsertDraftMessageRecord(account, folder, uid, {
     messageId,
+    providerMsgid = null,
+    uidValidity = null,
     subject,
     fromName,
     fromEmail,
@@ -6023,14 +6259,15 @@ export class ImapManager {
   }) {
     if (!uid || !folder) return;
     const msgId = sanitizeStr(messageId);
-    await query(`
+    const written = await withGmailIdentityWrite(account.id, [providerProfile(account).labelStore ? providerMsgid : null], db => db.query(`
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
         in_reply_to, date, snippet, is_read, is_starred, has_attachments,
-        flags, body_html, body_text, thread_id, bcc_addresses, thread_references
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,$19,$13::jsonb,$14,$15,$16,$17::jsonb,$18)
+        flags, body_html, body_text, thread_id, bcc_addresses, thread_references, provider_msgid
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,$19,$13::jsonb,$14,$15,$16,$17::jsonb,$18,$20)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
+        provider_msgid = EXCLUDED.provider_msgid,
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
           WHEN EXCLUDED.subject IS NOT NULL AND EXCLUDED.subject <> '' AND EXCLUDED.subject <> '(no subject)'
@@ -6067,7 +6304,12 @@ export class ImapManager {
       JSON.stringify(Array.isArray(bcc) ? bcc : []),
       references,
       Boolean(hasAttachments),
-    ]);
+      providerProfile(account).labelStore ? providerMsgid : null,
+    ]), { folder: providerProfile(account).labelStore ? folder : undefined, uidValidity });
+    if (written.pending) {
+      await this.syncFolderOnDemand?.(account, folder);
+      return { pending: true };
+    }
   }
 
   async findReplyDrafts(account, paths, messageIds) {
@@ -6168,12 +6410,13 @@ export class ImapManager {
           AND f.uid_validity::text = $18)`;
     // All fields come from this live FETCH. Reusing a UID after UIDVALIDITY changes must
     // never pair the new headers with an old body's cache or an old recipient list.
-    const { rows } = await query(`
+    const { rows } = await withGmailIdentityWrite(account.id, [providerProfile(account).labelStore ? parsed.providerMsgid : null], db => db.query(`
       INSERT INTO messages (account_id, uid, folder, message_id, subject, from_name, from_email,
         to_addresses, cc_addresses, bcc_addresses, in_reply_to, thread_references, thread_id,
-        date, flags, has_attachments, attachments, is_read)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,true)
+        date, flags, has_attachments, attachments, is_read, provider_msgid)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,true,$20)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
+        provider_msgid = EXCLUDED.provider_msgid,
         message_id = EXCLUDED.message_id, subject = EXCLUDED.subject,
         from_name = EXCLUDED.from_name, from_email = EXCLUDED.from_email,
         to_addresses = EXCLUDED.to_addresses, cc_addresses = EXCLUDED.cc_addresses,
@@ -6193,7 +6436,8 @@ export class ImapManager {
       JSON.stringify(parsed.cc || []), JSON.stringify(bcc), parsed.inReplyTo || null,
       parsed.references || null, threadId || null, safeDate(parsed.date),
       JSON.stringify(parsed.flags || []), parsed.hasAttachments, JSON.stringify(structure.attachments),
-      uidValidity, validIdentity]);
+      uidValidity, validIdentity, providerProfile(account).labelStore ? parsed.providerMsgid || null : null]),
+    { folder: providerProfile(account).labelStore ? folder : undefined, uidValidity });
     if (!rows.length) throw new Error('Draft ingestion did not persist a row');
     return { id: rows[0].id, account_id: account.id, uid, folder, message_id: parsed.messageId,
       subject: parsed.subject || '', from_email: parsed.fromEmail, from_name: parsed.fromName,
@@ -6201,6 +6445,94 @@ export class ImapManager {
       in_reply_to: parsed.inReplyTo, thread_references: parsed.references, thread_id: rows[0].thread_id,
       date: parsed.date, has_attachments: parsed.hasAttachments, attachments: structure.attachments,
       attachments_complete: true, uid_validity: uidValidity };
+  }
+
+  async _isArchiveFolder(account, folder) {
+    if (!providerProfile(account).labelStore) return false;
+    const { rows } = await query('SELECT special_use FROM folders WHERE account_id=$1 AND path=$2', [account.id, folder]);
+    return rows[0]?.special_use === '\\All';
+  }
+
+  async _assertWritableSource(account, folder, uids = null) {
+    await assertNoArchiveResidue(account.id, folder, uids);
+    if (await this._isArchiveFolder(account, folder)) {
+      throw Object.assign(new Error('This action is not supported for archive residue'), { status: 409, code: 'archive-residue-read-only' });
+    }
+  }
+
+  async runArchiveCoverageBatch(account, { signal } = {}) {
+    if (!providerProfile(account).labelStore || this._secondaryConnectBlocked?.(account.id)) return;
+    this._archiveRunning ||= new Set();
+    this._archiveNextRun ||= new Map();
+    if (this._archiveRunning.has(account.id) || Date.now() < (this._archiveNextRun.get(account.id) || 0)) return;
+    const host = (account.imap_host || '').toLowerCase();
+    const foregroundPending = () => [...connectionPools.values()].some(pool => pool.host === host && pool.waiters.length);
+    if (signal?.aborted || foregroundPending()) return;
+    const { rows: enabled } = await query(`SELECT id FROM email_accounts WHERE id=$1 AND enabled
+      AND NOT EXISTS(SELECT 1 FROM archive_coverage c JOIN folders f ON f.account_id=c.account_id AND f.path=c.folder
+        WHERE c.account_id=$1 AND f.special_use=$2 AND c.phase='paused')`, [account.id, '\\All']);
+    if (!enabled.length || this._archiveRunning.has(account.id)) return;
+    this._archiveRunning.add(account.id);
+    let held = false, deferAt = 0;
+    try {
+      await this._bgConnSem.acquire(host);
+      held = true;
+      if (signal?.aborted || foregroundPending()) return;
+      if (!(await query('SELECT id FROM email_accounts WHERE id=$1 AND enabled', [account.id])).rows.length) return;
+      const admission = await reserveBackgroundBudget(account.id, host, { messages: 0, bytes: 1024 });
+      if (!admission.allowed) {
+        deferAt = admission.deferAt;
+        return { pending: true, deferAt };
+      }
+      const { counts: result, admittedIds } = await withFreshClient(account, client => scanArchiveCoverageBatch(account, {
+        client, signal, profile: providerProfile(account), foregroundPending,
+        prepareRecord: raw => prepareArchiveRecord(account, raw, client.mailbox?.path),
+      }));
+      // The scanner resolves only after the admission/checkpoint outer COMMIT.
+      // The targeted producer rechecks current eligibility; delivery is merely a
+      // latency hint, never admission truth or part of the public count result.
+      for (let offset = 0; offset < admittedIds.length; offset += 500) {
+        try {
+          await this.enqueueCommittedSearchRows(account, admittedIds.slice(offset, offset + 500));
+        } catch (handoffError) {
+          try { this._searchIndexSources.rescan(account.id); }
+          catch (recoveryError) { console.warn('Search index rescan hint failed after committed archive batch:', recoveryError.message); }
+          console.warn('Search index handoff failed after committed archive batch:', handoffError.message);
+        }
+      }
+      this.broadcast({ type: 'archive_coverage_progress', accountId: account.id, phase: 'archive', ...result }, account.user_id);
+      deferAt = result?.deferAt || 0;
+      return result;
+    } catch (error) {
+      const detail = extractImapError(error);
+      if (error.archiveProviderRead && (isConnectionRefusal(detail) || isAuthFailure(detail))) {
+        if (/\[LIMIT\]|rate.?limit|too many|maximum.*connections|connection limit|over quota|throttl/i.test(detail)) recordBackgroundRefusal(host);
+        this._noteSecondaryRefusal?.(account);
+      }
+      throw error;
+    } finally {
+      if (held) this._bgConnSem.release(host);
+      this._archiveNextRun.set(account.id, Math.max(Date.now() + 2000, deferAt));
+      this._archiveRunning.delete(account.id);
+    }
+  }
+
+  async bootstrapProviderIdentity(account, client, folder) {
+    if (!providerProfile(account).labelStore || this._secondaryConnectBlocked?.(account.id)) return;
+    return bootstrapGmailIdentity(account, client, folder, {
+      ...providerProfile(account),
+      foregroundPending: () => [...connectionPools.values()].some(pool =>
+        pool.host === (account.imap_host || '').toLowerCase() && pool.waiters.length > 0),
+      onReadError: err => {
+        const detail = extractImapError(err);
+        if (isConnectionRefusal(detail) || isAuthFailure(detail)) {
+          if (/\[LIMIT\]|rate.?limit|too many|maximum.*connections|connection limit|over quota|throttl/i.test(detail)) {
+            recordBackgroundRefusal(account.imap_host);
+          }
+          this._noteSecondaryRefusal?.(account);
+        }
+      },
+    });
   }
 
   // Whether the account's folders are label memberships (Gmail): removing a message from one
@@ -6250,6 +6582,7 @@ export class ImapManager {
   // Called when the user navigates to a folder that has no local messages yet.
   // Uses a pooled connection — does NOT touch the main sync connection.
   async syncFolderOnDemand(account, folder) {
+    if (await this._isArchiveFolder(account, folder)) return this.runArchiveCoverageBatch(account);
     const key = `${account.id}:${folder}`;
     if (this.onDemandSyncing.has(key)) {
       console.log(`syncFolderOnDemand skipped (already running): ${logAccount(account)}/${folder}`);
@@ -6465,7 +6798,15 @@ export class ImapManager {
   // Uses a fresh connection to avoid lock contention with sync connection.
   // Auto-retries once on transient connection errors (stale pool connection, NAT
   // timeout, half-open TCP, etc.) so a single click is enough in all common cases.
-  async fetchMessageBody(account, uid, folder) {
+  async fetchMessageBody(account, uid, folder, options = {}) {
+    if (options.purpose === 'search') {
+      const blocked = this._secondaryConnectBlocked(account.id);
+      if (!options.client && !options.signal?.aborted && blocked && !hasIdlePooledClient(connectionPools, account.id)) {
+        return { status: 'backoff', reason: 'provider-refused', detail: 'Mail server is limiting connections for this account',
+          retryAfterMs: Math.max(0, blocked.until - Date.now()), complete: false, textParts: [], requiredParts: [], downloadBytes: 0, identity: null };
+      }
+      return fetchSearchText(account, uid, folder, options, { acquire: withFreshClient, walkStructure, decodeBody, isConnectionRefusal, isAuthFailure });
+    }
     // While the provider is refusing secondary logins, a body click can only succeed over a
     // session that already exists. If the pool holds an idle client, use it (no new LOGIN);
     // otherwise fail fast with a typed error the route turns into a clear 503, instead of
@@ -6961,7 +7302,7 @@ export class ImapManager {
       const client = this.connections.get(account.id);
       if (client && client.usable !== false) {
         let expired = false;
-        const attempt = (async () => {
+        const attempt = this.trackProviderWrite(account.id, async () => {
           // acquireTimeout: ImapFlow splices a timed-out waiter OUT of its lock queue and
           // rejects. Without it, every attempt that hit the 5s race left a waiter queued
           // forever on a client whose lock never settles (half-open socket): review's
@@ -6982,7 +7323,7 @@ export class ImapManager {
               : await client.messageFlagsRemove(String(uid), [flag], { uid: true });
             if (applied === false) throw new Error('server did not apply flag on persistent session');
           } finally { lock.release(); }
-        })();
+        });
         attempt.catch(() => {}); // detached after a timeout; never an unhandled rejection
         try {
           await raceTimeout(attempt, 5000, 'Persistent flag store');
@@ -7051,6 +7392,7 @@ export class ImapManager {
   }
 
   async moveMessageGetNewUid(account, uid, fromFolder, toFolder) {
+    await this._assertWritableSource(account, fromFolder, [uid]);
     let newUid = null;
     try {
       await withFreshClient(account, async (client) => {
@@ -7073,6 +7415,7 @@ export class ImapManager {
   }
 
   async deleteFolder(account, path) {
+    await this._assertWritableSource(account, path);
     return withFreshClient(account, async (client) => {
       // If the pool connection has this folder selected, switch to INBOX first
       if ((client.mailbox?.path || '').toLowerCase() === path.toLowerCase()) {
@@ -7084,6 +7427,7 @@ export class ImapManager {
   }
 
   async renameFolder(account, oldPath, newPath) {
+    await this._assertWritableSource(account, oldPath);
     // The guard below cannot deselect INBOX, and the UI never offers renaming it.
     if (oldPath.toUpperCase() === 'INBOX') throw new Error('INBOX cannot be renamed');
     return withFreshClient(account, async (client) => {
@@ -7099,6 +7443,7 @@ export class ImapManager {
   }
 
   async emptyFolder(account, folder) {
+    await this._assertWritableSource(account, folder);
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
@@ -7189,6 +7534,7 @@ export class ImapManager {
   }
 
   async moveMessage(account, uid, fromFolder, toFolder) {
+    await this._assertWritableSource(account, fromFolder, [uid]);
     let newUid = null;
     try {
       await withFreshClient(account, async (client) => {
@@ -7213,6 +7559,7 @@ export class ImapManager {
   // read from a stale row, or looked up in the wrong account, would otherwise expunge whatever
   // sits there. Resolves false, having deleted nothing, when it does not match.
   async permanentDeleteMessage(account, uid, folder, { expectMessageId } = {}) {
+    await this._assertWritableSource(account, folder, [uid]);
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
@@ -7248,15 +7595,33 @@ export class ImapManager {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
     if (!account) throw new Error(`copyMessage: account ${accountId} not found`);
+    await this._assertWritableSource(account, fromFolder, [uid]);
+    if (await this._isArchiveFolder(account, toFolder)) throw Object.assign(new Error('Archive residue must be admitted through archive coverage'), { status: 409, code: 'archive-residue-read-only' });
+
+    const labelStore = providerProfile(account).labelStore;
+    const source = labelStore ? (await query(`SELECT m.provider_msgid,f.uid_validity FROM messages m
+      JOIN folders f ON f.account_id=m.account_id AND f.path=m.folder
+      WHERE m.account_id=$1 AND m.folder=$2 AND m.uid=$3 AND NOT m.is_deleted AND NOT m.is_archive_residue`,
+    [accountId, fromFolder, uid])).rows[0] : null;
+    if (labelStore && !source) throw new Error('Copy source changed; resync before copying');
+    const proof = labelStore ? { providerMsgid: source.provider_msgid } : {};
 
     let newUid = null;
     try {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
+          if (labelStore) {
+            proof.sourceUidValidity = client.mailbox?.uidValidity;
+            if (source.uid_validity == null || proof.sourceUidValidity == null ||
+                String(source.uid_validity) !== String(proof.sourceUidValidity)) {
+              throw new Error('Copy source epoch changed; resync before copying');
+            }
+          }
           const result = await client.messageCopy(String(uid), toFolder, { uid: true });
           if (result === false) throw new Error('messageCopy returned false — server did not confirm copy');
           if (result?.uidMap) newUid = result.uidMap.get(Number(uid)) || null;
+          proof.destinationUidValidity = result?.uidValidity;
         } finally {
           lock.release();
         }
@@ -7266,11 +7631,18 @@ export class ImapManager {
       throw err;
     }
 
+    if (newUid != null) {
+      const sibling = await insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid, proof);
+      // A provider UID is insufficient if its source/target epoch or identity
+      // changed before storage. Do not confirm that locator to label callers.
+      if (labelStore && source.provider_msgid && sibling == null) newUid = null;
+    }
+
     // Hand off to label plugins (GTD broadcasts its section-refresh and, on the deferred path,
-    // reconciles once the sibling lands — see plugins/gtd/hooks.js afterLabelCopy). Fired before
-    // the sibling INSERT to preserve the historical emit-then-insert order; `newUid` tells the
+    // reconciles once the sibling lands — see plugins/gtd/hooks.js afterLabelCopy). `newUid` tells the
     // plugin whether the sibling is available now (UIDPLUS) or deferred to a destination sync
-    // (null). The hook swallows per-plugin errors and the plugin's deferred work is fire-and-
+    // (null). Fenced persistence precedes the hook so rejected locators stay deferred.
+    // The hook swallows per-plugin errors and the plugin's deferred work is fire-and-
     // forget, so this never blocks or breaks the copy.
     await pluginRegistry.runHook('afterLabelCopy', { mgr: this.pluginFacade, account, toFolder, fromFolder, srcUid: uid, newUid });
 
@@ -7278,12 +7650,11 @@ export class ImapManager {
       // Servers without UIDPLUS confirm COPY but cannot name its destination UID.
       // Pull the target so ordinary folders (which have no label plugin hook)
       // gain their local sibling row without waiting for the next backfill.
-      this.syncFolderOnDemand(account, toFolder)
+      await this.syncFolderOnDemand(account, toFolder)
         .catch(err => console.warn(`Post-copy folder sync failed: ${err.message}`));
       return null;
     }
 
-    await insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid);
     return newUid;
   }
 
@@ -7294,6 +7665,7 @@ export class ImapManager {
   // Post-remove notification is a plugin concern (generic `afterLabelRemove` hook), so this
   // stays label-feature-agnostic.
   async removeMessageCopy(accountId, uid, folder) {
+    await assertNoArchiveResidue(accountId, folder, [uid]);
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
     if (!account) throw new Error(`removeMessageCopy: account ${accountId} not found`);
@@ -7316,6 +7688,7 @@ export class ImapManager {
   // before trusting the source-absence result.
   async bulkMoveMessages(account, uids, fromFolder, toFolder) {
     if (!uids.length) return { uidMap: new Map(), succeeded: [], failed: [] };
+    await this._assertWritableSource(account, fromFolder, uids);
     let destUidNextBefore = null;
 
     // Capture UIDNEXT on a dedicated connection so a STATUS failure (e.g. toFolder
@@ -7463,6 +7836,7 @@ export class ImapManager {
   // To prevent collateral damage, we temporarily unflag any other \Deleted messages
   // before expunging, then restore them in a finally block.
   async bulkPermanentDelete(account, uids, folder) {
+    await this._assertWritableSource(account, folder, uids);
     if (!uids.length) return { succeeded: [], failed: [] };
     try {
       await withFreshClient(account, async (client) => {
@@ -7622,7 +7996,7 @@ export class ImapManager {
   async snoozedRows(where, params) {
     const result = await query(`
       SELECT sm.id AS snooze_id, sm.user_id, sm.account_id,
-             sm.message_id_header, sm.original_folder, sm.snoozed_folder, m.uid, m.is_read
+             sm.message_id_header, sm.original_folder, sm.snoozed_folder, m.uid, m.is_read, m.is_archive_residue
       FROM snoozed_messages sm
       JOIN messages m ON m.account_id = sm.account_id
                      AND m.message_id = sm.message_id_header
@@ -7680,7 +8054,7 @@ export class ImapManager {
               try {
                 const uids = await client.search({ header: ['Message-ID', row.message_id_header] }, { uid: true });
                 if (uids.length > 0) {
-                  const r = await client.messageFlagsRemove(String(uids[0]), ['\\Seen'], { uid: true });
+                  const r = await this.trackProviderWrite(row.account_id, () => client.messageFlagsRemove(String(uids[0]), ['\\Seen'], { uid: true }));
                   if (r === false) console.warn(`Snooze wakeup: messageFlagsRemove returned false for ${row.original_folder}`);
                 } else {
                   console.warn(`Snooze wakeup: could not find message in ${row.original_folder} to mark unread (Message-ID: ${row.message_id_header})`);

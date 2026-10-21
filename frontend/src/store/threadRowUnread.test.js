@@ -38,3 +38,41 @@ test('in the unified inbox the row still counts every cached copy', () => {
   assert.equal(row.unread_count, 1);
   assert.equal(row.is_read, false);
 });
+
+
+test('explicit unread of the selected representative updates its row and search badge within the account', () => {
+  useStore.setState({ selectedAccountId: 'a', messages: [ROW], searchResults: [ROW], threadMessages: { t: CACHED } });
+  useStore.getState().updateMessage(ROW.id, { is_read: false });
+  for (const row of [useStore.getState().messages[0], useStore.getState().searchResults[0]]) {
+    assert.equal(row.is_read, false);
+    assert.equal(row.unread_count, 1, 'the other account copy must not contribute');
+  }
+  assert.equal(useStore.getState().threadMessages.t[2], CACHED[2]);
+});
+
+test('representative unread without an expanded cache updates the aggregate immediately', () => {
+  useStore.setState({ selectedAccountId: 'a', messages: [ROW], searchResults: [], threadMessages: {} });
+  useStore.getState().updateMessage(ROW.id, { is_read: false });
+  assert.equal(useStore.getState().messages[0].unread_count, 1);
+  useStore.getState().updateMessage(ROW.id, { is_read: true });
+  assert.equal(useStore.getState().messages[0].unread_count, 0);
+});
+
+test('explicit bulk aggregate is not overwritten by an older cached thread', () => {
+  useStore.setState({ selectedAccountId: 'a', messages: [ROW], searchResults: [], threadMessages: { t: CACHED } });
+  useStore.getState().updateMessage(ROW.id, { is_read: false, unread_count: 2 });
+  assert.equal(useStore.getState().messages[0].unread_count, 2);
+});
+
+
+test('an unread aggregate retains its read representative own flag for the next action', () => {
+  useStore.setState({ selectedAccountId: 'a', messages: [ROW], searchResults: [], threadMessages: { t: CACHED } });
+  useStore.getState().updateMessage('a-old', { is_read: false });
+  const aggregate = useStore.getState().messages[0];
+  assert.equal(aggregate.is_read, false);
+  assert.equal(aggregate.representative_is_read, true);
+  assert.equal(aggregate.unread_count, 1);
+  useStore.getState().updateMessage(ROW.id, { is_read: false });
+  assert.equal(useStore.getState().messages[0].representative_is_read, false);
+  assert.equal(useStore.getState().messages[0].unread_count, 2);
+});

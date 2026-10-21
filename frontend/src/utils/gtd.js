@@ -1,3 +1,6 @@
+import { captureReadRequest, reconcileReadState } from './pendingReads.js';
+import { applyDeleteGuard } from './pendingDeletes.js';
+
 // Pure helpers for GTD display surfaces. Kept free of React/DOM so they can be
 // unit-tested under `node --test` at their pure seams.
 
@@ -722,34 +725,46 @@ let _deepLinkSeq = 0;
 // account's (the sections are fetched for it). Recovery then opens only that account's mail.
 export async function openDeepLinkMessage(id, {
   getMessage, setThreadMessages, setSelectedMessage,
-  thread, getThread, onMiss, singleAccountView = false,
+  thread, getThread, onMiss, singleAccountView = false, isSessionCurrent = () => true,
 } = {}) {
   const seq = ++_deepLinkSeq;
-  const open = (msg) => {
+  const isCurrent = () => seq === _deepLinkSeq && isSessionCurrent();
+  const open = (msg, readToken) => {
     // A newer click superseded this one while we awaited the fetch — losing the race is
     // not an error, so drop the stale write silently (no warn). Guards every state write,
     // including the recovery path below.
-    if (seq !== _deepLinkSeq) return null;
+    if (!isCurrent()) return null;
+    const [reconciled] = reconcileReadState(applyDeleteGuard([msg]), readToken);
+    if (!reconciled || !isCurrent()) return null;
+    msg = reconciled;
     setThreadMessages(`__dl_${msg.id}`, [msg]);
     setSelectedMessage(msg.id);
     return msg;
   };
 
+  if (!isCurrent()) return null;
   if (id) {
     try {
-      const msg = await getMessage(id);
-      if (msg) return open(msg);
+      const readToken = captureReadRequest();
+      const response = { data: await getMessage(id), readToken };
+      if (!isCurrent()) return null;
+      if (response.data) return open(response.data, response.readToken);
     } catch {
       // Fall through to recovery — a 404 here means the snapshot id is stale.
     }
   }
 
+  if (!isCurrent()) return null;
   console.warn(`GTD deep-link miss (id=${id ?? 'null'}, thread_key=${thread?.thread_key ?? 'null'}); refetching sections`);
   onMiss?.();
 
+  if (!isCurrent()) return null;
   if (getThread && thread?.thread_key) {
     try {
-      const { messages } = await getThread(thread.thread_key);
+      const readToken = captureReadRequest();
+      const response = { data: await getThread(thread.thread_key), readToken };
+      if (!isCurrent()) return null;
+      const { messages } = response.data;
       const msg = pickThreadMessage(messages, thread.message_id, thread.account_id);
       // Another account's copy is chosen only when the thread holds none of the row account's
       // mail. Opened in one account's view, the pane would act for that other account from this
@@ -758,7 +773,7 @@ export async function openDeepLinkMessage(id, {
         console.warn(`GTD deep-link: thread ${thread.thread_key} holds no message of account ${thread.account_id}; not opening another account's copy`);
         return null;
       }
-      if (msg) return open(msg);
+      if (msg) return open(msg, response.readToken);
     } catch {
       // Best-effort; the onMiss refetch still refreshes the ids for the next click.
     }

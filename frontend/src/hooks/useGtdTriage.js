@@ -118,18 +118,22 @@ export function useGtdTriage() {
 
   const openRow = (thread) => {
     cancelAutoMarkRead();
+    const generation = useStore.getState().countGeneration;
+    const isSessionCurrent = () => mountedRef.current && !useStore.getState().isLocked
+      && useStore.getState().countGeneration === generation;
     const identity = thread.message_id || thread.id;
     return openGtdThreadWithAutoRead(thread, {
       openThread: () => openDeepLinkMessage(thread.id, {
         getMessage: api.getMessage,
         getThread: api.getThread,
+        isSessionCurrent,
         setThreadMessages,
         setSelectedMessage,
         thread,
         onMiss: scheduleGtdSectionsFetch,
         singleAccountView: Boolean(useStore.getState().selectedAccountId),
       }),
-      isCancelled: () => !mountedRef.current,
+      isCancelled: () => !isSessionCurrent(),
       getPreferences: () => useStore.getState(),
       readThread: setRead,
       publishTimer: timerHandle => {

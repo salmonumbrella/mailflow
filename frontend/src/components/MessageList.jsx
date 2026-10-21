@@ -1,8 +1,11 @@
+import { inboxReadMembers } from '../utils/readCountScope.js';
 import { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { beginCountIntent } from '../utils/countWriteTracker.js';
+import { createArchiveQueue } from '../utils/archiveQueue.js';
 import { LAYOUTS } from '../layouts.js';
 import { senderColor } from '../themes.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -10,7 +13,8 @@ import { isAccountInUnifiedInbox } from '../utils/unifiedInbox.js';
 import { shouldSyncFolder, folderSyncKey } from '../utils/folderSync.js';
 import { resolveThreadMessages } from '../utils/threadActions.js';
 import { keepDraftsApart } from '../utils/conversationActions.js';
-import { unreadDeltaByAccount } from '../utils/countSnapshots.js';
+import { unreadDeltaByAccount, selectAuthoritativeInboxSnapshot } from '../utils/countSnapshots.js';
+import { shouldKeepEmptyInbox } from '../utils/knownEmptyInbox.js';
 import { splitDraftSignature } from '../utils/draftSignature.js';
 import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import ContextMenu from './ContextMenu.jsx';
@@ -23,9 +27,9 @@ import {
 import { formatDate, formatDateTime, formatSnoozeUntil } from '../utils/formatDate.js';
 import { SNOOZED_FOLDER, unsnooze, changeSnooze, refreshCounts } from '../utils/snoozeActions.js';
 import { advanceSelectionAfterRemoval, registerRowOpener } from '../utils/listSelection.js';
-import { openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
-import { selectedMessage, markMessageUnread } from '../utils/messageHotkeys.js';
-import { cancelScheduledMarkReadFor } from '../utils/markRead.js';
+import { pickMessageReplyAlias, resolveReplyRecipients, openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
+import { selectedMessage, markMessageUnread, changeMessageRead } from '../utils/messageHotkeys.js';
+import { scheduleMarkRead, cancelScheduledMarkRead, cancelScheduledMarkReadFor } from '../utils/markRead.js';
 import { saveSenderCategory } from '../utils/senderCategory.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import FolderPathLabel from './FolderPathLabel.jsx';
@@ -35,10 +39,9 @@ import ReplyDraftIndicator from './ReplyDraftIndicator.jsx';
 import SpamExplainModal from './SpamExplainModal.jsx';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { createLatestRequest } from '../utils/latestRequest.js';
-import { pendingMarkReadMap, completedMarkReadMap, setPending } from '../utils/pendingReads.js';
+import { captureReadRequest, pendingMarkReadMap, completedMarkReadMap, setPending, beginReadIntent, completeReadIntent, queueReadWrite, isCurrentReadIntent, reconcileReadState, setReadIntentSession } from '../utils/pendingReads.js';
 import { applyDeleteGuard, clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete, threadDeleteGuardKey } from '../utils/pendingDeletes.js';
 import {
-  archiveInChunks,
   archiveTargetGroupsForRows,
   archiveTargetsForFolder,
   archiveViewKey,
@@ -46,10 +49,25 @@ import {
   findVisibleArchiveMessage,
   invalidateThreadLoad,
   isCurrentThreadLoad,
-  unreadCountsByAccount,
 } from '../utils/threadedArchive.js';
 import { createUndoableCommit, UNDO_COMMIT_DELAY_MS, UNDO_WINDOW_MS } from '../utils/undoableAction.js';
 import { resolveConversationSelection, selectListedMessage } from '../utils/conversation.js';
+import { resolveConversationMode, groupsMessageList } from '../utils/conversationMode.js';
+import { guardSearchPages, extendSearchPages } from '../utils/searchConversationPages.js';
+
+const enqueueArchive = createArchiveQueue(ids => api.bulkArchive(ids), {
+  currentGeneration: () => useStore.getState().countGeneration,
+  onBatch: result => {
+    const state = useStore.getState(), folder = state.selectedAccountId ? state.selectedFolder : 'INBOX';
+    if (!state.isLocked && !state.searchQuery && result.countTargets.some(target => target.folder === folder && (!state.selectedAccountId || target.account_id === state.selectedAccountId))) {
+      useStore.setState(state => ({ messagesRefreshToken: state.messagesRefreshToken + 1 }));
+    }
+  },
+});
+const archiveEstimate = (message, threadRow) => ({ ...message,
+  countUnread: threadRow && Number.isFinite(Number(message.unread_count)) ? Number(message.unread_count) : (message.is_read ? 0 : 1),
+  countTotal: threadRow ? Number(message.message_count) || 1 : 1,
+});
 
 // Folder icon for move picker
 function FolderIcon({ specialUse, size = 13 }) {
@@ -129,13 +147,12 @@ export default function MessageList() {
     searchResults, setSearchResults, openCompose, accountsReady, accounts,
     messagesRefreshToken, layout, setLayout, pageSize, setPageSize, scrollMode,
     setMobileSidebarOpen, unreadCounts, showContacts, setShowContacts,
-    threadedView: threadedSetting, expandedThreadId, setExpandedThreadId,
+    threadedView: threadedSetting, conversationMode, expandedThreadId, setExpandedThreadId,
     threadMessages, setThreadMessages, clearThreadMessages, loadingThread, setLoadingThread,
     hoverQuickActions, hoverActionSet, showMobileAvatars, showMessagePreviews,
     swipeActions,
     folders, favoriteFolders, recentFolders, addFavoriteFolder, removeFavoriteFolder, setSelectedAccount,
     categorizationEnabled, categoryCounts, setCategoryCounts, adjustCategoryCount,
-    markReadBehavior, markReadDelay,
     searchAllFolders,
     activeGtdTab, setActiveGtdTab, gtdSections, enabledPlugins,
     openMessageWindow,
@@ -168,6 +185,8 @@ export default function MessageList() {
   // server-side. undefined = search all folders.
   const searchFolder = (!isUnified && !searchAllFolders) ? selectedFolder : undefined;
   const searchPageSize = Math.max(1, Math.min(Number(pageSize) || 50, 200));
+  const searchMode = resolveConversationMode({ conversationMode, threadedView: threadedSetting });
+  const groupedSearch = groupsMessageList(searchMode);
   const undoableNotifications = notifications.filter(n => n.onUndo);
 
   const currentLayout = LAYOUTS[layout] || LAYOUTS.comfortable;
@@ -177,17 +196,17 @@ export default function MessageList() {
   // Apply optimistic read guard to a batch of messages from the server.
   // Prevents a concurrent sync refresh from reverting a pending or recently-completed
   // mark-read before the IMAP flag has propagated back to the DB.
-  const applyReadGuard = useCallback((msgs) => {
+  const applyReadGuard = useCallback((msgs, token) => {
     msgs = applyDeleteGuard(msgs);
-    if (pendingMarkReadMap.size === 0 && completedMarkReadMap.size === 0) return msgs;
-    return msgs.map(m => {
+    if (pendingMarkReadMap.size === 0 && completedMarkReadMap.size === 0) return reconcileReadState(msgs, token);
+    return reconcileReadState(msgs.map(m => {
       const inFlight = pendingMarkReadMap.has(m.id);
       const inGrace  = completedMarkReadMap.has(m.id);
       if (!inFlight && !inGrace) return m;
       if (!m.is_read) return { ...m, is_read: true };
       if (inGrace) completedMarkReadMap.delete(m.id);
       return m;
-    });
+    }), token);
   }, []);
 
   const [unreadOnly, setUnreadOnly] = useState(false);
@@ -214,6 +233,7 @@ export default function MessageList() {
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [searchLoadingMore, setSearchLoadingMore] = useState(false);
   const searchFetchedOffsetRef = useRef(0);
+  const searchPageRef = useRef({ cursor: '', hasMore: false, loading: false });
   const listRef = useRef(null);
   const searchInputRef = useRef(null); // for focusSearch shortcut
   const pendingDeleteTimers = useRef(new Map()); // id/thread key -> pending delete metadata
@@ -301,16 +321,16 @@ export default function MessageList() {
     showGtdTab,
   });
   useEffect(() => {
-    if (!categorizationActive || selectedFolder !== 'INBOX') {
-      setCategoryCounts({});
-      return;
-    }
+    if (!categorizationActive || selectedFolder !== 'INBOX') return;
     let cancelled = false;
+    const generation = useStore.getState().countGeneration;
     const params = selectedAccountId ? { accountId: selectedAccountId } : {};
-    api.getCategoryCounts(params)
-      .then(data => { if (!cancelled) setCategoryCounts(data.counts || {}); })
+    const refresh = () => api.getCategoryCounts(params)
+      .then(data => { if (!cancelled) setCategoryCounts(data.counts || {}, data.countRevision || '0', generation, data.byAccount); })
       .catch(() => {});
-    return () => { cancelled = true; };
+    refresh();
+    window.addEventListener('mailflow:category_counts_refresh', refresh);
+    return () => { cancelled = true; window.removeEventListener('mailflow:category_counts_refresh', refresh); };
   }, [categorizationActive, selectedAccountId, selectedFolder, messagesRefreshToken, unifiedInboxAccountKey, setCategoryCounts]);
 
   // Bumped by every new search, by clearing the query, and by a change of account or folder, so a
@@ -402,15 +422,26 @@ export default function MessageList() {
     setExpandedThreadId(null);
   }, [messagesRefreshToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const normalGenerationRef = useRef(0);
+  const [normalListRetry, setNormalListRetry] = useState(false);
+  const normalContinuation = accountsReady && (hasMoreMessages || normalListRetry || (messages.length === 0 && messagesTotal > 0));
+
   // Reset and load fresh when account/folder/filter changes
   useEffect(() => {
     let cancelled = false;
+    normalGenerationRef.current += 1;
     const run = async () => {
       // Don't attempt to load until we know which accounts exist.
       // Without this guard, the unified inbox query fires before getAccounts()
       // resolves, finds no account IDs, and returns empty — causing the blank
       // "All Inboxes" on first load.
       if (!accountsReady) return;
+      if (searchQuery.trim()) {
+        setLoadingMessages(false);
+        setFolderSyncing(false);
+        return;
+      }
+      setNormalListRetry(false);
       setLoadingMessages(true);
       setMessagesOffset(0);
       setHasMoreMessages(true);
@@ -422,11 +453,17 @@ export default function MessageList() {
         if (threadedView) params.threaded = 'true';
         if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
         await refreshRequestRef.current.run(
-          () => api.getMessages(params),
-          (data) => {
+          async () => {
+            const readToken = captureReadRequest();
+            const data = await api.getMessages(params);
+            return { data, readToken };
+          },
+          ({ data, readToken }) => {
             if (cancelled) return;
             setMessagesTotal(data.total);
-            setMessages(applyReadGuard(data.messages));
+            const guarded = applyReadGuard(data.messages, readToken);
+            setMessages(guarded);
+            setNormalListRetry(guarded.length < data.messages.length || (data.messages.length === 0 && data.total > 0));
             setMessagesOffset(data.messages.length);
             setHasMoreMessages(data.messages.length < data.total);
 
@@ -455,43 +492,87 @@ export default function MessageList() {
           },
         );
       } catch (err) {
+        if (cancelled) return;
         console.error('Failed to load messages:', err);
+        setNormalListRetry(true);
         setFolderSyncing(false);
       } finally {
         if (!cancelled) setLoadingMessages(false);
       }
     };
     run();
-    return () => { cancelled = true; };
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+    return () => {
+      cancelled = true;
+      normalGenerationRef.current += 1;
+      refreshRequestRef.current.invalidate();
+    };
+  }, [selectedAccountId, selectedFolder, searchQuery, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Load next page (called by scroll or button)
   const loadMore = useCallback(async () => {
-    if (loadingMessages || !hasMoreMessages) return;
+    if (useStore.getState().loadingMessages || !normalContinuation || searchQuery.trim()) return;
+    const generation = ++normalGenerationRef.current;
     setLoadingMessages(true);
     try {
       // Read current offset directly from store to avoid stale closure
-      const currentOffset = useStore.getState().messagesOffset;
-      const params = { limit: pageSize, offset: currentOffset };
+      const state = useStore.getState();
+      // A guard-filled or exhausted snapshot must retry from the beginning.
+      const currentOffset = state.messagesOffset >= state.messagesTotal ? 0 : state.messagesOffset;
+      const params = { limit: currentOffset === 0 && state.scrollMode === 'infinite' ? Math.min(Math.max(pageSize, state.messagesOffset), 500) : pageSize, offset: currentOffset };
       scopeListParams(params, selectedAccountId, selectedFolder);
       if (unreadOnly) params.unreadOnly = 'true';
-      if (useStore.getState().threadedView) params.threaded = 'true';
+      if (threadedView) params.threaded = 'true';
       if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
-      const data = await api.getMessages(params);
-      appendMessages(applyReadGuard(data.messages));
-      setMessagesOffset(currentOffset + data.messages.length);
-      setHasMoreMessages(currentOffset + data.messages.length < data.total);
+      await refreshRequestRef.current.run(
+        async () => {
+          let readToken = captureReadRequest();
+          let data = await api.getMessages(params);
+          // A provider commit can shift rows before its refresh token arrives.
+          // Reconcile a shrinking forward snapshot with one bounded page-zero load.
+          if (params.offset > 0 && data.total < state.messagesTotal && generation === normalGenerationRef.current) {
+            params.offset = 0;
+            readToken = captureReadRequest();
+            data = await api.getMessages(params);
+          }
+          return { data, readToken };
+        },
+        ({ data, readToken }) => {
+          if (generation !== normalGenerationRef.current) return;
+          const guarded = applyReadGuard(data.messages, readToken);
+          if (params.offset === 0) {
+            const latest = useStore.getState();
+            const activeId = latest.selectedMessageId;
+            const kept = unreadOnly && activeId && !guarded.some(m => m.id === activeId)
+              ? latest.messages.find(m => m.id === activeId) : null;
+            const accountInScope = kept && (selectedAccountId ? kept.account_id === selectedAccountId
+              : latest.accounts.some(a => a.id === kept.account_id && (selectedFolder === SNOOZED_FOLDER || isAccountInUnifiedInbox(a))));
+            const folderInScope = kept && (selectedFolder === SNOOZED_FOLDER ? !!kept.snooze_until
+              : kept.folder === (selectedAccountId ? selectedFolder : 'INBOX'));
+            const sameScope = latest.selectedAccountId === selectedAccountId && latest.selectedFolder === selectedFolder;
+            setMessages(sameScope && accountInScope && folderInScope ? [...applyDeleteGuard([kept]), ...guarded] : guarded);
+          } else appendMessages(guarded);
+          setMessagesTotal(data.total);
+          setNormalListRetry(guarded.length < data.messages.length || (data.messages.length === 0 && data.total > 0));
+          setMessagesOffset(data.messages.length === 0 ? 0 : params.offset + data.messages.length);
+          setHasMoreMessages(params.offset + data.messages.length < data.total);
+        },
+      );
     } catch (err) {
+      if (generation !== normalGenerationRef.current) return;
       console.error('Failed to load more messages:', err);
+      setNormalListRetry(true);
     } finally {
-      setLoadingMessages(false);
+      if (generation === normalGenerationRef.current) setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
+  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, normalContinuation, searchQuery, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset, setMessagesTotal, setMessages]);
 
   // Listen for background refresh events from WebSocket. If a message was just
   // opened, give its body request a brief head start before reloading the full list.
   useEffect(() => {
+    let cancelled = false;
     const run = async () => {
+      if (cancelled || useStore.getState().loadingMessages) return;
+      const generation = ++normalGenerationRef.current;
       try {
         const state = useStore.getState();
         const ps = state.pageSize;
@@ -507,15 +588,29 @@ export default function MessageList() {
         }
         scopeListParams(params, selectedAccountId, selectedFolder);
         if (unreadOnly) params.unreadOnly = 'true';
-        if (state.threadedView) params.threaded = 'true';
+        if (threadedView) params.threaded = 'true';
         if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
         await refreshRequestRef.current.run(
-          () => api.getMessages(params),
-          (data) => {
+          async () => {
+            let readToken = captureReadRequest();
+            let data = await api.getMessages(params);
+            if (sm === 'paginated') {
+              const lastPage = Math.max(1, Math.ceil(data.total / ps));
+              if (params.offset >= lastPage * ps && !cancelled && generation === normalGenerationRef.current) {
+                params.offset = (lastPage - 1) * ps;
+                readToken = captureReadRequest();
+                data = await api.getMessages(params);
+              }
+            }
+            return { data, readToken };
+          },
+          ({ data, readToken }) => {
+            if (cancelled) return;
             setMessagesTotal(data.total);
             // If the unread filter is on and the currently open message was just marked
             // read, the server won't return it — preserve it so the user can keep reading.
-            let msgs = applyReadGuard(data.messages);
+            let msgs = applyReadGuard(data.messages, readToken);
+            setNormalListRetry(msgs.length < data.messages.length || (data.messages.length === 0 && data.total > 0));
             const activeId = useStore.getState().selectedMessageId;
             if (unreadOnly && activeId && !msgs.some(m => m.id === activeId)) {
               const kept = useStore.getState().messages.find(m => m.id === activeId);
@@ -523,6 +618,8 @@ export default function MessageList() {
             }
             setMessages(msgs);
             if (sm === 'paginated') {
+              setCurrentPage(Math.min(Math.floor(params.offset / ps) + 1, Math.max(1, Math.ceil(data.total / ps))));
+              setMessagesOffset(params.offset + data.messages.length);
               setHasMoreMessages(false);
             } else {
               setMessagesOffset(data.messages.length);
@@ -530,7 +627,11 @@ export default function MessageList() {
             }
           },
         );
-      } catch { /* intentional */ }
+      } catch {
+        if (!cancelled && generation === normalGenerationRef.current) {
+          setNormalListRetry(true);
+        }
+      }
     };
 
     const handler = () => {
@@ -546,16 +647,21 @@ export default function MessageList() {
     };
     window.addEventListener('mailflow:refresh', handler);
     return () => {
+      cancelled = true;
       window.removeEventListener('mailflow:refresh', handler);
       clearTimeout(deferredRefreshTimerRef.current);
     };
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, threadedView, pageSize, scrollMode, messagesRefreshToken, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
-  // Search
+  // Search keeps the physical matched row as the group representative.
   useEffect(() => {
     clearTimeout(searchTimer.current);
+    const seq = ++searchSeq.current;
+    const generation = useStore.getState().countGeneration;
+    const page = { cursor: '', hasMore: false, loading: false };
+    searchPageRef.current = page;
+    setSearchLoadingMore(false);
     if (!searchQuery.trim()) {
-      searchSeq.current += 1;
       setIsSearching(false);
       setSearchResults([]);
       setSearchHasMore(false);
@@ -566,20 +672,30 @@ export default function MessageList() {
     setIsSearching(true);
     setSearchHasMore(false);
     setSearchError(null);
-    const seq = ++searchSeq.current;
+    const scope = { query: searchQuery, accountId: selectedAccountId, folder: searchFolder,
+      mode: searchMode, sessionGeneration: seq };
     searchTimer.current = setTimeout(async () => {
       try {
-        const data = await api.search(searchQuery, selectedAccountId || undefined, { offset: 0, limit: searchPageSize, folder: searchFolder });
-        if (searchSeq.current !== seq) return;
-        searchFetchedOffsetRef.current = data.messages.length;
-        setSearchResults(applyReadGuard(data.messages));
-        setSearchHasMore(data.messages.length === searchPageSize);
+        const result = await extendSearchPages([], {
+          grouped: groupedSearch, scope, guardMessages: applyReadGuard,
+          isCurrent: () => searchSeq.current === seq && useStore.getState().countGeneration === generation && !useStore.getState().isLocked,
+          fetchPage: async cursor => {
+            const readToken = captureReadRequest();
+            const data = await api.search(searchQuery, selectedAccountId || undefined,
+              { cursor, threaded: groupedSearch, mode: searchMode, limit: searchPageSize, folder: searchFolder });
+            return { data, readToken };
+          },
+        });
+        if (!result) return;
+        page.cursor = result.cursor;
+        page.hasMore = result.hasMore;
+        const messages = guardSearchPages([], result.pages, { grouped: groupedSearch, scope, guardMessages: applyReadGuard });
+        searchFetchedOffsetRef.current = messages.length;
+        setSearchResults(messages);
+        setSearchHasMore(result.hasMore);
       } catch (err) {
         if (searchSeq.current === seq) {
           console.error('Search failed:', err);
-          // Clear instead of leaving a previous query's results standing under
-          // the new query text, and surface the failure (a swallowed rate-limit
-          // 429 otherwise reads as "no results").
           setSearchResults([]);
           searchFetchedOffsetRef.current = 0;
           setSearchError(err.message || 'Search failed');
@@ -588,8 +704,12 @@ export default function MessageList() {
         if (searchSeq.current === seq) setIsSearching(false);
       }
     }, 300);
-    return () => clearTimeout(searchTimer.current);
-  }, [searchQuery, selectedAccountId, searchFolder, searchPageSize, searchReloadToken, unifiedInboxAccountKey, applyReadGuard, setIsSearching, setSearchResults]);
+    return () => {
+      clearTimeout(searchTimer.current);
+      if (searchSeq.current === seq) searchSeq.current += 1;
+    };
+  }, [searchQuery, selectedAccountId, searchFolder, searchPageSize, searchMode, groupedSearch,
+    searchReloadToken, unifiedInboxAccountKey, applyReadGuard, setIsSearching, setSearchResults]);
 
   // Re-run an active search (and refresh the folder view) after inbox rules run, since
   // rules can move messages out of the searched folder and a search snapshot would
@@ -608,49 +728,76 @@ export default function MessageList() {
   }, []);
 
   const loadMoreSearch = useCallback(async () => {
-    if (searchLoadingMore) return;
-    const qSnapshot = searchQuery; // capture before async gap
+    const page = searchPageRef.current;
+    if (page.loading || !page.hasMore) return;
+    const qSnapshot = searchQuery;
     const seq = searchSeq.current;
+    const generation = useStore.getState().countGeneration;
+    const scope = { query: qSnapshot, accountId: selectedAccountId, folder: searchFolder,
+      mode: searchMode, sessionGeneration: seq };
+    page.loading = true;
     setSearchLoadingMore(true);
     try {
-      const offset = searchFetchedOffsetRef.current;
-      const data = await api.search(qSnapshot, selectedAccountId || undefined, { offset, limit: searchPageSize, folder: searchFolder });
-      // Discard results if the query, account or folder changed while we were fetching
-      if (searchSeq.current !== seq || useStore.getState().searchQuery !== qSnapshot) return;
-      searchFetchedOffsetRef.current = offset + data.messages.length;
-      const current = useStore.getState().searchResults;
-      useStore.setState({ searchResults: [...current, ...applyReadGuard(data.messages)] });
-      setSearchHasMore(data.messages.length === searchPageSize);
-    } catch (err) {
-      console.error('Search load more failed:', err);
-    } finally {
-      setSearchLoadingMore(false);
-    }
-  }, [searchQuery, selectedAccountId, searchFolder, searchPageSize, searchLoadingMore, applyReadGuard]);
-
-  const prefetchSearchAfterRemoval = useCallback(async (offset) => {
-    const qSnapshot = useStore.getState().searchQuery;
-    if (!qSnapshot.trim()) return;
-    const seq = searchSeq.current;
-    try {
-      const data = await api.search(qSnapshot, selectedAccountId || undefined, { offset, limit: searchPageSize, folder: searchFolder });
-      if (searchSeq.current !== seq || useStore.getState().searchQuery !== qSnapshot) return;
-      searchFetchedOffsetRef.current = Math.max(searchFetchedOffsetRef.current, offset + data.messages.length);
-      const additions = applyReadGuard(data.messages);
-      if (!additions.length) {
-        setSearchHasMore(data.messages.length === searchPageSize);
-        return;
-      }
-      useStore.setState(state => {
-        const existing = new Set(state.searchResults.map(m => m.id));
-        const missing = additions.filter(m => m && !existing.has(m.id));
-        return missing.length ? { searchResults: [...state.searchResults, ...missing] } : {};
+      const result = await extendSearchPages(useStore.getState().searchResults, {
+        cursor: page.cursor, grouped: groupedSearch, scope, guardMessages: applyReadGuard,
+        isCurrent: () => searchSeq.current === seq && useStore.getState().searchQuery === qSnapshot && useStore.getState().countGeneration === generation && !useStore.getState().isLocked,
+        fetchPage: async cursor => {
+          const readToken = captureReadRequest();
+          const data = await api.search(qSnapshot, selectedAccountId || undefined,
+            { cursor, threaded: groupedSearch, mode: searchMode, limit: searchPageSize, folder: searchFolder });
+          return { data, readToken };
+        },
       });
-      setSearchHasMore(data.messages.length === searchPageSize);
+      if (!result) return;
+      page.cursor = result.cursor;
+      page.hasMore = result.hasMore;
+      // Re-read local flags/removals which may have changed while the request was pending.
+      useStore.setState(state => {
+        const messages = guardSearchPages(state.searchResults, result.pages, { grouped: groupedSearch, scope, guardMessages: applyReadGuard });
+        searchFetchedOffsetRef.current = messages.length;
+        return { searchResults: messages };
+      });
+      setSearchHasMore(result.hasMore);
     } catch (err) {
-      console.error('Search prefetch after delete failed:', err);
+      if (searchSeq.current === seq) setSearchError(err.message || 'Search failed');
+    } finally {
+      page.loading = false;
+      if (searchPageRef.current === page) setSearchLoadingMore(false);
     }
-  }, [selectedAccountId, searchFolder, searchPageSize, applyReadGuard]);
+  }, [searchQuery, selectedAccountId, searchFolder, searchPageSize, searchMode, groupedSearch, applyReadGuard]);
+
+  const prefetchSearchAfterRemoval = useCallback(async () => {
+    const qSnapshot = useStore.getState().searchQuery;
+    const page = searchPageRef.current;
+    if (!qSnapshot.trim() || page.loading || !page.hasMore) return;
+    const seq = searchSeq.current;
+    const generation = useStore.getState().countGeneration;
+    const scope = { query: qSnapshot, accountId: selectedAccountId, folder: searchFolder,
+      mode: searchMode, sessionGeneration: seq };
+    page.loading = true;
+    try {
+      const result = await extendSearchPages(useStore.getState().searchResults, {
+        cursor: page.cursor, grouped: groupedSearch, scope, guardMessages: applyReadGuard,
+        isCurrent: () => searchSeq.current === seq && useStore.getState().searchQuery === qSnapshot && useStore.getState().countGeneration === generation && !useStore.getState().isLocked,
+        fetchPage: async cursor => {
+          const readToken = captureReadRequest();
+          const data = await api.search(qSnapshot, selectedAccountId || undefined,
+            { cursor, threaded: groupedSearch, mode: searchMode, limit: searchPageSize, folder: searchFolder });
+          return { data, readToken };
+        },
+      });
+      if (!result) return;
+      page.cursor = result.cursor;
+      page.hasMore = result.hasMore;
+      useStore.setState(state => ({ searchResults: guardSearchPages(state.searchResults, result.pages,
+        { grouped: groupedSearch, scope, guardMessages: applyReadGuard }) }));
+      setSearchHasMore(result.hasMore);
+    } catch (err) {
+      if (searchSeq.current === seq) setSearchError(err.message || 'Search failed');
+    } finally {
+      page.loading = false;
+    }
+  }, [selectedAccountId, searchFolder, searchPageSize, searchMode, groupedSearch, applyReadGuard]);
 
   // Infinite scroll + scroll-to-top visibility
   const handleScroll = useCallback(() => {
@@ -670,7 +817,9 @@ export default function MessageList() {
 
   // Load a specific page (paginated mode)
   const loadPage = useCallback(async (pageNum) => {
-    if (loadingMessages) return;
+    if (useStore.getState().loadingMessages) return;
+    const generation = ++normalGenerationRef.current;
+    pageNum = Math.max(1, Math.min(pageNum, Math.ceil(messagesTotal / pageSize) || 1));
     setLoadingMessages(true);
     setCurrentPage(pageNum);
     try {
@@ -680,10 +829,24 @@ export default function MessageList() {
       if (threadedView) params.threaded = 'true';
       if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
       await refreshRequestRef.current.run(
-        () => api.getMessages(params),
-        (data) => {
+        async () => {
+          let readToken = captureReadRequest();
+          let data = await api.getMessages(params);
+          const lastPage = Math.max(1, Math.ceil(data.total / pageSize));
+          if (pageNum > lastPage && generation === normalGenerationRef.current) {
+            pageNum = lastPage;
+            params.offset = (pageNum - 1) * pageSize;
+            readToken = captureReadRequest();
+            data = await api.getMessages(params);
+          }
+          return { data, readToken };
+        },
+        ({ data, readToken }) => {
           setMessagesTotal(data.total);
-          setMessages(applyReadGuard(data.messages));
+          const guarded = applyReadGuard(data.messages, readToken);
+          setMessages(guarded);
+          setNormalListRetry(guarded.length < data.messages.length || (data.messages.length === 0 && data.total > 0));
+          setCurrentPage(Math.min(pageNum, Math.max(1, Math.ceil(data.total / pageSize))));
           setMessagesOffset((pageNum - 1) * pageSize + data.messages.length);
           setHasMoreMessages(false);
           setExpandedThreadId(null);
@@ -691,11 +854,13 @@ export default function MessageList() {
         },
       );
     } catch (err) {
+      if (generation !== normalGenerationRef.current) return;
       console.error('Failed to load page:', err);
+      setNormalListRetry(true);
     } finally {
-      setLoadingMessages(false);
+      if (generation === normalGenerationRef.current) setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, messagesTotal, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   const handleSync = async () => {
     if (syncing) return;
@@ -831,15 +996,6 @@ export default function MessageList() {
 
   // In one account's view an expanded conversation also lists another account's copies (#476),
   // which the action left alone; a unified-inbox row stands for every copy.
-  const setCachedThreadRead = useCallback((message, read) => {
-    const tid = message.thread_id || message.id;
-    if (threadMessages[tid]) {
-      setThreadMessages(tid, threadMessages[tid].map(msg => (
-        isUnified || msg.account_id === message.account_id ? { ...msg, is_read: read } : msg
-      )));
-    }
-  }, [threadMessages, setThreadMessages, isUnified]);
-
   const setCachedThreadStarred = useCallback((message, starred) => {
     const tid = message.thread_id || message.id;
     if (threadMessages[tid]) {
@@ -850,127 +1006,209 @@ export default function MessageList() {
   }, [threadMessages, setThreadMessages, isUnified]);
 
   const setMessagesReadState = useCallback(async (message, read) => {
-    const isThreadRow = isThreadListRow(message);
-    const unreadCount = Number.parseInt(message.unread_count, 10);
-    // Use the row's own unread_count as the immediate estimate.
-    // For thread rows this is the aggregate already present on the row;
-    // for single messages it is always 1 (or 0 if already in the target state).
-    const estimatedDelta = isThreadRow && Number.isFinite(unreadCount) ? unreadCount : 1;
-
-    // Immediate optimistic update — do not wait for thread resolution.
-    // For unexpanded thread rows this avoids a visible delay caused by the
-    // api.getThread call inside resolveMessagesForThreadAction.
-    if (isThreadRow) {
-      updateMessage(message.id, { is_read: read, unread_count: read ? 0 : estimatedDelta });
-      // setCachedThreadRead intentionally deferred until after resolution so
-      // that actionMessages still reflects the pre-update sub-message states,
-      // letting us compute the exact delta for any needed correction.
-    } else {
-      updateMessage(message.id, { is_read: read, unread_count: read ? 0 : 1 });
-    }
-    if (read) {
-      if (estimatedDelta > 0) {
-        decrementUnread(message.account_id, estimatedDelta);
-        adjustCategoryCount(message.category, -estimatedDelta);
+    const generation = useStore.getState().countGeneration;
+    const current = () => useStore.getState().countGeneration === generation;
+    setReadIntentSession(generation);
+    const endIntent = beginCountIntent([message.account_id]);
+    // Server messageService returns the representative's own is_read. Locally
+    // aggregated rows retain it separately when their visual flag is recomputed.
+    const repWasRead = message.representative_is_read ?? message.is_read;
+    const repShare = Number(repWasRead !== read);
+    // Before thread resolution only this physical representative is known.
+    // The thread's visual unread aggregate is not a folder-membership witness.
+    const estimatedCountDelta = inboxReadMembers([message]).length ? repShare : 0;
+    const rowIntent = beginReadIntent({ ...message, is_read: repWasRead }, read);
+    // Handles belong to this action; account and category exclusion are independent.
+    const accountCharges = new Map();
+    let categoryCharge;
+    let categoryDelta = 0;
+    const replaceAccountDelta = (accountId, delta) => {
+      const charge = accountCharges.get(accountId);
+      const state = charge?.handle?.state() ?? 'none';
+      if (!current() || state === 'pruned') return;
+      if (state === 'live') {
+        if (charge.handle.replace(delta)) charge.delta = delta;
+      } else if (delta !== 0) {
+        const handle = delta < 0 ? decrementUnread(accountId, -delta) : incrementUnread(accountId, delta);
+        accountCharges.set(accountId, { handle, delta });
       }
-    } else {
-      if (estimatedDelta > 0) {
-        incrementUnread(message.account_id, estimatedDelta);
-        adjustCategoryCount(message.category, estimatedDelta);
+    };
+    const replaceCategoryDelta = delta => {
+      const state = categoryCharge?.state() ?? 'none';
+      if (!current() || state === 'pruned') return;
+      if (state === 'live') {
+        if (categoryCharge.replace(delta)) categoryDelta = delta;
+      } else if (delta !== 0) {
+        categoryCharge = adjustCategoryCount(message.category, delta);
+        categoryDelta = delta;
       }
-    }
-
-    // Resolve the individual sub-messages needed for the bulk API call.
-    // For unexpanded thread rows this fires api.getThread, but the UI has
-    // already updated above so the user sees no delay.
-    let actionMessages;
+    };
+    const direction = read ? -1 : 1;
+    cancelScheduledMarkReadFor(message.id);
     try {
-      actionMessages = await resolveMessagesForThreadAction(message);
-    } catch (err) {
-      console.error('Failed to load thread for read state change:', err.message);
-      // Revert the optimistic update
+      const isThreadRow = isThreadListRow(message);
+      const unreadCount = Number.parseInt(message.unread_count, 10);
+      // Use the row's own unread_count as the immediate estimate.
+      // For thread rows this is the aggregate already present on the row;
+      // for single messages it is always 1 (or 0 if already in the target state).
+      const estimatedDelta = isThreadRow && Number.isFinite(unreadCount)
+        ? (read ? unreadCount : Math.max(0, Number(message.message_count) - unreadCount))
+        : Number(message.is_read !== read);
+
+      // Immediate optimistic update — do not wait for thread resolution.
+      // For unexpanded thread rows this avoids a visible delay caused by the
+      // api.getThread call inside resolveMessagesForThreadAction.
       if (isThreadRow) {
-        updateMessage(message.id, { is_read: !read, unread_count: !read ? 0 : estimatedDelta });
+        updateMessage(message.id, { is_read: read, unread_count: read ? 0 : Number(message.message_count) || 1 });
+        // Thread cache updates are deferred until after resolution so
+        // that actionMessages still reflects the pre-update sub-message states,
+        // letting us compute the exact delta for any needed correction.
       } else {
-        updateMessage(message.id, { is_read: !read, unread_count: !read ? 0 : 1 });
+        updateMessage(message.id, { is_read: read, unread_count: read ? 0 : 1 });
       }
-      if (read && estimatedDelta > 0) { incrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, estimatedDelta); }
-      else if (!read && estimatedDelta > 0) { decrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, -estimatedDelta); }
-      return;
-    }
+      replaceAccountDelta(message.account_id, direction * estimatedCountDelta);
+      replaceCategoryDelta(direction * estimatedCountDelta);
 
-    // Compute exact delta from sub-message states (before mutating the cache).
-    const actualDelta = read
-      ? actionMessages.filter(msg => !msg.is_read).length
-      : actionMessages.filter(msg => msg.is_read).length;
-    // And its split by account. With conversations on, a thread row can hold another
-    // account's copy of the same email (#476); that copy's unread belongs to THAT account's
-    // badge, while the estimate above had to charge the whole row to the row's own account.
-    const actualByAccount = unreadDeltaByAccount(actionMessages, read, message.account_id);
-
-    // Now update the thread cache and correct the parent row if our estimate was off.
-    if (isThreadRow) {
-      setCachedThreadRead(message, read);
-      if (actualDelta !== estimatedDelta) {
-        updateMessage(message.id, { is_read: read, unread_count: read ? 0 : actionMessages.length });
+      // Resolve the individual sub-messages needed for the bulk API call.
+      // For unexpanded thread rows this fires api.getThread, but the UI has
+      // already updated above so the user sees no delay.
+      let actionMessages;
+      try {
+        actionMessages = await resolveMessagesForThreadAction(message);
+        if (!current()) return;
+      } catch (err) {
+        if (!current()) return;
+        console.error('Failed to load thread for read state change:', err.message);
+        addNotification({ type: 'error', title: t('common.error', { message: err.message }) });
+        // A successor on r was charged against our provisional representative
+        // flag. Keep that share and its historical intent; release the rest.
+        const repSuperseded = !isCurrentReadIntent(rowIntent);
+        if (!repSuperseded && completeReadIntent(rowIntent, { notApplied: true })) {
+          updateMessage(message.id, { is_read: message.is_read, representative_is_read: repWasRead, unread_count: message.unread_count ?? Number(!repWasRead) });
+        }
+        const retained = repSuperseded ? Math.min(repShare, estimatedCountDelta) : 0;
+        replaceAccountDelta(message.account_id, direction * retained);
+        replaceCategoryDelta(direction * retained);
+        return;
       }
-    }
 
-    // Correct the sidebar badges per account: each account's actual change, minus what the
-    // estimate already charged to it (all of it went to the row's own account, none elsewhere).
-    for (const accountId of new Set([message.account_id, ...actualByAccount.keys()])) {
-      const diff = (actualByAccount.get(accountId) || 0) - (accountId === message.account_id ? estimatedDelta : 0);
-      if (diff === 0) continue;
-      if (read) {
-        if (diff > 0) decrementUnread(accountId, diff);
-        else incrementUnread(accountId, -diff);
-      } else {
-        if (diff > 0) incrementUnread(accountId, diff);
-        else decrementUnread(accountId, -diff);
-      }
-    }
-    // Category counts are not per account, so the total delta still applies.
-    if (actualDelta !== estimatedDelta) {
-      const diff = actualDelta - estimatedDelta;
-      adjustCategoryCount(message.category, read ? -diff : diff);
-    }
+      // Resolution can reveal other target accounts even when no count origin
+      // exists. Keep their category observation within this same held lifetime.
+      endIntent.addAccounts([...new Set(actionMessages.map(msg => msg.account_id))]);
 
-    if (read) {
-      actionMessages.forEach(msg => setPending(msg.id, msg.account_id));
-    } else {
-      actionMessages.forEach(msg => {
-        pendingMarkReadMap.delete(msg.id);
-        completedMarkReadMap.delete(msg.id);
+      // Count from other actions' local intent, excluding this action's own
+      // optimistic row. Capture before enrollment replaces the previous members.
+      const countBase = reconcileReadState(actionMessages, undefined, { except: rowIntent.order });
+      const memberIntents = actionMessages.map(msg => msg.id === message.id && msg.account_id === message.account_id
+        ? rowIntent : beginReadIntent(msg, read, rowIntent.order));
+      actionMessages.forEach(msg => cancelScheduledMarkReadFor(msg.id));
+      const rowCurrent = () => reconcileReadState([{ ...message, is_read: read }])[0].is_read === read;
+      // Release superseded members except r: its successor saw our optimistic
+      // flag and was charged relative to it. Later supersession keeps our charge.
+      const countedMembers = countBase.flatMap((msg, i) => {
+        const representative = msg.id === message.id && msg.account_id === message.account_id;
+        if (representative && !isCurrentReadIntent(rowIntent)) return [{ ...msg, is_read: repWasRead }];
+        return isCurrentReadIntent(memberIntents[i]) ? [msg] : [];
       });
-    }
+      // A resolver can narrow scope and omit r. Its already-consumed provisional
+      // share still belongs to this action, but must not add a dispatch target.
+      if (!isCurrentReadIntent(rowIntent) && !actionMessages.some(msg => msg.id === message.id && msg.account_id === message.account_id)) {
+        countedMembers.push({ ...message, is_read: repWasRead });
+      }
+      const actualDelta = read
+        ? countedMembers.filter(msg => !msg.is_read).length
+        : countedMembers.filter(msg => msg.is_read).length;
+      // And its split by account. With conversations on, a thread row can hold another
+      // account's copy of the same email (#476); that copy's unread belongs to THAT account's
+      // badge, while the estimate above had to charge the whole row to the row's own account.
+      const inboxMembers = inboxReadMembers(countedMembers);
+      const actualCountDelta = inboxMembers.filter(msg => msg.is_read !== read).length;
+      const actualByAccount = unreadDeltaByAccount(inboxMembers, read, message.account_id);
 
-    try {
-      await api.bulkRead(actionMessages.map(msg => msg.id), read);
+      // Now update the thread cache and correct the parent row if our estimate was off.
+      if (isThreadRow) {
+        const tid = message.thread_id || message.id;
+        const cached = useStore.getState().threadMessages[tid];
+        if (cached) setThreadMessages(tid, reconcileReadState(cached));
+        if (rowCurrent() && actualDelta !== estimatedDelta) {
+          updateMessage(message.id, { is_read: read, unread_count: read ? 0 : actionMessages.length });
+        }
+      }
+
+      // Replace this action's signed charge, preserving its original identity/scope.
+      // A pruned origin never revives; a NONE origin can create its first fresh delta.
+      for (const accountId of new Set([message.account_id, ...actualByAccount.keys()])) {
+        replaceAccountDelta(accountId, direction * (actualByAccount.get(accountId) || 0));
+      }
+      replaceCategoryDelta(direction * actualCountDelta);
+
       if (read) {
-        actionMessages.forEach(msg => {
+        actionMessages.forEach((msg, i) => { if (isCurrentReadIntent(memberIntents[i])) setPending(msg.id, msg.account_id); });
+      } else {
+        actionMessages.forEach((msg, i) => {
+          if (!isCurrentReadIntent(memberIntents[i])) return;
           pendingMarkReadMap.delete(msg.id);
-          completedMarkReadMap.set(msg.id, msg.account_id);
-          setTimeout(() => completedMarkReadMap.delete(msg.id), 10000);
+          completedMarkReadMap.delete(msg.id);
         });
       }
-    } catch (err) {
-      console.error('markRead failed:', err);
-      if (isThreadRow) {
-        updateMessage(message.id, { is_read: !read, unread_count: read ? actualDelta : 0 });
-        setCachedThreadRead(message, !read);
-      } else {
-        updateMessage(message.id, { is_read: !read, unread_count: read ? 1 : 0 });
+
+      let dispatched = [];
+      try {
+        await queueReadWrite(memberIntents.filter(isCurrentReadIntent), async () => {
+          // A later member intent may already be queued or dispatched while the
+          // thread GET was pending. Never send this older bulk state over it.
+          const active = memberIntents.filter(isCurrentReadIntent);
+          dispatched = active;
+          if (active.length) await api.bulkRead(active.map(intent => JSON.parse(intent.key)[1]), read);
+          if (!current()) return;
+          active.forEach(intent => {
+            if (completeReadIntent(intent)) pendingMarkReadMap.delete(JSON.parse(intent.key)[1]);
+          });
+        });
+        if (!current()) return;
+        if (!memberIntents.includes(rowIntent)) completeReadIntent(rowIntent);
+      } catch (err) {
+        if (!current()) return;
+        console.error('markRead failed:', err);
+        addNotification({ type: 'error', title: t('common.error', { message: err.message }) });
+        if (!memberIntents.includes(rowIntent)) completeReadIntent(rowIntent, err);
+        const rollback = [];
+        memberIntents.forEach((intent, index) => {
+          if (!dispatched.includes(intent) || !completeReadIntent(intent, err)) return;
+          pendingMarkReadMap.delete(actionMessages[index].id);
+          if (intent.read !== read) rollback.push({ ...actionMessages[index], is_read: intent.read });
+        });
+        // Only latest, known-not-applied member outcomes may change the row/counts.
+        // Uncertain writes retain their intent until an issued-after-completion read.
+        if (rollback.length === 0) return;
+        for (const msg of rollback) updateMessage(msg.id, { is_read: msg.is_read });
+        const tid = message.thread_id || message.id;
+        const restored = reconcileReadState(actionMessages);
+        const cached = useStore.getState().threadMessages[tid];
+        if (cached) setThreadMessages(tid, reconcileReadState(cached));
+        if (isThreadRow && rowIntent.settled !== null) {
+          const unread = restored.filter(msg => !msg.is_read).length;
+          updateMessage(message.id, { is_read: unread === 0, unread_count: unread });
+        }
+        const inboxRollback = inboxReadMembers(rollback);
+        const rollbackByAccount = unreadDeltaByAccount(inboxRollback, read, message.account_id);
+        for (const [accountId, n] of rollbackByAccount) {
+          const charge = accountCharges.get(accountId);
+          // Refusal restores only a charge this action actually created.
+          if (charge?.handle?.state() === 'live') {
+            replaceAccountDelta(accountId, charge.delta - direction * n);
+          }
+        }
+        if (categoryCharge?.state() === 'live') {
+          replaceCategoryDelta(categoryDelta - direction * inboxRollback.length);
+        }
       }
-      // Give each account back exactly what it was charged.
-      for (const [accountId, n] of actualByAccount) {
-        if (read) incrementUnread(accountId, n); else decrementUnread(accountId, n);
-      }
-      if (actualDelta > 0) adjustCategoryCount(message.category, read ? actualDelta : -actualDelta);
-      if (read) actionMessages.forEach(msg => pendingMarkReadMap.delete(msg.id));
+    } finally {
+      endIntent();
     }
   }, [
-    resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadRead,
-    decrementUnread, incrementUnread, adjustCategoryCount,
+    resolveMessagesForThreadAction, isThreadListRow, updateMessage,
+    decrementUnread, incrementUnread, adjustCategoryCount, addNotification, t, setThreadMessages,
   ]);
 
   const handleMarkRead = (e, message) => {
@@ -1012,6 +1250,8 @@ export default function MessageList() {
     const key = isThreadRow ? `thread:${tid}` : message.id;
     if (pendingDeleteTimers.current.has(key)) return;
 
+    const generation = useStore.getState().countGeneration;
+    const current = () => generation === useStore.getState().countGeneration && !useStore.getState().isLocked;
     let deleteMessages = [message];
     try {
       // Drafts and the rest of a conversation are never deleted together (keepDraftsApart).
@@ -1022,6 +1262,8 @@ export default function MessageList() {
       return;
     }
 
+    if (!current()) return;
+    const endIntent = beginCountIntent();
     const ids = [...new Set(deleteMessages.map(msg => msg.id).filter(Boolean))];
     const visibleMessage = message;
     ids.forEach((id) => setPendingDelete(id));
@@ -1036,21 +1278,23 @@ export default function MessageList() {
     const unreadDelta = Number.isFinite(unreadCount)
       ? unreadCount
       : deleteMessages.filter(msg => !msg.is_read).length;
-    if (unreadDelta > 0) decrementUnread(message.account_id, unreadDelta);
+    const countOrigin = unreadDelta > 0 ? decrementUnread(message.account_id, unreadDelta) : null;
 
     const timer = setTimeout(async () => {
       pendingDeleteTimers.current.delete(key);
       try {
+        if (!current()) return;
         if (ids.length > 1) {
           const result = await api.bulkDelete(ids);
+          if (!current()) return;
           const deletedSet = new Set(result.deleted ?? []);
-          ids.forEach(id => (deletedSet.has(id) ? setCompletedDelete(id) : clearDeleteGuard(id)));
-          const failedIds = ids.filter(id => !deletedSet.has(id));
+          ids.forEach(id => { if (deletedSet.has(id)) setCompletedDelete(id); else if (!result.unconfirmed?.includes(id)) clearDeleteGuard(id); });
+          const failedIds = ids.filter(id => !deletedSet.has(id) && !result.unconfirmed?.includes(id));
           if (failedIds.length > 0) {
             const idToMsg = new Map(deleteMessages.map(m => [m.id, m]));
             const failedUnreadDelta = failedIds.filter(id => idToMsg.has(id) && !idToMsg.get(id).is_read).length;
             useStore.getState().restoreMessages([visibleMessage]);
-            if (failedUnreadDelta > 0) incrementUnread(message.account_id, failedUnreadDelta);
+            if (failedUnreadDelta > 0) countOrigin?.replace(-Math.max(0, unreadDelta - failedUnreadDelta));
             addNotification({
               type: 'error',
               title: t('messageList.bulkDeleted.failTitle'),
@@ -1058,21 +1302,24 @@ export default function MessageList() {
             });
           }
         } else {
-          await api.deleteMessage(ids[0] || visibleMessage.id);
-          ids.forEach((id) => setCompletedDelete(id));
+          const result = await api.deleteMessage(ids[0] || visibleMessage.id);
+          if (current()) ids.filter(id => !result?.unconfirmed?.includes(id)).forEach(id => setCompletedDelete(id));
         }
-      } catch {
-        ids.forEach((id) => clearDeleteGuard(id));
-        useStore.getState().restoreMessages([visibleMessage]);
-        if (unreadDelta > 0) incrementUnread(message.account_id, unreadDelta);
+      } catch (err) {
+        if (!current()) return;
+        if (err.notApplied === true) {
+          ids.forEach((id) => clearDeleteGuard(id));
+          useStore.getState().restoreMessages([visibleMessage]);
+          countOrigin?.revert();
+        }
         addNotification({
           type: 'error',
           title: ids.length > 1 ? t('messageList.bulkDeleted.failTitle') : t('messageList.deleted.failTitle'),
           body: ids.length > 1 ? t('messageList.bulkDeleted.failBody', { count: ids.length }) : t('messageList.deleted.failBody'),
         });
-      }
+      } finally { endIntent(); }
     }, 4500);
-    pendingDeleteTimers.current.set(key, { timer, message: visibleMessage, ids });
+    pendingDeleteTimers.current.set(key, { timer, message: visibleMessage, ids, generation, endIntent });
     addNotification({
       title: ids.length > 1 ? t('messageList.bulkDeleted.title', { count: ids.length }) : t('messageList.deleted.title'),
       body: ids.length > 1 ? t('messageList.bulkDeleted.body') : t('messageList.deleted.body'),
@@ -1081,14 +1328,16 @@ export default function MessageList() {
         if (!pending) return;
         clearTimeout(pending.timer);
         pendingDeleteTimers.current.delete(key);
+        if (!current()) { endIntent(); return; }
         ids.forEach((id) => clearPendingDelete(id));
         useStore.getState().restoreMessages([visibleMessage]);
-        if (unreadDelta > 0) incrementUnread(message.account_id, unreadDelta);
+        countOrigin?.revert();
+        endIntent();
       },
     });
   }, [
     isThreadListRow, expandedThreadId, resolveMessagesForThreadAction,
-    removeMessage, setExpandedThreadId, decrementUnread, incrementUnread,
+    removeMessage, setExpandedThreadId, decrementUnread,
     addNotification, t,
   ]);
 
@@ -1108,6 +1357,8 @@ export default function MessageList() {
 
   const performSpamLabel = useCallback(async (messages, label) => {
     if (!messages.length) return;
+    const generation = useStore.getState().countGeneration, endIntent = beginCountIntent();
+    const current = () => generation === useStore.getState().countGeneration && !useStore.getState().isLocked;
     const ids = messages.map(m => m.id);
     const isBulk = ids.length > 1;
 
@@ -1115,7 +1366,7 @@ export default function MessageList() {
     const unreadCount = messages.reduce((sum, m) => sum + (m.is_read ? 0 : 1), 0);
     const accountId = messages[0].account_id;
     messages.forEach(m => removeMessage(m.id));
-    if (unreadCount > 0) decrementUnread(accountId, unreadCount);
+    const countOrigin = unreadCount > 0 ? decrementUnread(accountId, unreadCount) : null;
 
     // Sidebar folder badges are not adjusted here. They render the counts the IMAP server
     // reported for each folder, so a local guess would be overwritten by the next observation
@@ -1126,47 +1377,55 @@ export default function MessageList() {
     const timers = new Map();
     let settled = false;
     const undo = () => {
+      if (settled) return;
       settled = true;
       timers.forEach(timer => clearTimeout(timer));
       timers.clear();
+      if (!current()) { endIntent(); return; }
       // Restore the messages in their original position (re-sort by date).
       useStore.getState().restoreMessages(messages);
-      if (unreadCount > 0) incrementUnread(accountId, unreadCount);
+      countOrigin?.revert();
+      endIntent();
     };
 
     const performCall = (id) => {
       const fn = label === 'spam' ? api.markSpam : api.markHam;
-      return fn(id).catch(err => ({ __failed: true, id, message: err.message }));
+      return fn(id);
     };
 
     timers.set('__call__', setTimeout(async () => {
       if (settled) return;
+      settled = true;
       timers.delete('__call__');
-      const results = await Promise.allSettled(ids.map(performCall));
-      const failed = [];
-      results.forEach((r, i) => {
-        if (r.status === 'rejected' || r.value?.__failed) failed.push(ids[i]);
-      });
-      if (failed.length) {
-        const failedMsgs = messages.filter(m => failed.includes(m.id));
-        useStore.getState().restoreMessages(failedMsgs);
-        const failedUnread = failedMsgs.reduce((sum, m) => sum + (m.is_read ? 0 : 1), 0);
-        if (failedUnread > 0) incrementUnread(accountId, failedUnread);
-        const titleKey = label === 'spam' ? 'spam.failTitle' : 'spam.failHamTitle';
-        const bodyKey = label === 'spam' ? 'spam.failBody' : 'spam.failHamBody';
-        addNotification({
-          type: 'error',
-          title: t(titleKey),
-          body: isBulk ? t('spam.failBodyBulk', { count: failed.length }) : t(bodyKey),
+      try {
+        if (!current()) return;
+        const results = await Promise.allSettled(ids.map(performCall));
+        if (!current()) return;
+        const failed = [], known = [];
+        results.forEach((r, i) => {
+          if (r.status === 'rejected') { failed.push(ids[i]); if (r.reason?.notApplied === true) known.push(ids[i]); }
         });
-      }
-      // Safety net: after the IMAP move actually completes (or partially
-      // fails), reconcile sidebar counts and folder badges with the server.
-      // Even if our optimistic math was right, edge cases like the user
-      // moving messages between two folders that share a parent, or a
-      // concurrent IMAP IDLE update, can desync the local counters.
-      api.getUnreadCounts().then(c => useStore.getState().setUnreadCounts(c)).catch(() => {});
-      api.getFolders(accountId).then(f => useStore.getState().setFolders(accountId, f)).catch(() => {});
+        if (failed.length) {
+          const failedMsgs = messages.filter(m => known.includes(m.id));
+          useStore.getState().restoreMessages(failedMsgs);
+          const failedUnread = failedMsgs.reduce((sum, m) => sum + (m.is_read ? 0 : 1), 0);
+          if (failedUnread > 0) countOrigin?.replace(-Math.max(0, unreadCount - failedUnread));
+          const titleKey = label === 'spam' ? 'spam.failTitle' : 'spam.failHamTitle';
+          const bodyKey = label === 'spam' ? 'spam.failBody' : 'spam.failHamBody';
+          addNotification({
+            type: 'error',
+            title: t(titleKey),
+            body: isBulk ? t('spam.failBodyBulk', { count: failed.length }) : t(bodyKey),
+          });
+        }
+        // Safety net: after the IMAP move actually completes (or partially
+        // fails), reconcile sidebar counts and folder badges with the server.
+        // Even if our optimistic math was right, edge cases like the user
+        // moving messages between two folders that share a parent, or a
+        // concurrent IMAP IDLE update, can desync the local counters.
+        api.getUnreadCounts().then(c => { if (current()) useStore.getState().setUnreadCounts(c, generation); }).catch(() => {});
+        api.getFolders(accountId).then(f => { if (current()) useStore.getState().setFolders(accountId, f, generation); }).catch(() => {});
+      } finally { endIntent(); }
     }, 4500));
 
     addNotification({
@@ -1176,7 +1435,7 @@ export default function MessageList() {
       body: messages[0].subject || t('common.noSubject'),
       onUndo: undo,
     });
-  }, [removeMessage, decrementUnread, incrementUnread, addNotification, t]);
+  }, [removeMessage, decrementUnread, addNotification, t]);
 
   // On page unload (refresh/close), fire pending deletes with keepalive:true so the
   // browser completes the request even after the page tears down. Clears the map so
@@ -1216,8 +1475,9 @@ export default function MessageList() {
   // cancelling the timer would silently leave it on the server.
   // (Page refresh is handled by the beforeunload listener above which clears the map first.)
   useEffect(() => () => {
-    pendingDeleteTimers.current.forEach(({ timer, message, ids }) => {
+    pendingDeleteTimers.current.forEach(({ timer, message, ids, generation, endIntent }) => {
       clearTimeout(timer);
+      if (generation !== useStore.getState().countGeneration) { endIntent?.(); return; }
       const deleteIds = ids?.length ? ids : [message.id];
       const deletePromise =
         deleteIds.length > 1
@@ -1225,11 +1485,14 @@ export default function MessageList() {
           : api.deleteMessage(deleteIds[0]);
       deletePromise
         .then(result => {
+          if (generation !== useStore.getState().countGeneration) return;
           const actuallyDeleted = new Set(result?.deleted ?? deleteIds);
           deleteIds.forEach(id => (actuallyDeleted.has(id) ? setCompletedDelete(id) : clearDeleteGuard(id)));
         })
-        .catch(() => { deleteIds.forEach((id) => clearDeleteGuard(id)); });
+        .catch(error => { if (generation === useStore.getState().countGeneration && error.notApplied === true) deleteIds.forEach(id => clearDeleteGuard(id)); })
+        .finally(() => endIntent?.());
     });
+    pendingDeleteTimers.current.clear();
   }, []);
 
   const handleDelete = (e, message) => {
@@ -1251,7 +1514,7 @@ export default function MessageList() {
 
   const handleSwipeArchive = useCallback(async (message) => {
     const archiveMessage = archiveVisibleMessageRef.current;
-    if (!archiveMessage) return;
+    if (!archiveMessage || !applyDeleteGuard([message]).length) return;
     const threadRow = isThreadListRow(message);
     const threadId = message.thread_id || message.id;
     const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
@@ -1262,25 +1525,22 @@ export default function MessageList() {
     const viewKey = archiveViewKeyRef.current;
 
     refreshRequestRef.current.invalidate();
-    guards.forEach(setPendingDelete);
     advanceSelectionAfterRemoval(message.id);
     removeMessage(message.id);
     if (threadRow && expandedThreadId === threadId) setExpandedThreadId(null);
-    const aggregateUnread = Number.parseInt(message.unread_count, 10);
-    const optimisticUnread = threadRow && Number.isFinite(aggregateUnread)
-      ? aggregateUnread
-      : (message.is_read ? 0 : 1);
-    if (optimisticUnread > 0) decrementUnread(message.account_id, optimisticUnread);
+    const opId = crypto.randomUUID();
+    const generation = useStore.getState().beginArchiveCount(opId, [archiveEstimate(message, threadRow)], Date.now() + UNDO_COMMIT_DELAY_MS);
+    guards.forEach(id => setPendingDelete(id, { archive: true, generation, group: opId }));
     const archiveAction = createUndoableCommit({
       delayMs: UNDO_COMMIT_DELAY_MS,
       commit: async () => {
-        guards.forEach(clearDeleteGuard);
-        await archiveMessage(message, { alreadyRemoved: true, viewKey });
+        await archiveMessage(message, { alreadyRemoved: true, viewKey, opId, generation });
       },
       undo: () => {
+        if (generation !== useStore.getState().countGeneration) return;
         guards.forEach(clearDeleteGuard);
         restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, [message]);
-        if (optimisticUnread > 0) incrementUnread(message.account_id, optimisticUnread);
+        useStore.getState().cancelArchiveCount(opId, generation);
       },
     });
     addNotification({
@@ -1290,7 +1550,7 @@ export default function MessageList() {
     });
   }, [
     isThreadListRow, selectedAccountId, selectedFolder, expandedThreadId,
-    removeMessage, setExpandedThreadId, decrementUnread, incrementUnread,
+    removeMessage, setExpandedThreadId,
     addNotification, t,
   ]);
 
@@ -1299,54 +1559,9 @@ export default function MessageList() {
   }, [setMessagesStarredState]);
 
   const handleSwipeReply = useCallback((message, replyAll = false) => {
-    const replyToArr = Array.isArray(message.reply_to)
-      ? message.reply_to
-      : (() => { try { return JSON.parse(message.reply_to || '[]'); } catch { return []; } })();
-    const replyTarget = (replyToArr.length && replyToArr[0].email)
-      ? replyToArr[0]
-      : { name: message.from_name || '', email: message.from_email || '' };
-    const sender = replyTarget.email ? [replyTarget] : [];
-
     const myAccount = accounts.find(a => a.id === message.account_id);
-    const myEmail = myAccount?.email_address || '';
-    const myAddresses = new Set([
-      myEmail.toLowerCase(),
-      ...(myAccount?.aliases || []).map(al => al.email.toLowerCase()),
-    ]);
-
-    const replyAliasId = (() => {
-      const aliases = myAccount?.aliases || [];
-      if (!aliases.length) return null;
-      try {
-        const toArr = Array.isArray(message.to_addresses)
-          ? message.to_addresses
-          : JSON.parse(message.to_addresses || '[]');
-        const ccArr = Array.isArray(message.cc_addresses)
-          ? message.cc_addresses
-          : JSON.parse(message.cc_addresses || '[]');
-        const allEmails = [...toArr, ...ccArr].map(t => t.email?.toLowerCase()).filter(Boolean);
-        const fromEmail = (message.from_email || '').toLowerCase();
-        const match = aliases.find(al => {
-          const aliasEmail = al.email.toLowerCase();
-          return allEmails.includes(aliasEmail) || fromEmail === aliasEmail;
-        });
-        return match ? match.id : null;
-      } catch { return null; }
-    })();
-
-    const allRecipients = (() => {
-      try {
-        const toArr = Array.isArray(message.to_addresses)
-          ? message.to_addresses
-          : JSON.parse(message.to_addresses || '[]');
-        const ccArr = Array.isArray(message.cc_addresses)
-          ? message.cc_addresses
-          : JSON.parse(message.cc_addresses || '[]');
-        return [...toArr, ...ccArr].filter(
-          t => t.email && !myAddresses.has(t.email.toLowerCase()) && t.email !== replyTarget.email
-        );
-      } catch { return []; }
-    })();
+    const { to: sender, allRecipients } = resolveReplyRecipients(message, myAccount);
+    const replyAliasId = pickMessageReplyAlias(message, myAccount);
 
     const referencesChain = [message.in_reply_to, message.message_id]
       .filter(Boolean).join(' ').trim() || null;
@@ -1366,6 +1581,7 @@ export default function MessageList() {
       isReplyAll: replyAll,
       originalFrom: sender,
       allRecipients,
+      threadId: Object.hasOwn(message, 'reply_thread_id') ? message.reply_thread_id : message.thread_id,
     });
   }, [accounts, openCompose]);
   
@@ -1416,6 +1632,20 @@ export default function MessageList() {
 
   // Derived from store — must be declared before callbacks that use it in dependency arrays
   const displayMessages = searchQuery.trim() ? searchResults : messages;
+  const emptyInboxState = useStore.getState();
+  const emptyInboxNow = Date.now();
+  const keepEmptyInbox = !normalListRetry && shouldKeepEmptyInbox({
+    loadingMessages,
+    messagesOffset: emptyInboxState.messagesOffset,
+    currentPage,
+    selectedFolder,
+    searchQuery,
+    showGtdTab,
+    accountSnapshots: accounts
+      .filter(account => account.enabled && (isUnified
+        ? isAccountInUnifiedInbox(account) : account.id === selectedAccountId))
+      .map(account => selectAuthoritativeInboxSnapshot(emptyInboxState, account.id, emptyInboxNow)),
+  });
 
   // Folder search results — shown at the top when searching with a plain query
   // (no special operator prefixes like from:, to:, subject:, has:, is:)
@@ -1517,6 +1747,8 @@ export default function MessageList() {
   }, [displayMessages]);
 
   const handleBulkDelete = useCallback(async (ids, msgs) => {
+    const generation = useStore.getState().countGeneration;
+    const current = () => generation === useStore.getState().countGeneration && !useStore.getState().isLocked;
     const key = `bulk:${ids[0]}`;
     // Selected thread rows delete the whole conversation, matching the
     // single-row delete path — without this only each thread's visible
@@ -1528,6 +1760,8 @@ export default function MessageList() {
     } catch (err) {
       console.error('Failed to load thread for bulk delete:', err.message);
     }
+    if (!current()) return;
+    const endIntent = beginCountIntent();
     const searchOffsetBeforeRemoval = searchFetchedOffsetRef.current;
     const shouldPrefetchSearch = Boolean(useStore.getState().searchQuery.trim() && searchHasMore);
     deleteIds.forEach(id => setPendingDelete(id));
@@ -1535,10 +1769,10 @@ export default function MessageList() {
     if (shouldPrefetchSearch) {
       prefetchSearchAfterRemoval(searchOffsetBeforeRemoval);
     }
-    msgs.forEach(msg => {
+    const countOrigins = new Map(msgs.map(msg => {
       const delta = parseInt(msg.unread_count) || (msg.is_read ? 0 : 1);
-      if (delta > 0) decrementUnread(msg.account_id, delta);
-    });
+      return [msg.id, delta > 0 ? decrementUnread(msg.account_id, delta) : null];
+    }));
     setSelectedIds(new Set());
     setSelectionModeActive(false);
     setShowFolderPicker(false);
@@ -1546,55 +1780,61 @@ export default function MessageList() {
     const timer = setTimeout(async () => {
       pendingDeleteTimers.current.delete(key);
       if (undone) return;
-      const chunks = [];
-      for (let i = 0; i < deleteIds.length; i += 500) chunks.push(deleteIds.slice(i, i + 500));
-      const results = await Promise.allSettled(chunks.map(chunk => api.bulkDelete(chunk)));
-      results
-        .filter(r => r.status === 'rejected')
-        .forEach(r => console.error('Bulk delete failed:', r.reason?.message));
-      const deleted = results
-        .filter(r => r.status === 'fulfilled')
-        .flatMap(r => r.value.deleted ?? []);
-      const deletedSet = new Set(deleted);
-      deleteIds.forEach(id => (deletedSet.has(id) ? setCompletedDelete(id) : clearDeleteGuard(id)));
-      const failedIds = deleteIds.filter(id => !deletedSet.has(id));
-      if (failedIds.length > 0) {
-        const failedSet = new Set(failedIds);
-        const failedMsgs = msgs.filter(msg => failedSet.has(msg.id));
-        useStore.getState().restoreMessages(failedMsgs);
-        failedMsgs.forEach(msg => {
-          const delta = parseInt(msg.unread_count) || (msg.is_read ? 0 : 1);
-          if (delta > 0) incrementUnread(msg.account_id, delta);
-        });
-        addNotification({ type: 'error', title: t('messageList.bulkDeleted.failTitle'), body: t('messageList.bulkDeleted.failBody', { count: failedIds.length }) });
-      }
-      if (useStore.getState().searchQuery.trim()) {
-        setSearchReloadToken(token => token + 1);
-      }
+      undone = true;
+      try {
+        if (!current()) return;
+        const chunks = [];
+        for (let i = 0; i < deleteIds.length; i += 500) chunks.push(deleteIds.slice(i, i + 500));
+        const results = await Promise.allSettled(chunks.map(chunk => api.bulkDelete(chunk)));
+        if (!current()) return;
+        results
+          .filter(r => r.status === 'rejected')
+          .forEach(r => console.error('Bulk delete failed:', r.reason?.message));
+        const deleted = results
+          .filter(r => r.status === 'fulfilled')
+          .flatMap(r => r.value.deleted ?? []);
+        const deletedSet = new Set(deleted);
+        const knownFailed = new Set(results.flatMap((r, i) => r.status === 'fulfilled'
+          ? chunks[i].filter(id => !(r.value.deleted || []).includes(id) && !r.value.unconfirmed?.includes(id)) : r.reason?.notApplied === true ? chunks[i] : []));
+        deleteIds.forEach(id => { if (deletedSet.has(id)) setCompletedDelete(id); else if (knownFailed.has(id)) clearDeleteGuard(id); });
+        const failedIds = deleteIds.filter(id => !deletedSet.has(id));
+        if (failedIds.length > 0) {
+          const failedSet = new Set(failedIds);
+          const failedMsgs = msgs.filter(msg => failedSet.has(msg.id) && knownFailed.has(msg.id));
+          useStore.getState().restoreMessages(failedMsgs);
+          failedMsgs.forEach(msg => countOrigins.get(msg.id)?.revert());
+          addNotification({ type: 'error', title: t('messageList.bulkDeleted.failTitle'), body: t('messageList.bulkDeleted.failBody', { count: failedIds.length }) });
+        }
+        if (useStore.getState().searchQuery.trim()) {
+          setSearchReloadToken(token => token + 1);
+        }
+      } finally { endIntent(); }
     }, 4500);
-    pendingDeleteTimers.current.set(key, { timer, message: msgs[0], ids: deleteIds });
+    pendingDeleteTimers.current.set(key, { timer, message: msgs[0], ids: deleteIds, generation, endIntent });
     addNotification({
       title: t('messageList.bulkDeleted.title', { count: deleteIds.length }),
       body: t('messageList.bulkDeleted.body'),
       onUndo: () => {
+        if (undone) return;
         undone = true;
         clearTimeout(timer);
+        if (!current()) { endIntent(); return; }
         pendingDeleteTimers.current.delete(key);
         deleteIds.forEach(id => clearPendingDelete(id));
         useStore.getState().restoreMessages(msgs);
-        msgs.forEach(msg => {
-          const delta = parseInt(msg.unread_count) || (msg.is_read ? 0 : 1);
-          if (delta > 0) incrementUnread(msg.account_id, delta);
-        });
+        msgs.forEach(msg => countOrigins.get(msg.id)?.revert());
+        endIntent();
       },
     });
-  }, [searchHasMore, removeMessage, prefetchSearchAfterRemoval, resolveMessagesForThreadAction, decrementUnread, incrementUnread, addNotification, t]);
+  }, [searchHasMore, removeMessage, prefetchSearchAfterRemoval, resolveMessagesForThreadAction, decrementUnread, addNotification, t]);
 
   const handleBulkMove = useCallback(async (ids, msgs, folder) => {
     // Selected thread rows move the whole conversation. A folder path is
     // account-specific, so scope each thread's expansion to its row's own
     // account — the server would just skip (and previously silently drop)
     // another account's copies from a folder that doesn't exist there.
+    const generation = useStore.getState().countGeneration;
+    const current = () => generation === useStore.getState().countGeneration && !useStore.getState().isLocked;
     let moveIds = ids;
     try {
       const resolved = await Promise.all(msgs.map(async (m) => {
@@ -1605,42 +1845,55 @@ export default function MessageList() {
     } catch (err) {
       console.error('Failed to load thread for bulk move:', err.message);
     }
+    if (!current()) return;
+    const endIntent = beginCountIntent();
     ids.forEach(id => removeMessage(id));
-    msgs.forEach(msg => { if (!msg.is_read) decrementUnread(msg.account_id); });
+    const countOrigins = new Map(msgs.map(msg => [msg.id, !msg.is_read ? decrementUnread(msg.account_id) : null]));
     setSelectedIds(new Set());
     setSelectionModeActive(false);
     setShowFolderPicker(false);
     let undone = false;
     const timer = setTimeout(async () => {
       if (undone) return;
+      undone = true;
       try {
+        if (!current()) return;
         const result = await api.bulkMove(moveIds, folder);
+        if (!current()) return;
         const movedSet = new Set(result.moved ?? []);
         const failedCount = moveIds.filter(id => !movedSet.has(id)).length;
         if (failedCount > 0) {
-          const failedMsgs = msgs.filter(msg => !movedSet.has(msg.id));
+          const failedMsgs = msgs.filter(msg => !movedSet.has(msg.id) && !result.unconfirmed?.includes(msg.id));
           if (failedMsgs.length > 0) useStore.getState().restoreMessages(failedMsgs);
+          failedMsgs.forEach(msg => countOrigins.get(msg.id)?.revert());
           addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
         } else if (msgs[0]?.account_id) {
           useStore.getState().recordRecentFolder({ accountId: msgs[0].account_id, path: folder });
         }
       } catch (err) {
         console.error('Bulk move failed:', err);
-        useStore.getState().restoreMessages(msgs);
+        if (!current()) return;
+        if (err.notApplied === true) {
+          useStore.getState().restoreMessages(msgs);
+          msgs.forEach(msg => countOrigins.get(msg.id)?.revert());
+        }
         addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: moveIds.length }) });
-      }
+      } finally { endIntent(); }
     }, 4500);
     addNotification({
       title: t('messageList.bulkMoved.title', { count: moveIds.length }),
       body: folder,
       onUndo: () => {
+        if (undone) return;
         undone = true;
         clearTimeout(timer);
+        if (!current()) { endIntent(); return; }
         useStore.getState().restoreMessages(msgs);
-        msgs.forEach(msg => { if (!msg.is_read) incrementUnread(msg.account_id); });
+        msgs.forEach(msg => countOrigins.get(msg.id)?.revert());
+        endIntent();
       },
     });
-  }, [removeMessage, decrementUnread, incrementUnread, resolveMessagesForThreadAction, addNotification, t]);
+  }, [removeMessage, decrementUnread, resolveMessagesForThreadAction, addNotification, t]);
 
   const handleRowMove = useCallback((e, msg) => {
     e.stopPropagation();
@@ -1669,6 +1922,11 @@ export default function MessageList() {
   }, []);
 
   const handleBulkArchive = useCallback((ids, msgs) => {
+    msgs = applyDeleteGuard(msgs);
+    if (!msgs.length) return;
+    ids = msgs.map(m => m.id);
+    const opId = crypto.randomUUID();
+    const generation = useStore.getState().beginArchiveCount(opId, msgs.map(m => archiveEstimate(m, isThreadListRow(m))), Date.now() + UNDO_COMMIT_DELAY_MS);
     const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
     const threadGuardsByRow = new Map(
       msgs
@@ -1683,24 +1941,16 @@ export default function MessageList() {
     const viewKey = archiveViewKeyRef.current;
 
     refreshRequestRef.current.invalidate();
-    initialGuards.forEach(setPendingDelete);
+    initialGuards.forEach(id => setPendingDelete(id, { archive: true, generation, group: opId }));
     removeMessages(ids);
-    let unreadByAccount = new Map();
-    msgs.forEach((message) => {
-      const aggregateUnread = Number.parseInt(message.unread_count, 10);
-      const count = isThreadListRow(message) && Number.isFinite(aggregateUnread)
-        ? aggregateUnread
-        : (message.is_read ? 0 : 1);
-      if (count <= 0) return;
-      decrementUnread(message.account_id, count);
-      unreadByAccount.set(message.account_id, (unreadByAccount.get(message.account_id) || 0) + count);
-    });
     setSelectedIds(new Set());
     setSelectionModeActive(false);
     setShowFolderPicker(false);
     const archiveAction = createUndoableCommit({
       delayMs: UNDO_COMMIT_DELAY_MS,
       commit: async () => {
+        if (generation !== useStore.getState().countGeneration) { initialGuards.forEach(clearDeleteGuard); return; }
+        let dispatched = false;
         let groups;
         let targets;
         try {
@@ -1711,6 +1961,7 @@ export default function MessageList() {
             isThreadListRow,
             selectedAccountId,
           );
+          if (generation !== useStore.getState().countGeneration) return;
           const seen = new Set();
           targets = groups.flatMap(group => group.targets).filter((target) => {
             if (!target?.id || seen.has(target.id)) return false;
@@ -1718,42 +1969,36 @@ export default function MessageList() {
             return true;
           });
           const archiveIds = targets.map(target => target.id);
-          archiveIds.forEach(setPendingDelete);
+          archiveIds.forEach(id => setPendingDelete(id, { archive: true, generation, group: opId }));
 
-          const resolvedUnreadByAccount = unreadCountsByAccount(targets);
-          const accountIds = new Set([...unreadByAccount.keys(), ...resolvedUnreadByAccount.keys()]);
-          accountIds.forEach((accountId) => {
-            const correction = (resolvedUnreadByAccount.get(accountId) || 0) - (unreadByAccount.get(accountId) || 0);
-            if (correction > 0) decrementUnread(accountId, correction);
-            else if (correction < 0) incrementUnread(accountId, -correction);
-          });
-          unreadByAccount = resolvedUnreadByAccount;
+          targets = useStore.getState().updateArchiveCount(opId, targets, generation) || [];
 
           groups.forEach(({ row }) => {
             if (isThreadListRow(row)) invalidateThreadCache(row.thread_id || row.id);
           });
 
-          const result = await archiveInChunks(archiveIds, api.bulkArchive);
+          dispatched = true;
+          const result = await enqueueArchive(targets, generation);
+          if (generation !== useStore.getState().countGeneration) return;
+          useStore.getState().finishArchiveCount(opId, result, generation);
           if (result.error) console.error('Bulk archive chunk failed:', result.error);
           const archivedSet = new Set(result.archived);
-          archiveIds.forEach(id => (archivedSet.has(id) ? setCompletedDelete(id) : clearDeleteGuard(id)));
+          archiveIds.forEach(id => { if (!archivedSet.has(id) && !result.unconfirmed?.includes(id)) clearDeleteGuard(id); });
           ids.filter(id => !seen.has(id)).forEach(clearDeleteGuard);
           groups.forEach(({ row, targets: groupTargets }) => {
             const threadGuard = threadGuardsByRow.get(row.id);
             if (!threadGuard) return;
-            if (groupTargets.every(target => archivedSet.has(target.id))) setCompletedDelete(threadGuard);
-            else clearDeleteGuard(threadGuard);
+            if (!groupTargets.some(target => archivedSet.has(target.id) || result.unconfirmed?.includes(target.id))) clearDeleteGuard(threadGuard);
           });
 
-          const failedTargets = targets.filter(target => !archivedSet.has(target.id));
+          const failedTargets = targets.filter(target => !archivedSet.has(target.id) && !result.unconfirmed?.includes(target.id));
           if (failedTargets.length > 0) {
+            const failedIds = new Set(failedTargets.map(target => target.id));
             const failedVisibleRows = groups
-              .filter(({ row, targets: groupTargets }) => (
-                !archivedSet.has(row.id) && groupTargets.some(target => !archivedSet.has(target.id))
-              ))
+              .filter(({ row }) => failedIds.has(row.id))
               .map(({ row }) => row);
             if (failedVisibleRows.length > 0) restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, failedVisibleRows);
-            unreadCountsByAccount(failedTargets).forEach((count, accountId) => incrementUnread(accountId, count));
+
             window.dispatchEvent(new Event('mailflow:refresh'));
             if (!result.error && result.noArchiveFolder.length) {
               addNotification({ title: t('messageList.bulkArchived.noFolderTitle'), body: t('messageList.bulkArchived.noFolderBody') });
@@ -1762,18 +2007,22 @@ export default function MessageList() {
             }
           }
         } catch (err) {
+          if (generation !== useStore.getState().countGeneration) return;
           console.error('Bulk archive failed:', err);
           const targetIds = targets?.map(target => target.id) || [];
-          [...new Set([...initialGuards, ...targetIds])].forEach(clearDeleteGuard);
-          restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, msgs);
-          unreadByAccount.forEach((count, accountId) => incrementUnread(accountId, count));
+          if (!dispatched || err.notApplied === true) {
+            [...new Set([...initialGuards, ...targetIds])].forEach(clearDeleteGuard);
+            restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, msgs);
+            useStore.getState().cancelArchiveCount(opId, generation);
+          } else useStore.getState().finishArchiveCount(opId, { unconfirmed: targetIds }, generation);
           addNotification({ title: t('messageList.bulkArchived.failTitle'), body: t('messageList.bulkArchived.failBody', { count: targets?.length || ids.length }) });
         }
       },
       undo: () => {
+        if (generation !== useStore.getState().countGeneration) return;
         initialGuards.forEach(clearDeleteGuard);
         restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, msgs);
-        unreadByAccount.forEach((count, accountId) => incrementUnread(accountId, count));
+        useStore.getState().cancelArchiveCount(opId, generation);
       },
     });
     addNotification({
@@ -1783,14 +2032,17 @@ export default function MessageList() {
     });
   }, [
     selectedAccountId, selectedFolder, isThreadListRow, resolveMessagesForThreadAction,
-    removeMessages, decrementUnread, incrementUnread, invalidateThreadCache,
+    removeMessages, invalidateThreadCache,
     addNotification, t,
   ]);
 
   const archiveVisibleMessage = useCallback(async (message, {
     alreadyRemoved = false,
+    opId = crypto.randomUUID(),
+    generation = useStore.getState().countGeneration,
     viewKey: actionViewKey = archiveViewKeyRef.current,
   } = {}) => {
+    if (generation !== useStore.getState().countGeneration) return;
     const threadRow = isThreadListRow(message);
     const threadId = message.thread_id || message.id;
     const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
@@ -1801,62 +2053,53 @@ export default function MessageList() {
     const viewKey = actionViewKey;
 
     refreshRequestRef.current.invalidate();
-    initialGuards.forEach(setPendingDelete);
+
     if (!alreadyRemoved) {
       advanceSelectionAfterRemoval(message.id, true);
       removeMessage(message.id);
       if (threadRow && expandedThreadId === threadId) setExpandedThreadId(null);
     }
 
-    const aggregateUnread = Number.parseInt(message.unread_count, 10);
-    const optimisticUnread = threadRow && Number.isFinite(aggregateUnread)
-      ? aggregateUnread
-      : (message.is_read ? 0 : 1);
-    let unreadByAccount = new Map();
-    if (!alreadyRemoved && optimisticUnread > 0) decrementUnread(message.account_id, optimisticUnread);
-    if (optimisticUnread > 0) unreadByAccount.set(message.account_id, optimisticUnread);
+    if (!alreadyRemoved) useStore.getState().beginArchiveCount(opId, [archiveEstimate(message, threadRow)], Date.now());
 
+    initialGuards.forEach(id => setPendingDelete(id, { archive: true, generation, group: opId }));
     let targets;
     try {
       const resolved = await resolveMessagesForThreadAction(message);
+      if (generation !== useStore.getState().countGeneration) return;
       targets = archiveTargetsForFolder(message, resolved, activeFolder, threadRow, selectedAccountId);
 
-      const resolvedUnreadByAccount = unreadCountsByAccount(targets);
-      const accounts = new Set([...unreadByAccount.keys(), ...resolvedUnreadByAccount.keys()]);
-      accounts.forEach((accountId) => {
-        const correction = (resolvedUnreadByAccount.get(accountId) || 0) - (unreadByAccount.get(accountId) || 0);
-        if (correction > 0) decrementUnread(accountId, correction);
-        else if (correction < 0) incrementUnread(accountId, -correction);
-      });
-      unreadByAccount = resolvedUnreadByAccount;
+      targets = useStore.getState().updateArchiveCount(opId, targets, generation) || [];
     } catch (err) {
+      if (generation !== useStore.getState().countGeneration) return;
       initialGuards.forEach(clearDeleteGuard);
       restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, [message]);
-      unreadByAccount.forEach((count, accountId) => incrementUnread(accountId, count));
+      useStore.getState().cancelArchiveCount(opId, generation);
       addNotification({ title: t('messageList.bulkArchived.failTitle'), body: t('messageList.bulkArchived.failBody', { count: 1 }) });
       console.error('Failed to load thread for archive:', err.message);
       return;
     }
 
     const ids = targets.map(target => target.id);
-    ids.forEach(setPendingDelete);
+    ids.forEach(id => setPendingDelete(id, { archive: true, generation, group: opId }));
     try {
-      const result = await archiveInChunks(ids, api.bulkArchive);
+      const result = await enqueueArchive(targets, generation);
+      if (generation !== useStore.getState().countGeneration) return;
+      useStore.getState().finishArchiveCount(opId, result, generation);
       if (result.error) console.error('Archive chunk failed:', result.error);
       const archived = new Set(result.archived);
-      ids.forEach(id => (archived.has(id) ? setCompletedDelete(id) : clearDeleteGuard(id)));
-      if (!archived.has(message.id)) clearDeleteGuard(message.id);
+      ids.forEach(id => { if (!archived.has(id) && !result.unconfirmed?.includes(id)) clearDeleteGuard(id); });
+      if (!archived.has(message.id) && !result.unconfirmed?.includes(message.id)) clearDeleteGuard(message.id);
 
-      const failed = targets.filter(target => !archived.has(target.id));
+      const failed = targets.filter(target => !archived.has(target.id) && !result.unconfirmed?.includes(target.id));
       if (threadRow) invalidateThreadCache(threadId);
       if (failed.length === 0) {
-        if (threadGuard) setCompletedDelete(threadGuard);
         return;
       }
 
-      if (threadGuard) clearDeleteGuard(threadGuard);
-      unreadCountsByAccount(failed).forEach((count, accountId) => incrementUnread(accountId, count));
-      if (!archived.has(message.id)) {
+      if (threadGuard && !result.unconfirmed?.length) clearDeleteGuard(threadGuard);
+
+      if (!archived.has(message.id) && !result.unconfirmed?.includes(message.id)) {
         restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, [message]);
       }
       window.dispatchEvent(new Event('mailflow:refresh'));
@@ -1866,16 +2109,19 @@ export default function MessageList() {
         body: t(noArchiveFolder ? 'messageList.noArchiveFolder.body' : 'messageList.bulkArchived.failBody', { count: failed.length }),
       });
     } catch (err) {
-      [...initialGuards, ...ids].forEach(clearDeleteGuard);
-      restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, [message]);
-      unreadByAccount.forEach((count, accountId) => incrementUnread(accountId, count));
+      if (generation !== useStore.getState().countGeneration) return;
+      if (err.notApplied === true) {
+        [...initialGuards, ...ids].forEach(clearDeleteGuard);
+        restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, [message]);
+        useStore.getState().cancelArchiveCount(opId, generation);
+      } else useStore.getState().finishArchiveCount(opId, { unconfirmed: ids }, generation);
       addNotification({ title: t('messageList.bulkArchived.failTitle'), body: t('messageList.bulkArchived.failBody', { count: ids.length }) });
       console.error('Archive failed:', err.message);
     }
   }, [
     isThreadListRow, selectedAccountId, selectedFolder, expandedThreadId,
     resolveMessagesForThreadAction, removeMessage, setExpandedThreadId,
-    decrementUnread, incrementUnread, invalidateThreadCache, addNotification, t,
+    invalidateThreadCache, addNotification, t,
   ]);
 
   const handleBulkMarkRead = useCallback(async (ids, msgs) => {
@@ -1951,35 +2197,8 @@ export default function MessageList() {
     const getState = () => useStore.getState();
 
     const markRead = (msg) => {
-      if (msg.is_read) return;
-      const { updateMessage, decrementUnread, incrementUnread, adjustCategoryCount, markReadBehavior, markReadDelay } = getState();
-      if (markReadBehavior === 'manual') return;
-      clearTimeout(autoMarkReadTimerRef.current);
-      autoMarkReadTimerRef.current = null;
-      const doMarkRead = () => {
-        updateMessage(msg.id, { is_read: true });
-        decrementUnread(msg.account_id);
-        adjustCategoryCount(msg.category, -1);
-        setPending(msg.id, msg.account_id);
-        api.bulkRead([msg.id], true)
-          .then(() => {
-            pendingMarkReadMap.delete(msg.id);
-            completedMarkReadMap.set(msg.id, msg.account_id);
-            setTimeout(() => completedMarkReadMap.delete(msg.id), 10000);
-          })
-          .catch(e => {
-            console.error('markRead failed:', e.message);
-            updateMessage(msg.id, { is_read: false });
-            incrementUnread(msg.account_id);
-            adjustCategoryCount(msg.category, 1);
-            pendingMarkReadMap.delete(msg.id);
-          });
-      };
-      if (markReadBehavior === 'delay') {
-        autoMarkReadTimerRef.current = setTimeout(doMarkRead, (markReadDelay || 1) * 1000);
-      } else {
-        doMarkRead();
-      }
+      cancelScheduledMarkRead(autoMarkReadTimerRef.current);
+      autoMarkReadTimerRef.current = scheduleMarkRead(msg);
     };
 
     const onNext = () => {
@@ -2064,33 +2283,16 @@ export default function MessageList() {
     };
 
     const onToggleRead = () => {
-      const { messages, selectedMessageId, updateMessage, decrementUnread, incrementUnread, adjustCategoryCount } = getState();
-      if (!selectedMessageId) return;
-      const msg = messages.find(m => m.id === selectedMessageId);
+      const state = getState();
+      const msg = selectedMessage(state);
       if (!msg) return;
-      const newRead = !msg.is_read;
-      updateMessage(selectedMessageId, { is_read: newRead });
-      if (newRead) {
-        decrementUnread(msg.account_id);
-        adjustCategoryCount(msg.category, -1);
-        setPending(selectedMessageId, msg.account_id);
-        api.bulkRead([selectedMessageId], true)
-          .then(() => {
-            pendingMarkReadMap.delete(selectedMessageId);
-            completedMarkReadMap.set(selectedMessageId, msg.account_id);
-            setTimeout(() => completedMarkReadMap.delete(selectedMessageId), 10000);
-          })
-          .catch(err => {
-            console.error('markRead failed:', err);
-            pendingMarkReadMap.delete(selectedMessageId);
-          });
-      } else {
-        incrementUnread(msg.account_id);
-        adjustCategoryCount(msg.category, 1);
-        pendingMarkReadMap.delete(selectedMessageId);
-        completedMarkReadMap.delete(selectedMessageId);
-        api.bulkRead([selectedMessageId], false).catch(console.error);
-      }
+      changeMessageRead(msg, !msg.is_read, {
+        cancel: () => cancelScheduledMarkReadFor(msg.id),
+        update: state.updateMessage, decrementUnread: state.decrementUnread,
+        incrementUnread: state.incrementUnread, adjustCategoryCount: state.adjustCategoryCount,
+        patch: api.bulkRead,
+        onError: error => state.addNotification({ type: 'error', title: error.message }),
+      });
     };
 
     const onMarkUnread = () => {
@@ -2114,6 +2316,7 @@ export default function MessageList() {
         decrementUnread: state.decrementUnread,
         adjustCategoryCount: state.adjustCategoryCount,
         patch: api.bulkRead,
+        onError: error => state.addNotification({ type: 'error', title: error.message }),
       });
     };
 
@@ -2273,7 +2476,7 @@ export default function MessageList() {
       case 'archive': {
         const archived = message;
         const archiveMessage = archiveVisibleMessageRef.current;
-        if (!archiveMessage) break;
+        if (!archiveMessage || !applyDeleteGuard([archived]).length) break;
         const threadRow = isThreadListRow(archived);
         const threadId = archived.thread_id || archived.id;
         const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
@@ -2284,25 +2487,23 @@ export default function MessageList() {
         const viewKey = archiveViewKeyRef.current;
 
         refreshRequestRef.current.invalidate();
-        guards.forEach(setPendingDelete);
-        advanceSelectionAfterRemoval(archived.id);
+            advanceSelectionAfterRemoval(archived.id);
         removeMessage(archived.id);
         if (threadRow && expandedThreadId === threadId) setExpandedThreadId(null);
-        const aggregateUnread = Number.parseInt(archived.unread_count, 10);
-        const optimisticUnread = threadRow && Number.isFinite(aggregateUnread)
-          ? aggregateUnread
-          : (archived.is_read ? 0 : 1);
-        if (optimisticUnread > 0) decrementUnread(archived.account_id, optimisticUnread);
+        const opId = crypto.randomUUID();
+        const generation = useStore.getState().beginArchiveCount(opId, [archiveEstimate(archived, threadRow)], Date.now() + UNDO_COMMIT_DELAY_MS);
+        guards.forEach(id => setPendingDelete(id, { archive: true, generation, group: opId }));
         const archiveAction = createUndoableCommit({
           delayMs: UNDO_COMMIT_DELAY_MS,
           commit: async () => {
-            guards.forEach(clearDeleteGuard);
-            await archiveMessage(archived, { alreadyRemoved: true, viewKey });
+            await archiveMessage(archived, { alreadyRemoved: true, viewKey, opId, generation });
           },
           undo: () => {
+            if (generation !== useStore.getState().countGeneration) return;
+        if (generation !== useStore.getState().countGeneration) return;
             guards.forEach(clearDeleteGuard);
             restoreMessagesIfViewCurrent(viewKey, archiveViewKeyRef, [archived]);
-            if (optimisticUnread > 0) incrementUnread(archived.account_id, optimisticUnread);
+            useStore.getState().cancelArchiveCount(opId, generation);
           },
         });
         addNotification({
@@ -2324,6 +2525,8 @@ export default function MessageList() {
           break;
         }
         const moved = message;
+        const generation = useStore.getState().countGeneration;
+        const current = () => generation === useStore.getState().countGeneration && !useStore.getState().isLocked;
         let moveMessages;
         try {
           moveMessages = keepDraftsApart(await resolveMessagesForThreadAction(message), message.id);
@@ -2339,8 +2542,10 @@ export default function MessageList() {
         moveMessages = moveMessages.filter(msg => msg?.account_id === moved.account_id);
         const moveIds = [...new Set(moveMessages.map(msg => msg.id).filter(Boolean))];
         if (!moveIds.length) moveIds.push(moved.id);
+        if (!current()) return;
+        const endIntent = beginCountIntent();
         removeMessage(moved.id);
-        if (!moved.is_read) decrementUnread(moved.account_id);
+        const countOrigin = !moved.is_read ? decrementUnread(moved.account_id) : null;
         // Remove the moved message from the selection so the action bar doesn't
         // stay around claiming "X selected" for messages that are no longer here.
         if (selectedIds.has(moved.id)) {
@@ -2352,17 +2557,20 @@ export default function MessageList() {
         let moveUndone = false;
         const moveTimer = setTimeout(async () => {
           if (moveUndone) return;
+          moveUndone = true;
           try {
+            if (!current()) return;
             const result = await api.bulkMove(moveIds, folder);
             // The server reports per-message success (200 even when some IMAP
             // moves fail or are skipped) — surface partial failures instead of
             // letting the thread silently reappear on the next sync.
+            if (!current()) return;
             const movedSet = new Set(result.moved ?? []);
             const failedCount = moveIds.filter(id => !movedSet.has(id)).length;
             if (failedCount > 0) {
-              if (!movedSet.has(moved.id)) {
+              if (!movedSet.has(moved.id) && !result.unconfirmed?.includes(moved.id)) {
                 useStore.getState().restoreMessages([moved]);
-                if (!moved.is_read) incrementUnread(moved.account_id);
+                countOrigin?.revert();
               }
               addNotification({ type: 'error', title: t('message.moved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
             } else {
@@ -2370,19 +2578,25 @@ export default function MessageList() {
             }
           } catch (err) {
             console.error('Move failed:', err.message);
-            useStore.getState().restoreMessages([moved]);
-            if (!moved.is_read) incrementUnread(moved.account_id);
+            if (!current()) return;
+            if (err.notApplied === true) {
+              useStore.getState().restoreMessages([moved]);
+              countOrigin?.revert();
+            }
             addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });
-          }
+          } finally { endIntent(); }
         }, 4500);
         addNotification({
           title: t('message.moved.title'),
           body: folder,
           onUndo: () => {
+            if (moveUndone) return;
             moveUndone = true;
             clearTimeout(moveTimer);
+            if (!current()) { endIntent(); return; }
             useStore.getState().restoreMessages([moved]);
-            if (!moved.is_read) incrementUnread(moved.account_id);
+            countOrigin?.revert();
+            endIntent();
           },
         });
         break;
@@ -2473,10 +2687,13 @@ export default function MessageList() {
         break;
       }
       case 'setCategory': {
+        const generation = useStore.getState().countGeneration;
+        const current = () => generation === useStore.getState().countGeneration && !useStore.getState().isLocked;
         // Stored as chosen, 'primary' included, as the server does (#489).
         const newCategory = data || 'primary';
         try {
           await api.setMessageCategory(message.id, newCategory);
+          if (!current()) return;
           const inFilteredView = categorizationActive && activeCategory && activeCategory !== (newCategory || 'primary');
           if (inFilteredView) {
             removeMessage(message.id);
@@ -2485,26 +2702,29 @@ export default function MessageList() {
           }
           // Refresh category counts badge
           const countParams = selectedAccountId ? { accountId: selectedAccountId } : {};
-          api.getCategoryCounts(countParams).then(d => setCategoryCounts(d.counts || {})).catch(() => {});
+          api.getCategoryCounts(countParams).then(d => setCategoryCounts(d.counts || {}, d.countRevision || '0', generation, d.byAccount)).catch(() => {});
         } catch (err) {
           console.error('setCategory failed:', err?.message);
         }
         break;
       }
       case 'setCategoryAlways': {
+        const generation = useStore.getState().countGeneration;
+        const current = () => generation === useStore.getState().countGeneration && !useStore.getState().isLocked;
         // "Always for this sender/domain" (#490): every loaded inbox message from that sender moves
         // with it, and leaves a category tab it no longer belongs to.
         const category = data?.category;
         const saved = await saveSenderCategory(message, data?.scope, category, {
-          t, api, getState: useStore.getState,
+          t, api, getState: () => ({ ...useStore.getState(), addNotification: notification => { if (current()) useStore.getState().addNotification(notification); } }),
           onMatch: loaded => {
+            if (!current()) return;
             if (categorizationActive && activeCategory && activeCategory !== category) removeMessage(loaded.id);
             else updateMessage(loaded.id, { category });
           },
         });
-        if (saved) {
+        if (saved && current()) {
           const countParams = selectedAccountId ? { accountId: selectedAccountId } : {};
-          api.getCategoryCounts(countParams).then(d => setCategoryCounts(d.counts || {})).catch(() => {});
+          api.getCategoryCounts(countParams).then(d => setCategoryCounts(d.counts || {}, d.countRevision || '0', generation, d.byAccount)).catch(() => {});
         }
         break;
       }
@@ -2610,35 +2830,8 @@ export default function MessageList() {
   // Shared by the main-pane selection (handleSelect) and the detached-window open
   // path (#219) so both routes behave identically.
   const markMessageReadOnOpen = (message) => {
-    clearTimeout(autoMarkReadTimerRef.current);
-    autoMarkReadTimerRef.current = null;
-    if (message.is_read || markReadBehavior === 'manual') return;
-    const prevUnread = message.unread_count;
-    const doMarkRead = () => {
-      updateMessage(message.id, { is_read: true, unread_count: 0 });
-      decrementUnread(message.account_id);
-      adjustCategoryCount(message.category, -1);
-      setPending(message.id, message.account_id);
-      api.bulkRead([message.id], true)
-        .catch(() => api.bulkRead([message.id], true))
-        .then(() => {
-          pendingMarkReadMap.delete(message.id);
-          completedMarkReadMap.set(message.id, message.account_id);
-          setTimeout(() => completedMarkReadMap.delete(message.id), 10000);
-        })
-        .catch(e => {
-          console.error('markRead failed:', e.message);
-          updateMessage(message.id, { is_read: false, unread_count: prevUnread });
-          incrementUnread(message.account_id);
-          adjustCategoryCount(message.category, 1);
-          pendingMarkReadMap.delete(message.id);
-        });
-    };
-    if (markReadBehavior === 'delay') {
-      autoMarkReadTimerRef.current = setTimeout(doMarkRead, markReadDelay * 1000);
-    } else {
-      doMarkRead();
-    }
+    cancelScheduledMarkRead(autoMarkReadTimerRef.current);
+    autoMarkReadTimerRef.current = scheduleMarkRead(message);
   };
 
   // Open a message in a detached floating window (#219). Warms the body cache and marks
@@ -2671,10 +2864,13 @@ export default function MessageList() {
       setLoadingThread(tid);
       try {
         const effectiveFolder = selectedAccountId ? selectedFolder : 'INBOX';
-        const data = await api.getThread(tid, effectiveFolder, isUnified);
-        const msgs = data.messages || [];
-        if (isCurrentThreadLoad(threadLoadVersionsRef.current, tid, loadVersion)) {
-          setThreadMessages(tid, msgs);
+        const generation = useStore.getState().countGeneration;
+        const readToken = captureReadRequest();
+        const response = { data: await api.getThread(tid, effectiveFolder, isUnified), readToken };
+        const current = useStore.getState();
+        if (!current.isLocked && current.countGeneration === generation
+          && isCurrentThreadLoad(threadLoadVersionsRef.current, tid, loadVersion)) {
+          setThreadMessages(tid, applyReadGuard(response.data.messages || [], response.readToken));
         }
       } catch (err) {
         console.error('Failed to load thread:', err);
@@ -2699,21 +2895,25 @@ export default function MessageList() {
     ? `Search: "${searchQuery}"`
     : isSnoozedView ? t('sidebar.snoozed') : isUnified ? t('sidebar.allInboxes') : folderLabel;
 
-  const headerUnread = isSnoozedView && isUnified ? 0
+  const inboxUnread = isSnoozedView && isUnified ? 0
     : isUnified ? unreadCounts.total
     : selectedFolder === 'INBOX' ? unreadCounts.byAccount[selectedAccountId] ?? 0
       : selectedFolderCounts?.unread_count ?? 0;
+  const headerUnread = activeCategory && categorizationActive && !activeGtdTab ? categoryCounts[activeCategory] || 0 : inboxUnread;
   // Paging totals count cached results (threads/categories can be subsets). The
   // unfiltered mailbox header instead shows independently observed server membership.
   const headerSamples = isSnoozedView && isUnified ? []
     : isUnified
     ? accounts.filter(isAccountInUnifiedInbox).map(a => unreadCounts.snapshots?.[a.id])
     : selectedFolder === 'INBOX' ? [unreadCounts.snapshots?.[selectedAccountId]]
-      : [{ totalCount: selectedFolderCounts?.total_count, known: selectedFolderCounts?.counts_known, stale: selectedFolderCounts?.counts_stale }];
+      : [{ totalCount: selectedFolderCounts?.total_count, known: selectedFolderCounts?.counts_known, stale: selectedFolderCounts?.counts_stale || selectedFolderCounts?.counts_pending }];
   const headerCountKnown = headerSamples.length > 0 && headerSamples.every(s => s?.known && s.totalCount != null);
-  const headerCountStale = headerSamples.some(s => !s?.known || s?.stale);
+  const headerCountStale = headerSamples.some(s => !s?.known || s?.stale || s?.pending);
   const headerServerTotal = headerSamples.reduce((sum, s) => sum + (s?.totalCount || 0), 0);
-  const filteredCount = unreadOnly || (activeCategory && categorizationEnabled);
+  const categoryHeader = activeCategory && categorizationActive && !activeGtdTab;
+  const categoryCount = (unreadOnly ? categoryCounts[activeCategory] : useStore.getState().categoryTotals?.[activeCategory])
+    ?? (useStore.getState().categoryKnown ? 0 : undefined);
+  const filteredCount = unreadOnly || categoryHeader;
 
   // Derived bulk-selection values (computed fresh each render, no stale closure risk)
   const selectionMode = selectedIds.size > 0 || selectionModeActive;
@@ -2931,7 +3131,7 @@ export default function MessageList() {
             {!searchQuery && (
               <span title={isSnoozedView && isUnified ? 'Snoozed messages in every account' : filteredCount ? 'Cached results matching this filter' : !headerCountKnown ? 'Mailbox count not yet available' : headerCountStale ? 'Last observed mailbox count; awaiting server refresh' : 'Messages reported by the mail server'} style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
                 {/* The Snoozed view across accounts (#269) counts what the list returned: every account's Snoozed folder. */}
-                {filteredCount || (isSnoozedView && isUnified) ? messagesTotal : !headerCountKnown ? '—' : `${headerCountStale ? '~' : ''}${headerServerTotal}`}
+                {categoryHeader ? (categoryCount == null ? '—' : `${useStore.getState().categoryPending ? '~' : ''}${categoryCount}`) : filteredCount || (isSnoozedView && isUnified) ? messagesTotal : !headerCountKnown ? '—' : `${headerCountStale ? '~' : ''}${headerServerTotal}`}
               </span>
             )}
             {/* Sync button */}
@@ -3433,7 +3633,7 @@ export default function MessageList() {
                 }}
               >
                 {t('gtd.inbox')}
-                {headerUnread > 0 && (
+                {inboxUnread > 0 && (
                   <span style={{
                     fontSize: 10, fontWeight: 600, lineHeight: 1,
                     padding: '1px 5px', borderRadius: 100,
@@ -3441,7 +3641,7 @@ export default function MessageList() {
                     color: 'var(--bg-primary)',
                     minWidth: 16, textAlign: 'center',
                   }}>
-                    {headerUnread > 99 ? '99+' : headerUnread}
+                    {inboxUnread > 99 ? '99+' : inboxUnread}
                   </span>
                 )}
               </button>
@@ -3619,7 +3819,7 @@ export default function MessageList() {
           </div>
         )}
 
-        {loadingMessages && displayMessages.length === 0 && (
+        {loadingMessages && !keepEmptyInbox && displayMessages.length === 0 && (
           <div>
             {Array.from({ length: 7 }).map((_, i) => (
               <div key={i} style={{
@@ -3638,7 +3838,8 @@ export default function MessageList() {
           </div>
         )}
 
-        {!loadingMessages && displayMessages.length === 0 && (
+        {((!loadingMessages && displayMessages.length === 0 && (searchQuery.trim() || !normalContinuation))
+          || (keepEmptyInbox && displayMessages.length === 0)) && (
           <EmptyState
             folderSyncing={folderSyncing}
             searchQuery={searchQuery}
@@ -4139,7 +4340,7 @@ export default function MessageList() {
                 <div>{t('common.loading')}</div>
               </div>
             )}
-            {!loadingMessages && hasMoreMessages && displayMessages.length > 0 && (
+            {!loadingMessages && normalContinuation && (
               <div style={{ padding: '12px 16px', textAlign: 'center' }}>
                 <button
                   onClick={loadMore}
@@ -4156,13 +4357,17 @@ export default function MessageList() {
                 </button>
               </div>
             )}
-            {!loadingMessages && !hasMoreMessages && displayMessages.length > 0 && (
+            {!loadingMessages && !normalContinuation && displayMessages.length > 0 && (
               <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 11 }}>
                 {t('messageList.noMoreMessages')}
               </div>
             )}
           </>)}
         </>)}
+
+        {scrollMode === 'paginated' && !searchQuery.trim() && !loadingMessages && normalContinuation && (displayMessages.length === 0 || normalListRetry) && (
+          <button onClick={() => loadPage(currentPage)}>{t('messageList.loadMore')}</button>
+        )}
 
         {/* Pagination footer */}
         {scrollMode === 'paginated' && !searchQuery.trim() && !loadingMessages && messagesTotal > 0 && (() => {

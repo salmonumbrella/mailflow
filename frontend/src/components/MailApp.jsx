@@ -14,6 +14,8 @@ import { runMailboxShortcut, canRunMailboxShortcut, browserShortcutFallback } fr
 import { canRunSelectedAction, canRunGlobalAction } from '../utils/shortcutApplicability.js';
 import { selectedPickerMessage } from '../utils/labelPicker.js';
 import { applyMarkRead } from '../utils/markRead.js';
+import { captureReadRequest, reconcileReadState } from '../utils/pendingReads.js';
+import { applyDeleteGuard } from '../utils/pendingDeletes.js';
 import { buildKeyMap, resolveShortcutAction, shortcutActionText, getEffectiveShortcuts, getGroupedActions, parseModKey, modLabel, SPECIAL_KEYS, SPECIAL_KEY_LABELS } from '../utils/defaultShortcuts.js';
 import Sidebar from './Sidebar.jsx';
 import MessageList from './MessageList.jsx';
@@ -278,8 +280,17 @@ export default function MailApp() {
     // resolveMessage matches the stable Message-ID header first, then the UUID — so a link
     // still opens after the email was moved to another folder (#270). Legacy/notification
     // links carry the UUID and resolve via the fallback.
+    const issuance = useStore.getState();
+    if (issuance.isLocked) return Promise.resolve();
+    const generation = issuance.countGeneration;
+    const readToken = captureReadRequest();
     return api.resolveMessage(id)
-      .then(msg => {
+      .then(data => ({ data, readToken }))
+      .then(response => {
+        const current = useStore.getState();
+        if (current.isLocked || current.countGeneration !== generation) return;
+        const [msg] = reconcileReadState(applyDeleteGuard([response.data]), response.readToken);
+        if (!msg) return;
         // threadMessages is not cleared by setMessages(), so storing the message
         // here keeps it available to MessagePane even after the message list loads
         // a different folder's page (which would evict it from the main array).
@@ -384,14 +395,15 @@ export default function MailApp() {
 
   useEffect(() => {
     // Load accounts
+    const countGeneration = useStore.getState().countGeneration;
     api.getAccounts()
       .then(accounts => {
-        setAccounts(accounts); // also sets accountsReady:true in the store
+        setAccounts(accounts, countGeneration); // also sets accountsReady:true in the store
       })
       .catch(err => {
         console.error(err);
         // Even on error, mark accounts as ready so MessageList doesn't hang
-        useStore.setState({ accountsReady: true });
+        if (countGeneration === useStore.getState().countGeneration && !useStore.getState().isLocked) useStore.setState({ accountsReady: true });
       });
 
     // Sync Todoist connection state — localStorage alone isn't enough across devices/sessions
@@ -403,13 +415,13 @@ export default function MailApp() {
     // Load unread counts
     const refreshCounts = () => {
       api.getUnreadCounts()
-        .then(setUnreadCounts)
+        .then(counts => setUnreadCounts(counts, countGeneration))
         .catch(console.error);
     };
     const refreshFolders = () => {
       const state = useStore.getState();
       for (const accountId of Object.keys(state.folders)) {
-        api.getFolders(accountId).then(f => useStore.getState().setFolders(accountId, f)).catch(() => {});
+        api.getFolders(accountId).then(f => useStore.getState().setFolders(accountId, f, countGeneration)).catch(() => {});
       }
     };
     refreshCounts();
@@ -463,7 +475,7 @@ export default function MailApp() {
     const tabCount = selectedAccountId
       ? (unreadCounts.byAccount[selectedAccountId] ?? 0)
       : total;
-    document.title = 'MailFlow';
+    document.title = tabCount > 0 ? `(${tabCount}) MailFlow` : 'MailFlow';
     updateFaviconBadge(showFaviconBadge ? tabCount : 0);
     // App-icon badge always reflects total unread across all accounts so that
     // selecting a zero-unread account never clears the home screen badge.
@@ -705,8 +717,9 @@ export default function MailApp() {
 
     if (provider) {
       window.history.replaceState({}, '', '/');
+      const countGeneration = useStore.getState().countGeneration;
       api.getAccounts()
-        .then(accounts => { setAccounts(accounts); })
+        .then(accounts => { setAccounts(accounts, countGeneration); })
         .catch(console.error);
       setAdminTab('accounts');
       setShowAdmin(true);

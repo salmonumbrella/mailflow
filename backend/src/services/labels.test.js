@@ -18,6 +18,24 @@ const mkImap = () => ({ ensureFolder: vi.fn(), copyMessage: vi.fn(), removeMessa
 
 beforeEach(() => { query.mockReset(); fanOutReadToSiblings.mockReset(); });
 
+describe('archive residue full-row source defense', () => {
+  it.each([
+    ['applyLabel', (engine, message) => applyLabel(engine, account, message, 'Todo')],
+    ['removeLabel', (engine, message) => removeLabel(engine, message, 'Todo')],
+    ['removeExactLabelCopy', (engine, message) => removeExactLabelCopy(engine, message, 'Todo', 77)],
+  ])('%s rejects before lookups, no-op shortcuts or provider commands', async (_name, act) => {
+    const engine = mkImap();
+    const message = { account_id: account.id, uid: 7, folder: 'Todo', message_id: '<fixture@example.test>',
+      is_archive_residue: true };
+    await expect(act(engine, message)).rejects.toMatchObject({
+      status: 409, code: 'archive-residue-read-only',
+      message: 'This action is not supported for archive residue',
+    });
+    expect(query).not.toHaveBeenCalled();
+    for (const method of Object.values(engine)) expect(method).not.toHaveBeenCalled();
+  });
+});
+
 describe('resolveLabelCopyUid', () => {
   it('uses the acted row directly when it already lives in the folder', async () => {
     const uid = await resolveLabelCopyUid({ folder: 'Todo', uid: 42, account_id: 'a', message_id: '<m>' }, 'Todo');
@@ -170,7 +188,7 @@ describe('ensureLabelFolders', () => {
 
 describe('markThreadRead', () => {
   const msg = { account_id: 'acct-1', message_id: '<m>' };
-  const imapMR = () => ({ setFlag: vi.fn() });
+  const imapMR = () => ({ isLabelStore: () => true, setFlag: vi.fn() });
 
   it('fans out read state and sets \\Seen on an unread INBOX copy; returns the copy', async () => {
     query.mockResolvedValueOnce({ rows: [{ id: 'i1', uid: 5, is_read: false }] });

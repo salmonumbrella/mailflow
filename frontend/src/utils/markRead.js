@@ -1,6 +1,7 @@
 import { useStore } from '../store/index.js';
 import { api } from './api.js';
-import { pendingMarkReadMap, completedMarkReadMap, setPending } from './pendingReads.js';
+import { pendingMarkReadMap, completedMarkReadMap, setReadIntentSession } from './pendingReads.js';
+import { changeMessageRead } from './messageHotkeys.js';
 
 const scheduledByMessage = new Map();
 const scheduledMessageByTimer = new Map();
@@ -40,35 +41,29 @@ export function cancelScheduledMarkReadFor(id) {
 export function applyMarkRead(msg) {
   if (!msg || msg.is_read) return;
   const st = useStore.getState();
-  st.updateMessage(msg.id, { is_read: true });
-  st.decrementUnread(msg.account_id);
-  st.adjustCategoryCount(msg.category, -1);
-  // The guard stops a concurrent sync from reverting the optimistic flag before
-  // the server has committed.
-  setPending(msg.id, msg.account_id);
-  api.bulkRead([msg.id], true)
-    .then(() => {
-      pendingMarkReadMap.delete(msg.id);
-      // Covers the window where the PATCH has committed but a getMessages SELECT
-      // already in flight still returns the old is_read. Expires after 10s.
-      completedMarkReadMap.set(msg.id, msg.account_id);
-      setTimeout(() => completedMarkReadMap.delete(msg.id), 10000);
-    })
-    .catch(e => {
-      console.error('markRead failed:', e.message);
-      st.updateMessage(msg.id, { is_read: false });
-      st.incrementUnread(msg.account_id);
-      st.adjustCategoryCount(msg.category, 1);
-      pendingMarkReadMap.delete(msg.id);
-    });
+  return changeMessageRead(msg, true, {
+    update: st.updateMessage, decrementUnread: st.decrementUnread,
+    incrementUnread: st.incrementUnread, adjustCategoryCount: st.adjustCategoryCount,
+    patch: api.bulkRead,
+    onError: error => st.addNotification({ type: 'error', title: error.message }),
+  });
 }
+
+setReadIntentSession(useStore.getState().countGeneration);
+useStore.subscribe((state, previous) => {
+  if (state.countGeneration === previous.countGeneration) return;
+  setReadIntentSession(state.countGeneration);
+  for (const timer of scheduledMessageByTimer.keys()) cancelScheduledMarkRead(timer);
+  pendingMarkReadMap.clear();
+  completedMarkReadMap.clear();
+});
 
 // Honors the user's markReadBehavior preference. Returns a timer handle when the
 // mark was deferred, so the caller can cancelScheduledMarkRead it if the reader
 // moves on first, and null when there is nothing to cancel.
 export function scheduleMarkRead(msg) {
   if (!msg || msg.is_read) return null;
-  const { markReadBehavior, markReadDelay } = useStore.getState();
+  const { markReadBehavior, markReadDelay, countGeneration } = useStore.getState();
   if (markReadBehavior === 'manual') return null;
   if (markReadBehavior === 'delay') {
     const timer = setTimeout(() => {
@@ -76,7 +71,7 @@ export function scheduleMarkRead(msg) {
       timers?.delete(timer);
       scheduledMessageByTimer.delete(timer);
       if (timers?.size === 0) scheduledByMessage.delete(msg.id);
-      applyMarkRead(msg);
+      if (useStore.getState().countGeneration === countGeneration) applyMarkRead(msg);
     }, (markReadDelay || 1) * 1000);
     if (!scheduledByMessage.has(msg.id)) scheduledByMessage.set(msg.id, new Set());
     scheduledByMessage.get(msg.id).add(timer);

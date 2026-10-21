@@ -961,7 +961,7 @@ export default function Sidebar() {
                 const folderObj = accountFolders.find(f => f.path === path);
                 const isActive = selectedAccountId === accountId && selectedFolder === path;
                 const favBadge = unreadBadge({ count: folderObj?.unread_count, known: folderObj?.counts_known !== false,
-                  stale: folderObj?.counts_stale, observedAt: folderObj?.server_counts_at });
+                  stale: folderObj?.counts_stale || folderObj?.counts_pending, observedAt: folderObj?.server_counts_at });
                 const isRenamingThis = renamingFav?.accountId === accountId && renamingFav?.path === path;
                 const isDragging = favDragIdx === idx;
                 const isDropTarget = favDropIdx === idx && favDragIdx !== null && favDragIdx !== idx;
@@ -1159,7 +1159,7 @@ export default function Sidebar() {
           const countSnapshot = unreadCounts.snapshots?.[account.id];
           const accountBadge = unreadBadge({ count: unreadCounts.byAccount[account.id],
             known: Number.isFinite(unreadCounts.byAccount[account.id]) && countSnapshot?.known !== false,
-            stale: countSnapshot?.stale, observedAt: countSnapshot?.observedAt, max: 999 });
+            stale: countSnapshot?.stale || countSnapshot?.pending, observedAt: countSnapshot?.observedAt, max: 999 });
           const expanded = expandedAccounts[account.id];
           const isSelected = selectedAccountId === account.id;
           const accountFolders = folders[account.id] || [];
@@ -1527,7 +1527,7 @@ export default function Sidebar() {
                             const b = rolledUp
                               ? unreadBadge(subtreeUnread(node, path => accountHiddenPaths.includes(path)))
                               : unreadBadge({ count: folder.unread_count, known: folder.counts_known !== false,
-                                stale: folder.counts_stale, observedAt: folder.server_counts_at });
+                                stale: folder.counts_stale || folder.counts_pending, observedAt: folder.server_counts_at });
                             return b && (
                               <span title={rolledUp ? `${b.title}, including subfolders` : b.title} style={{ fontSize: 10, color: 'var(--text-tertiary)', background: 'var(--bg-elevated)', padding: '1px 5px', borderRadius: 8, flexShrink: 0 }}>
                                 {b.text}

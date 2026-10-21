@@ -46,18 +46,21 @@ export async function archiveInboxCopy(imapManager, account, inboxCopy, fromFold
   let destGuardHeld = false;
   try {
     const newUid = await imapManager.moveMessage(account, inboxCopy.uid, fromFolder, archiveFolder);
-    let applied;
+    let applied, countCategory = inboxCopy.category;
     if (allMail) {
-      const del = await query('DELETE FROM messages WHERE id = $1 AND folder = $2', [inboxCopy.id, fromFolder]);
+      const del = await query('DELETE FROM messages WHERE id = $1 AND folder = $2 RETURNING category', [inboxCopy.id, fromFolder]);
       applied = del.rowCount > 0;
+      if (del.rows?.[0]) countCategory = del.rows[0].category;
     } else if (newUid != null) {
-      const upd = await query('UPDATE messages SET folder = $1, uid = $2 WHERE id = $3 AND folder = $4', [archiveFolder, newUid, inboxCopy.id, fromFolder]);
+      const upd = await query('UPDATE messages SET folder = $1, uid = $2 WHERE id = $3 AND folder = $4 RETURNING category', [archiveFolder, newUid, inboxCopy.id, fromFolder]);
       applied = upd.rowCount > 0;
+      if (upd.rows?.[0]) countCategory = upd.rows[0].category;
     } else {
       imapManager._guardMoveUid(accountId, archiveFolder, inboxCopy.uid);
       destGuardHeld = true;
-      const upd = await query('UPDATE messages SET folder = $1 WHERE id = $2 AND folder = $3', [archiveFolder, inboxCopy.id, fromFolder]);
+      const upd = await query('UPDATE messages SET folder = $1 WHERE id = $2 AND folder = $3 RETURNING category', [archiveFolder, inboxCopy.id, fromFolder]);
       applied = upd.rowCount > 0;
+      if (upd.rows?.[0]) countCategory = upd.rows[0].category;
       // Hold the destination guard for the sync that learns the real uid only when we
       // actually moved the row; a lost race releases it immediately (nothing to protect).
       if (applied) setTimeout(() => imapManager._unguardMoveUid(accountId, archiveFolder, inboxCopy.uid), 10_000);
@@ -69,7 +72,10 @@ export async function archiveInboxCopy(imapManager, account, inboxCopy, fromFold
       adjustFolderCounts(accountId, fromFolder, -1, 0);
       if (!allMail) adjustFolderCounts(accountId, archiveFolder, 1, 0);
     }
-    return { archived: applied, noArchiveFolder: false };
+    if (applied) imapManager.scheduleCountRefresh?.(accountId, [fromFolder, ...(!allMail ? [archiveFolder] : [])]);
+    return { archived: applied, noArchiveFolder: false,
+      countTargets: applied ? [{ id: inboxCopy.id, account_id: accountId, folder: fromFolder, is_read: true,
+        ...(countCategory !== undefined ? { category: countCategory } : {}), ...(!allMail ? { destinationFolder: archiveFolder } : {}) }] : [] };
   } finally {
     imapManager._unguardMoveUid(accountId, fromFolder, inboxCopy.uid);
     // Release the destination guard when its DB write throws before normal handoff.

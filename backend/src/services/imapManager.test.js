@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
-vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('./db.js', () => {
+  const query = vi.fn();
+  // Unit SQL-shape checks share the same query spy; real transaction and lock
+  // behavior is exercised separately by the dedicated PostgreSQL fixtures.
+  return { query, withTransaction: vi.fn(async fn => fn({ query })) };
+});
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), parseMailboxList: vi.fn(() => [{ name: 'Hidden', email: 'hidden@example.test' }]), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((parsed) => parsed) }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
@@ -16,6 +21,7 @@ vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }
 
 import { ImapManager, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, hasIdlePooledClient, shouldPrewarmPool, acquirePooledClient, releasePooledClient, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, extractBodyFromMsg, attachmentsFromStructure, contentLocationFromMimeHeader, bodyFallbackApplies, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, computeThreadId, noteDraftsChanged } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
+import { countCompletion } from './countCompletion.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
@@ -25,6 +31,7 @@ import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
 import { parseMessage } from './messageParser.js';
 import { classifyAndTagMessage } from './spamPipeline.js';
 import { getAccountAddresses } from './mailAccess.js';
+import { reserveBackgroundBudget } from './backgroundDownloadBudget.js';
 
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
@@ -498,6 +505,7 @@ describe('insertCopiedSibling', () => {
   beforeEach(() => query.mockReset());
 
   it('inserts the destination sibling from the source row with the copied UID', async () => {
+    query.mockResolvedValueOnce({ rows: [{ provider_msgid: null }] });
     query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: true }] });
     query.mockResolvedValue({ rows: [] });
 
@@ -510,7 +518,8 @@ describe('insertCopiedSibling', () => {
     expect(ins[0]).toContain('WHERE account_id = $1 AND folder = $2 AND uid = $3');
     // Idempotent against the next destination-folder sync.
     expect(ins[0]).toContain('ON CONFLICT (account_id, uid, folder) DO NOTHING');
-    expect(ins[1]).toEqual(['acct-1', 'INBOX', 100, 5001, 'Todo']);
+    expect(ins[1]).toEqual(['acct-1', 'INBOX', 100, 5001, 'Todo', null]);
+    expect(ins[0]).toContain('provider_msgid IS NOT DISTINCT FROM $6::text');
     // delivery_addresses is copied verbatim from the source row, same as list_unsubscribe.
     expect(ins[0]).toContain('delivery_addresses');
     // So is a draft's Bcc (0061), in both the INSERT list and the SELECT.
@@ -518,6 +527,7 @@ describe('insertCopiedSibling', () => {
   });
 
   it('increments destination unread only when the copied message is unread', async () => {
+    query.mockResolvedValueOnce({ rows: [{ provider_msgid: null }] });
     query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: false }] });
     query.mockResolvedValue({ rows: [] });
     await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
@@ -526,6 +536,7 @@ describe('insertCopiedSibling', () => {
   });
 
   it('counts total but not unread for a read copy', async () => {
+    query.mockResolvedValueOnce({ rows: [{ provider_msgid: null }] });
     query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: true }] });
     query.mockResolvedValue({ rows: [] });
     await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
@@ -533,6 +544,7 @@ describe('insertCopiedSibling', () => {
   });
 
   it('adjusts no counts when a prior sync already inserted the sibling (ON CONFLICT hit)', async () => {
+    query.mockResolvedValueOnce({ rows: [{ provider_msgid: null }] });
     query.mockResolvedValueOnce({ rows: [] }); // DO NOTHING → no RETURNING row
     await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
     expect(countAdjusts()).toHaveLength(0);
@@ -3137,6 +3149,11 @@ describe('staleness probe connection recovery', () => {
 describe('Gmail label memberships (#418)', () => {
   let rows, acct, serverUids;
   const sent = '[Gmail]/Sent Mail';
+  const folderRows = [
+    { path: 'INBOX', uid_validity: '1', special_use: null },
+    { path: sent, uid_validity: '1', special_use: '\\Sent' },
+    { path: 'Projects', uid_validity: '1', special_use: null },
+  ];
   const parsed = uid => ({ uid, messageId: '<self@example.com>', subject: 'Self mail',
     fromEmail: 'me@example.com', to: [], cc: [], replyTo: [], date: new Date('2026-09-01'),
     isRead: true, flags: ['\\Seen'], parsedHeaders: {} });
@@ -3166,6 +3183,11 @@ describe('Gmail label memberships (#418)', () => {
     query.mockImplementation(async (sql, params = []) => {
       const local = rows.filter(r => r.folder === params[1]);
       if (sql.includes('SELECT * FROM email_accounts') || sql.includes('SELECT id FROM email_accounts')) return { rows: [acct] };
+      // The identity fence re-reads real folder rows under SHARE locks. A
+      // missing row is an unsafe locator, not permission to bypass the fence.
+      if (sql.includes('SELECT path,uid_validity,special_use')) {
+        return { rows: params[0] === acct.id ? folderRows.filter(row => params[1].includes(row.path)) : [] };
+      }
       if (sql.includes('SELECT uid_validity, total_count')) return { rows: [{ uid_validity: 1, total_count: local.length }] };
       if (sql.includes('SELECT uid_validity')) return { rows: [{ uid_validity: 1 }] };
       if (sql.includes('COUNT(*) as count')) return { rows: [{ count: local.length, max_uid: Math.max(0, ...local.map(r => r.uid)) }] };
@@ -3191,6 +3213,7 @@ describe('Gmail label memberships (#418)', () => {
   });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
   const manager = () => ({ backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {}, _secondaryConnectBlocked: () => null, _noteSecondaryRefusal: vi.fn(),
+    _isArchiveFolder: ImapManager.prototype._isArchiveFolder,
     // A re-sync of cached rows now routes flags through the bulk path (#495) instead of
     // re-upserting each row, so the bare-object manager needs the real method.
     _applyFlagUpdates: ImapManager.prototype._applyFlagUpdates });
@@ -3203,6 +3226,75 @@ describe('Gmail label memberships (#418)', () => {
     await vi.runAllTimersAsync();
     await pending;
   }
+  function enableIdentityBootstrap() {
+    const existing = query.getMockImplementation();
+    query.mockImplementation(async (sql, params = []) => {
+      if (sql.includes('SELECT f.path')) return { rows: [{ path: 'All' }] };
+      if (sql.includes('SELECT f.uid_validity')) return { rows: [{ uid_validity: '1' }] };
+      if (sql.includes('INSERT INTO archive_coverage') || sql.includes('INSERT INTO background_download_debits')) return { rows: [{ account_id: acct.id }] };
+      return existing(sql, params);
+    });
+  }
+  for (const mode of ['sync', 'backfill']) it(`${mode} invokes read-only identity bootstrap after releasing the sync lock`, async () => {
+    acct.imap_host = `imap.bootstrap-${mode}.gmail.com.test`;
+    enableIdentityBootstrap();
+    const imap = clientFor('INBOX'), release = vi.fn();
+    imap.capabilities = new Set(['X-GM-EXT-1']);
+    imap.getMailboxLock.mockImplementation(async (_folder, options) => {
+      if (options?.readOnly) expect(release).toHaveBeenCalled();
+      return { release };
+    });
+    imap.fetch.mockImplementation(async function* () { yield { uid: 1, flags: new Set(), emailId: '9007199254740993' }; });
+    if (mode === 'sync') await ImapManager.prototype.syncMessages.call(manager(), acct, imap, 'INBOX', 20, false, true);
+    else {
+      ImapFlow.mockImplementation(function () { return imap; });
+      const pending = ImapManager.prototype.backfillMessages.call(manager(), acct, 'INBOX');
+      await vi.runAllTimersAsync(); await pending;
+      expect(imap.close).toHaveBeenCalledOnce();
+    }
+    expect(imap.getMailboxLock).toHaveBeenCalledWith('INBOX', { readOnly: true });
+    expect(imap.fetch).toHaveBeenCalledWith('1', { uid: true }, { uid: true });
+    expect(query.mock.calls.some(([sql, args]) => sql.includes('UPDATE messages m SET provider_msgid=$4') &&
+      args[2] === 1 && args[3] === '9007199254740993')).toBe(true);
+  });
+  it('counts one bootstrap refusal across a folder walk with the real secondary cooldown', async () => {
+    acct.imap_host = 'imap.bootstrap-refusal.gmail.com.test';
+    enableIdentityBootstrap();
+    const folders = Array.from({ length: 6 }, (_, i) => `Label${i}`);
+    rows = folders.map(folder => ({ folder, uid: 1 }));
+    const mgr = { ...manager(), _connectCooldown: new Map(), _secondaryCooldown: new Map(),
+      _secondaryConnectBlocked: ImapManager.prototype._secondaryConnectBlocked,
+      _noteSecondaryRefusal: vi.fn(ImapManager.prototype._noteSecondaryRefusal) };
+    const imap = clientFor(folders[0]); imap.capabilities = new Set(['X-GM-EXT-1']);
+    const refused = new Error('Connection not available');
+    imap.getMailboxLock.mockRejectedValue(refused);
+    const now = Date.now();
+    for (const folder of folders) await ImapManager.prototype.bootstrapProviderIdentity.call(mgr, acct, imap, folder)
+      .catch(err => expect(err).toBe(refused));
+    expect(imap.getMailboxLock).toHaveBeenCalledOnce();
+    expect(mgr._noteSecondaryRefusal).toHaveBeenCalledOnce();
+    expect(mgr._secondaryCooldown.get(acct.id)).toEqual({ failures: 1, until: now + 30000 });
+  });
+  it.each([
+    ['closed', 'Connection not available', false],
+    ['timeout', 'connect timeout', false],
+    ['credentials', 'Invalid credentials (AUTHENTICATIONFAILED)', false],
+    ['limit', '[LIMIT] Rate limit hit', true],
+    ['connections', 'Too many connections', true],
+    ['maximum', 'Maximum number of connections exceeded', true],
+  ])('reduces host admission only for a load refusal: %s', async (name, detail, limited) => {
+    vi.setSystemTime(0);
+    acct.imap_host = `imap.bootstrap-${name}.gmail.com.test`;
+    rows = [{ folder: 'INBOX', uid: 1 }]; enableIdentityBootstrap();
+    const imap = clientFor('INBOX'); imap.capabilities = new Set(['X-GM-EXT-1']);
+    imap.getMailboxLock.mockRejectedValue(new Error(detail));
+    const mgr = manager();
+    await expect(ImapManager.prototype.bootstrapProviderIdentity.call(mgr, acct, imap, 'INBOX')).rejects.toThrow(detail);
+    expect(mgr._noteSecondaryRefusal).toHaveBeenCalledOnce();
+    vi.setSystemTime(60000);
+    expect((await reserveBackgroundBudget('other-account', acct.imap_host, { messages: 120, bytes: 0 })).allowed).toBe(!limited);
+    if (limited) expect((await reserveBackgroundBudget('other-account', acct.imap_host, { messages: 60, bytes: 0 })).allowed).toBe(true);
+  });
   for (const mode of ['sync', 'backfill']) {
     for (const order of [['INBOX', sent], [sent, 'INBOX'], ['INBOX', 'Projects']]) {
       it(`${mode} preserves both memberships in order ${order.join(' -> ')}`, async () => {
@@ -3215,6 +3307,43 @@ describe('Gmail label memberships (#418)', () => {
       });
     }
   }
+  for (const mode of ['sync', 'backfill']) {
+    for (const [host, expected] of [['imap.gmail.com', '9007199254740993'], ['imap.example.test', null]]) {
+      it(`${mode} scopes provider identity to Gmail on ${host}`, async () => {
+        acct.imap_host = host;
+        parseMessage.mockImplementation(async m => ({ ...parsed(m.uid), providerMsgid: '9007199254740993' }));
+        await (mode === 'sync' ? sync : backfill)(manager(), 'INBOX');
+        const [sql, values] = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO messages'));
+        const columns = sql.match(/INSERT INTO messages\s*\(([^)]*)\)/)[1].split(',').map(c => c.trim());
+        expect(columns).toContain('provider_msgid');
+        expect(values[columns.indexOf('provider_msgid')]).toBe(expected);
+      });
+    }
+  }
+  it('bootstrap yields to foreground work on another account sharing the host', async () => {
+    acct.id = 'foreground-budget-account';
+    ImapFlow.mockImplementation(function () { return clientFor('INBOX'); });
+    const held = [];
+    for (let i = 0; i < 4; i++) held.push(await acquirePooledClient(acct));
+    const foreground = acquirePooledClient(acct);
+    const background = { ...acct, id: 'background-budget-account', imap_host: 'IMAP.GMAIL.COM' };
+    const client = clientFor('INBOX'); client.capabilities = new Set(['X-GM-EXT-1']);
+    query.mockImplementation(async sql => {
+      if (sql.includes('SELECT f.path')) return { rows: [{ path: 'All' }] };
+      if (sql.includes('SELECT f.uid_validity')) return { rows: [{ uid_validity: '1' }] };
+      if (sql.includes('SELECT uid FROM messages')) return { rows: [{ uid: '1' }] };
+      return { rows: [{ account_id: background.id, bytes: '0' }] };
+    });
+    try {
+      await ImapManager.prototype.bootstrapProviderIdentity.call(manager(), background, client, 'INBOX');
+      expect(client.getMailboxLock).not.toHaveBeenCalled();
+    } finally {
+      releasePooledClient(acct, held.shift());
+      releasePooledClient(acct, await foreground);
+      for (const item of held) releasePooledClient(acct, item);
+    }
+  });
+
   it('repairs an older INBOX hole even when cached counts and maximum UID look complete', async () => {
     serverUids = [1, 2];
     rows = [{ folder: 'INBOX', uid: 2 }, { folder: 'INBOX', uid: 3 },
@@ -5476,6 +5605,24 @@ describe('setFlag routing (#474 round 4)', () => {
     }, over);
   };
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it('keeps count certification pending after pooled fallback until the detached persistent STORE settles', async () => {
+    vi.useFakeTimers();
+    let finishStore;
+    const persistent = fakePersistent({ messageFlagsAdd: () => new Promise(resolve => { finishStore = resolve; }) });
+    const { mgr, account } = arrange({ persistent });
+    countCompletion.refresh(account.user_id, { ops: [] }, [account.id], '10');
+    try {
+      const write = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+      await vi.advanceTimersByTimeAsync(5100);
+      await write; // the real pooled fallback succeeded, but its predecessor is still on the wire
+      expect(countCompletion.observation(account.user_id, account.id).quiescentAtStart).toBe(false);
+      finishStore(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(countCompletion.observation(account.user_id, account.id).quiescentAtStart).toBe(true);
+      expect(persistent.release).toHaveBeenCalledOnce();
+    } finally { finishStore?.(true); countCompletion.users.delete(account.user_id); vi.useRealTimers(); }
+  });
 
   it('serializes two opposite flag calls so a stale STORE cannot land last', async () => {
     // The review's inversion: call A (\\Seen=true) slow on the persistent session, call B

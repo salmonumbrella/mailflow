@@ -12,6 +12,10 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { createKeyedSerializer } from '../utils/keyedSerializer.js';
 import { uuidParam } from '../utils/uuid.js';
 import { normalizeAddressList } from '../utils/addressList.js';
+import { fastmailConfigRevision, getSenderIdentityInventory, supportsFastmailVerification } from '../services/fastmailIdentities.js';
+import { providerProfile } from '../services/imapManager.js';
+import { getSearchCoverage } from '../services/searchCoverage.js';
+import { setSearchCoverageAction } from '../services/searchIndexJobs.js';
 
 // Serialize an account's reconnect triggers so a rapid settings change (e.g. a
 // gtd_enabled double-toggle) can't fire two overlapping disconnect→connect chains —
@@ -83,6 +87,9 @@ export const SAFE_FIELDS = [
 export const ACCOUNT_UPDATE_FIELDS = ['name', 'sender_name', 'color', 'icon', 'enabled', 'include_in_unified_inbox', 'auth_user', 'auth_pass', 'sort_order', 'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls', 'smtp_auth_user', 'smtp_auth_pass', 'folder_mappings', 'signature', 'signature_enabled', 'categorization_enabled', 'antispam_enabled', 'trusted_authserv_id', 'auto_cc_addresses', 'auto_bcc_addresses'];
 function safeAccount(row) {
   const obj = Object.fromEntries(SAFE_FIELDS.map(k => [k, row[k]]));
+  obj.fastmail_api_token_configured = !!row.fastmail_api_token;
+  obj.fastmail_config_revision = fastmailConfigRevision(row);
+  obj.fastmail_verification_supported = supportsFastmailVerification(row);
   // Sanitize on read so legacy values stored before the write-time sanitizer are safe
   if (obj.signature) obj.signature = sanitizeSignature(obj.signature);
   return obj;
@@ -90,7 +97,7 @@ function safeAccount(row) {
 
 router.get('/', async (req, res) => {
   const result = await query(
-    `SELECT ${SAFE_FIELDS.join(', ')}
+    `SELECT ${SAFE_FIELDS.join(', ')}, fastmail_api_token
      FROM email_accounts WHERE user_id = $1 ORDER BY sort_order, created_at`,
     [req.session.userId]
   );
@@ -113,9 +120,10 @@ router.get('/', async (req, res) => {
   // Let plugins re-attach their own account-scoped fields (GTD: gtd_enabled/gtd_folders, no longer
   // columns) so the client sees them as before. Each enrichAccount handler returns a field patch.
   const enriched = await Promise.all(result.rows.map(async (a) => {
-    const patches = await pluginRegistry.collectHook('enrichAccount', { account: a });
+    const safe = safeAccount(a);
+    const patches = await pluginRegistry.collectHook('enrichAccount', { account: safe });
     return {
-      ...a,
+      ...safe,
       ...Object.assign({}, ...patches),
       signature: a.signature ? sanitizeSignature(a.signature) : a.signature,
       aliases: (aliasMap[a.id] || []).map(alias => ({
@@ -125,6 +133,16 @@ router.get('/', async (req, res) => {
     };
   }));
   res.json(enriched);
+});
+
+router.get('/:id/sender-identities', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    res.json(await getSenderIdentityInventory(req.session.userId, req.params.id, req.query.aliasId));
+  } catch (error) {
+    if (error.status === 404) return res.status(404).json({ error: 'Account not found' });
+    res.status(503).json({ error: 'Could not verify this sender with Fastmail.' });
+  }
 });
 
 router.post('/', async (req, res) => {
@@ -199,6 +217,13 @@ router.put('/:id', async (req, res) => {
   // Verify ownership.
   const check = await query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2', [id, req.session.userId]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+
+  if ('fastmail_api_token' in updates) {
+    if (typeof updates.fastmail_api_token !== 'string' || updates.fastmail_api_token.length > 4096 || /\p{Cc}/u.test(updates.fastmail_api_token)) {
+      return res.status(400).json({ error: 'Invalid Fastmail API token' });
+    }
+    updates.fastmail_api_token = updates.fastmail_api_token.trim();
+  }
 
   if ('name' in updates && hasHeaderInjectionChars(updates.name)) {
     return res.status(400).json({ error: 'Name cannot contain control characters' });
@@ -276,8 +301,10 @@ router.put('/:id', async (req, res) => {
   // write of a plugin's fields happens in persistAccountSettings below (into the plugin's own store,
   // not a column). This is the generic account-scoped settings surface; core knows nothing
   // GTD-specific here.
+  const pluginUpdates = { ...updates };
+  delete pluginUpdates.fastmail_api_token;
   const settingsResults = await pluginRegistry.collectHook('validateAccountSettings', {
-    updates, accountId: id,
+    updates: pluginUpdates, accountId: id,
   });
   const rejectedByField = {};
   let pluginRequiresReconnect = false;
@@ -290,10 +317,11 @@ router.put('/:id', async (req, res) => {
   const sets = [];
   const values = [];
   let i = 1;
-  for (const key of ACCOUNT_UPDATE_FIELDS) {
+  for (const key of [...ACCOUNT_UPDATE_FIELDS, 'fastmail_api_token']) {
     if (key in updates) {
       sets.push(`${key} = $${i++}`);
-      const value = ((key === 'auth_pass' || key === 'smtp_auth_pass') && updates[key]) ? encrypt(updates[key])
+      const value = key === 'fastmail_api_token' ? (updates[key] ? encrypt(updates[key]) : null)
+        : ((key === 'auth_pass' || key === 'smtp_auth_pass') && updates[key]) ? encrypt(updates[key])
         : (key === 'smtp_auth_user' || key === 'smtp_auth_pass') ? (updates[key] || null)
         : (key === 'signature') ? sanitizeSignature(updates[key]) || null
         : (key === 'include_in_unified_inbox') ? !!updates[key]
@@ -322,7 +350,7 @@ router.put('/:id', async (req, res) => {
   // Persist plugin-owned fields into their own stores; each returns { patch } (the saved values) to
   // echo back on the response so the client sees them as if they were columns.
   const persistResults = await pluginRegistry.collectHook('persistAccountSettings', {
-    accountId: id, updates,
+    accountId: id, updates: pluginUpdates,
   });
   const pluginPatch = {};
   let pluginPersisted = false;
@@ -494,6 +522,30 @@ router.get('/:id/folders', async (req, res) => {
   // Freshness depends on how long this account's rotation takes, so every row needs the count.
   const selectableFolders = result.rows.filter(row => !row.no_select).length;
   res.json(result.rows.map(row => publicFolderCounts(row, Date.now(), { selectableFolders })));
+});
+
+router.get('/:id/search-coverage', async (req, res) => {
+  try {
+    const [coverage] = await getSearchCoverage([req.params.id], {
+      userId: req.session.userId, profileForAccount: providerProfile,
+    });
+    if (!coverage) return res.status(404).json({ error: 'Account not found' });
+    res.json(coverage);
+  } catch {
+    res.status(503).json({ error: 'Search indexing status is unavailable. Try again.' });
+  }
+});
+
+router.post('/:id/search-coverage', async (req, res) => {
+  const action = req.body?.action;
+  if (!['pause', 'resume', 'retry'].includes(action)) return res.status(400).json({ error: 'Choose pause, resume or retry.' });
+  try {
+    const state = await setSearchCoverageAction(req.params.id, action, { userId: req.session.userId });
+    if (!state) return res.status(404).json({ error: 'Account not found' });
+    res.json({ paused: state.paused });
+  } catch {
+    res.status(503).json({ error: 'Unable to update search indexing. Try again.' });
+  }
 });
 
 router.post('/:id/reindex', async (req, res) => {

@@ -88,18 +88,20 @@ export async function archiveTargetGroupsForRows(
 }
 
 export async function archiveInChunks(ids, archive, chunkSize = 500) {
-  const archived = [];
-  const noArchiveFolder = [];
+  const archived = [], countTargets = [], unconfirmed = [], noArchiveFolder = [];
   for (let offset = 0; offset < ids.length; offset += chunkSize) {
+    const chunk = new Set(ids.slice(offset, offset + chunkSize));
     try {
-      const result = await archive(ids.slice(offset, offset + chunkSize));
-      archived.push(...(result?.archived || []));
+      const result = await archive([...chunk]);
+      archived.push(...(result?.archived || []).filter(id => chunk.has(id)));
+      countTargets.push(...(result?.countTargets || []).filter(target => chunk.has(target.id)));
+      unconfirmed.push(...(result?.unconfirmed || []).filter(id => chunk.has(id)));
       noArchiveFolder.push(...(result?.noArchiveFolder || []));
     } catch (error) {
-      return { archived, noArchiveFolder, unconfirmed: ids.slice(offset), error };
+      return { archived, countTargets, noArchiveFolder, unconfirmed: unconfirmed.concat(error.notApplied === true ? [] : ids.slice(offset)), error };
     }
   }
-  return { archived, noArchiveFolder, unconfirmed: [], error: null };
+  return { archived, countTargets, noArchiveFolder, unconfirmed, error: null };
 }
 
 export function unreadCountsByAccount(messages) {

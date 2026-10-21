@@ -1,3 +1,4 @@
+import { releaseGtdRemovalState } from './pendingGtdRemovals.js';
 import { clearGtdRailSelection, beginGtdClassification, endGtdClassification } from './gtdHotkeys.js';
 
 export async function classifyWithUndo(messageId, state, {
@@ -30,6 +31,7 @@ export async function classifyWithUndo(messageId, state, {
   try {
     const result = await api.gtdClassify(messageId, state);
     const current = currentStore();
+    if (result?.applied === true) releaseGtdRemovalState(message?.message_id || messageId, state);
     current.scheduleGtdSectionsFetch();
     if (result?.switched) dismissThreadUndo();
     if (result?.sourceRemoved) {

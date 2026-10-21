@@ -12,6 +12,7 @@ test('copy uses the shared request client and emits the lock event on 423', asyn
   try {
     let call;
     globalThis.fetch = async (url, opts) => {
+      if (url.endsWith('/unread-counts')) return { ok: true, json: async () => ({ lease: { token: 'copy.test.1', expiresInMs: 360000 } }) };
       call = { url, opts };
       return { ok: true, json: async () => ({ copied: true }) };
     };

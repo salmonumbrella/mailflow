@@ -201,6 +201,11 @@
     "recipientMenu": {
       "copy": "Copier l'adresse",
       "copyAll": "Tout copier dans ce champ"
+    },
+    "senderValidation": {
+      "unavailable": "Fastmail ne répertorie pas cette adresse comme identité d’envoi.",
+      "unknown": "Impossible de vérifier cet expéditeur auprès de Fastmail.",
+      "missing": "L’expéditeur sélectionné n’est plus disponible. Sélectionnez à nouveau un expéditeur."
     }
   },
   "message": {
@@ -996,7 +1001,13 @@
       "trustedAuthservDetected": "Vus dans vos messages récents (cliquez pour utiliser) :",
       "trustedAuthservDetectedNone": "Pas encore de données : les messages sont analysés lorsque l'antispam est actif pour ce compte.",
       "trustedAuthservWarn": "Ne faites confiance qu'à un ID que vous reconnaissez comme le serveur de réception de votre fournisseur.",
-      "enabledGlobally": "Activé globalement"
+      "enabledGlobally": "Activé globalement",
+      "fastmailVerification": {
+        "token": "Jeton API Fastmail",
+        "help": "Limitez le jeton à l’envoi de courriels (identités) et, facultativement, aux adresses masquées. N’accordez pas un accès complet. Ne modifiez rien pour conserver le jeton enregistré.",
+        "configured": "Un jeton est enregistré.",
+        "clear": "Supprimer le jeton enregistré"
+      }
     },
     "folderMappings": {
       "title": "Mappage des dossiers",
@@ -1923,6 +1934,7 @@
     "done": "Marquer comme terminé",
     "doneFailed": "Impossible de marquer comme terminé",
     "doneArchiveFailed": "Marqué comme terminé, mais l'archivage a échoué — toujours dans la boîte de réception",
+    "doneThreadRemains": "Certains messages de cette conversation n'ont pas pu être retirés, elle reste donc dans sa section GTD",
     "state": {
       "todo": "À faire",
       "watch": "Surveiller",

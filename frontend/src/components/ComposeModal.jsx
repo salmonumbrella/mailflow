@@ -6,6 +6,8 @@ import DOMPurify from 'dompurify';
 import { sanitizeEmailForApp } from '../utils/appEmailHtml.js';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { captureReadRequest, reconcileReadState } from '../utils/pendingReads.js';
+import { applyDeleteGuard } from '../utils/pendingDeletes.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import { useEditor, EditorContent, useEditorState, NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
@@ -33,6 +35,7 @@ import { openSentMessage } from '../utils/openSentMessage.js';
 import { frameGeometry } from '../utils/frameGeometry.js';
 import { AI_MESSAGE_MAX_CHARS } from '../aiActions.js';
 import { stripTags } from '../utils/stripTags.js';
+import { useSenderValidation } from '../hooks/useSenderValidation.js';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -308,6 +311,7 @@ export default function ComposeModal() {
   const fromAlias = fromResolved.aliasId
     ? fromAccount?.aliases?.find(al => al.id === fromResolved.aliasId)
     : null;
+  useSenderValidation(fromAccount, fromAlias, fromResolved.aliasId);
   const fromSignature = fromAlias
     ? (fromAlias.signature !== null && fromAlias.signature !== undefined ? fromAlias.signature : fromAccount?.signature || null)
     : (fromAccount?.signature || null);
@@ -1001,8 +1005,19 @@ export default function ComposeModal() {
         if (replyThreadId) {
           const refreshThread = async () => {
             try {
+              const invocation = useStore.getState();
+              if (invocation.isLocked || invocation.user?.id !== composeOwner) return;
+              const generation = invocation.countGeneration;
+              const readToken = captureReadRequest();
               const data = await api.getThread(replyThreadId);
-              if (data.messages?.length) setThreadMessages(replyThreadId, data.messages);
+              const current = useStore.getState();
+              if (current.isLocked || current.user?.id !== composeOwner || current.countGeneration !== generation) return;
+              if (data.messages?.length) {
+                const rows = reconcileReadState(applyDeleteGuard(data.messages), readToken);
+                const latest = useStore.getState();
+                if (latest.isLocked || latest.user?.id !== composeOwner || latest.countGeneration !== generation) return;
+                setThreadMessages(replyThreadId, rows);
+              }
             } catch { /* best-effort refresh */ }
           };
           setTimeout(refreshThread, 3000);
