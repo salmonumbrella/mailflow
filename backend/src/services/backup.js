@@ -480,7 +480,16 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
     }
     // A standalone sequence only ever moves forward: rows restored from another server may carry
     // values from its sequence, and a value handed out here must still come after them.
-    for (const [name, value] of Object.entries(manifest.sequences ?? {})) {
+    const restoredSequences = { ...manifest.sequences };
+    const flagSequence = 'message_flag_intent_version_seq';
+    const messageColumns = new Set((columns.get('messages') || []).map(c => c.name));
+    if (standalone.has(flagSequence) && messageColumns.has('read_intent_version') && messageColumns.has('star_intent_version')) {
+      const { rows: [maximum] } = await client.query(
+        'SELECT GREATEST(COALESCE(MAX(read_intent_version), 0), COALESCE(MAX(star_intent_version), 0))::text AS value FROM messages');
+      const saved = BigInt(restoredSequences[flagSequence] || '0');
+      restoredSequences[flagSequence] = String(BigInt(maximum.value) > saved ? BigInt(maximum.value) : saved);
+    }
+    for (const [name, value] of Object.entries(restoredSequences)) {
       if (!standalone.has(name)) continue;
       const here = await sequencePosition(client, name);
       const next = (BigInt(value) > here ? BigInt(value) : here) + 1n;

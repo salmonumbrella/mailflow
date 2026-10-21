@@ -29,7 +29,7 @@ const OIDS = { text: 25, int8: 20, json: 114, jsonb: 3802, _jsonb: 3807 };
 // Answers the catalog queries the service makes and serves cursor reads from `data`, which holds
 // PostgreSQL's text for each value; like pg, a read hands it to the query's type parsers. Every
 // statement is kept, with its parameters and per-query type parsers, so tests can assert on it.
-function fakeClient({ tables, columns = {}, foreignKeys = [], version = VERSION, data = {}, standalone = [], failOn = null, onQuery = null } = {}) {
+function fakeClient({ tables, columns = {}, foreignKeys = [], version = VERSION, data = {}, standalone = [], flagIntentMaximum = '0', failOn = null, onQuery = null } = {}) {
   const log = [];
   let cursor = null;
   return {
@@ -49,6 +49,7 @@ function fakeClient({ tables, columns = {}, foreignKeys = [], version = VERSION,
       }
       if (text.includes("relkind = 'S'")) return { rows: standalone.map(q => ({ name: q.name })) };
       if (text.startsWith('SELECT last_value::text AS value FROM')) return { rows: [{ value: standalone.find(q => text.endsWith(`"${q.name}"`)).value }] };
+      if (text.includes('MAX(read_intent_version)')) return { rows: [{ value: flagIntentMaximum }] };
       if (text.includes('FROM pg_constraint')) return { rows: foreignKeys };
       if (text.startsWith('SELECT version FROM schema_migrations')) return { rows: version ? [{ version }] : [] };
       if (text.startsWith("SELECT format('ALTER SEQUENCE")) return { rows: [{ statement: `ALTER SEQUENCE ${params[0]} RESTART WITH next` }] };
@@ -277,6 +278,25 @@ describe('writeBackup', () => {
 });
 
 describe('restoreBackup', () => {
+  it.each([false, true])('keeps flag intent versions lossless and reseeds restored rows (missing sequence=%s)', async missing => {
+    const sequence = 'message_flag_intent_version_seq';
+    const columns = { ...COLUMNS, messages: [...COLUMNS.messages,
+      { name: 'read_intent_version', type: 'int8' }, { name: 'star_intent_version', type: 'int8' }] };
+    const message = { id: 'm1', account_id: 'a1', subject: 'Copy',
+      read_intent_version: '9007199254740993', star_intent_version: '9007199254740995' };
+    const source = restoreClient({ columns, data: { messages: [message] },
+      standalone: [{ name: sequence, value: message.star_intent_version }] });
+    const { lines } = await backupLines(source, 'full');
+    expect(lines.find(line => line.table === 'messages').rows[0]).toEqual(message);
+    if (missing) delete lines[0].sequences[sequence];
+    const target = restoreClient({ columns, flagIntentMaximum: message.star_intent_version,
+      standalone: [{ name: sequence, value: '2' }] });
+    await restoreBackup(target, file(lines));
+    expect(target.statements()).toContain('ALTER SEQUENCE "message_flag_intent_version_seq" RESTART WITH 9007199254740996');
+    expect(JSON.parse(inserts(target).find(item => item.text.startsWith('INSERT INTO "messages"')).params[0])[0])
+      .toMatchObject({ read_intent_version: '9007199254740993', star_intent_version: '9007199254740995' });
+  });
+
   const rows = [
     manifest(),
     { table: 'users', rows: [{ id: 'u1', username: 'ann', preferences: '{"a": 1}' }] },
