@@ -1,0 +1,291 @@
+{
+  "historical_result": {
+    "total": 121,
+    "passed": 94,
+    "failed": 27,
+    "seconds": 793.13
+  },
+  "original_log_sha256": "ef6750a17792b66921466fb07f33bf4fcc2a2c2d25d87df19ce7d66128936324",
+  "not_candidate_evidence": true,
+  "dispositions": [
+    {
+      "id": "F01",
+      "suite": "address",
+      "test": "flags a newly appended draft through live same-session proof before its first sync",
+      "duration_ms": 30128,
+      "observation": "timeout at 30128ms; original fake fresh row lacked xmin and RETURNING result contracts diverged",
+      "candidate_treatment": "FIXTURE CANDIDATE A: fresh sync/draft fake rows now have xmin; legacy-bind/restore and flag SQL return real-shaped rows, enforce xmin/version/identity predicates and advance xmin. Existing post-run production cleanup only removes unused RETURNING xmin consumption. UNRUN; must recover live FETCH/draft wire oracle.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F02",
+      "suite": "address",
+      "test": "retires an invalid row only through real live FETCH, including identity null",
+      "duration_ms": 30006,
+      "observation": "timeout at 30006ms; original fake fresh row lacked xmin and RETURNING result contracts diverged",
+      "candidate_treatment": "FIXTURE CANDIDATE A: fresh sync/draft fake rows now have xmin; legacy-bind/restore and flag SQL return real-shaped rows, enforce xmin/version/identity predicates and advance xmin. Existing post-run production cleanup only removes unused RETURNING xmin consumption. UNRUN; must recover live FETCH/draft wire oracle.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F03",
+      "suite": "address",
+      "test": "retires an invalid row only through real live FETCH, including identity <reused@example.test>",
+      "duration_ms": 30039,
+      "observation": "timeout at 30039ms; original fake fresh row lacked xmin and RETURNING result contracts diverged",
+      "candidate_treatment": "FIXTURE CANDIDATE A: fresh sync/draft fake rows now have xmin; legacy-bind/restore and flag SQL return real-shaped rows, enforce xmin/version/identity predicates and advance xmin. Existing post-run production cleanup only removes unused RETURNING xmin consumption. UNRUN; must recover live FETCH/draft wire oracle.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F04",
+      "suite": "retry",
+      "test": "replays healthy INBOX over IDLE despite secondary-login backoff, without FETCH or login",
+      "duration_ms": 39,
+      "observation": "wire/attempt assertion failure at 39ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F05",
+      "suite": "retry",
+      "test": "replays poll-only accounts through the existing pool",
+      "duration_ms": 30007,
+      "observation": "timeout at 30007ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F06",
+      "suite": "retry",
+      "test": "keeps a newer retry admitted while terminal marker cleanup is awaiting DB",
+      "duration_ms": 30026,
+      "observation": "timeout at 30026ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F07",
+      "suite": "retry",
+      "test": "does not replay old read after a newer unread confirmed during its DB reassertion",
+      "duration_ms": 30023,
+      "observation": "timeout at 30023ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F08",
+      "suite": "retry",
+      "test": "settles an implicitly owned successful label STORE",
+      "duration_ms": 30004,
+      "observation": "timeout at 30004ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F09",
+      "suite": "retry",
+      "test": "retires an older queued unread after the current label action confirms read",
+      "duration_ms": 30068,
+      "observation": "timeout at 30068ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F10",
+      "suite": "retry",
+      "test": "cancels a detached persistent STORE after its address SQL await",
+      "duration_ms": 30023,
+      "observation": "timeout at 30023ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F11",
+      "suite": "retry",
+      "test": "cancels a detached persistent STORE after its stamp SQL await",
+      "duration_ms": 30069,
+      "observation": "timeout at 30069ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F12",
+      "suite": "retry",
+      "test": "retires the fortieth failed STORE even when its fallback pool is available",
+      "duration_ms": 30041,
+      "observation": "timeout at 30041ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F13",
+      "suite": "retry",
+      "test": "bounds retained retries across expiry while terminal SQL is delayed",
+      "duration_ms": 24848,
+      "observation": "timeout at 24848ms against explicit20000ms",
+      "candidate_treatment": "RESOURCE/PERFORMANCE UNRESOLVED: retain 10000 keys, delayed terminal SQL, 20000ms deadline and every bound/no-obsolete-STORE assertion. No candidate timeout relaxation or capacity reduction. Host must distinguish overload from a production/fake complexity issue.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": true
+    },
+    {
+      "id": "F14",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Seen'=true with header \"'<copy@example.test>'\"",
+      "duration_ms": 30028,
+      "observation": "timeout at 30028ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F15",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Seen'=true with header \"''\"",
+      "duration_ms": 30103,
+      "observation": "timeout at 30103ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F16",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Seen'=true with header \"'<>'\"",
+      "duration_ms": 30057,
+      "observation": "timeout at 30057ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F17",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Seen'=false with header \"'<copy@example.test>'\"",
+      "duration_ms": 30037,
+      "observation": "timeout at 30037ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F18",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Seen'=false with header \"''\"",
+      "duration_ms": 30210,
+      "observation": "timeout at 30210ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F19",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Seen'=false with header \"'<>'\"",
+      "duration_ms": 30054,
+      "observation": "timeout at 30054ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F20",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Flagged'=true with header \"'<copy@example.test>'\"",
+      "duration_ms": 30166,
+      "observation": "timeout at 30166ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F21",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Flagged'=true with header \"''\"",
+      "duration_ms": 30022,
+      "observation": "timeout at 30022ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F22",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Flagged'=true with header \"'<>'\"",
+      "duration_ms": 30024,
+      "observation": "timeout at 30024ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F23",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Flagged'=false with header \"'<copy@example.test>'\"",
+      "duration_ms": 30069,
+      "observation": "timeout at 30069ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F24",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Flagged'=false with header \"''\"",
+      "duration_ms": 30052,
+      "observation": "timeout at 30052ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F25",
+      "suite": "retry",
+      "test": "preserves healthy IDLE for '\\Flagged'=false with header \"'<>'\"",
+      "duration_ms": 30022,
+      "observation": "timeout at 30022ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F26",
+      "suite": "retry",
+      "test": "gives up on the fortieth actual failed STORE and clears all owned state",
+      "duration_ms": 198,
+      "observation": "wire/attempt assertion failure at 198ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    },
+    {
+      "id": "F27",
+      "suite": "retry",
+      "test": "counts an actual failed STORE but does not spend another attempt on its fallback gate",
+      "duration_ms": 9,
+      "observation": "wire/attempt assertion failure at 9ms; fake UPDATE returned rows:[] despite production RETURNING",
+      "candidate_treatment": "FIXTURE CANDIDATE B: add initial xmin; model guarded reassert and terminal physical identity/version CAS; return id/xmin rows and advance xmin on actual writes. Existing post-run unused-xmin-return cleanup retained. UNRUN; precise wire, lifecycle, marker and attempt assertions unchanged.",
+      "status": "UNRUN",
+      "resource_timeout_unresolved": false
+    }
+  ],
+  "oracles_and_timeouts_unchanged": true,
+  "later_diagnostic": {
+    "run": 39623050793,
+    "old_failures_passed": 25,
+    "old_failures_still_failed": 2,
+    "remaining": "two liveRecovery schedules; markerReady fixture adaptation in retry-repair-v2",
+    "capacity10000_explicit20000ms": "PASSED in3877.832ms; no causal assertion about earlier timeout",
+    "successor": "UNRUN"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "base_commit": "123ba32ec5cd8c30f9c174201428ba9bcb06b433",
+  "base_tree": "d32a97d55ff16e02f0e134ce34ef4f7ad060fa2d",
+  "effective_tree": "2248333ab67881ce5903fede22420dc142e23c1a",
+  "candidate_commit": null,
+  "predecessor": {
+    "public_commit": "3383f9d7b297eeb6e3925ae1f674addb2b60472d",
+    "manifest_sha256": "e2fe271c59ff947a46317d082e8929a8ff04a5263090b7de904c0ab5f349b46d",
+    "effective_tree": "dce9459a8906352d92a577d0d9fabd7f7e3ba719",
+    "run_id": 39623050793,
+    "native": {
+      "passed": 292,
+      "failed": 36,
+      "total": 328
+    }
+  },
+  "ordered_sources": [
+    "immutable e2fe/dce reconstruction on public123",
+    "sealed retry-repair-v2 five named operations + exact tests",
+    "sealed safety-repair-v1 seven named operations + explicit imports + exact tests",
+    "sealed safety-repair-r2 one expunge fragment +31-case exact fixture",
+    "sealed root-stars-r5 four named fragments + exact proofs/affected fixtures"
+  ],
+  "sealed_owner_inputs": {
+    "retry": "6d97fe600691de524a0733b3f21fcd41a65f67a51099d7bba23ccff5cbb7b96c",
+    "safety": "d245819bdff00e70ba1547ae8ae38909e58605d86fa8716ce759ffcbf47fb812",
+    "root": "fa2d98d48dd087c13ac28ef6ae3af6d8565199b5abe0c15179096f27b577d6ef",
+    "safety_legacy": "3e93b232fb8640e5ce7c8031b118543619571edd6e0946a7d4782a2e28350ded"
+  },
+  "review_requirement": "Existing independent exact combined source review plus Root exact harness review and NEW changed-source execution release; no old review/run counts as acceptance."
+}

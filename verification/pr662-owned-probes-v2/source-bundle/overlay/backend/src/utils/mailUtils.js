@@ -1,0 +1,370 @@
+import { pluginRegistry } from '../plugins/registry.js';
+import { query } from '../services/db.js';
+import { recordSyncSignal } from '../services/diagnosticsRing.js';
+
+// A stored folder mapping is only trustworthy if the mailbox still exists AND is selectable.
+// IMAP exposes non-selectable placeholders — most notably Gmail's "[Gmail]" parent, which
+// carries \Noselect — and a mapping can also go stale when a folder is renamed or deleted.
+// Trusting such a value makes every resolve of that role route to a mailbox the server
+// rejects on SELECT ("Command failed"), silently breaking the role (sent messages never
+// import, trash moves fail, etc. — issue #386). When the mapped path is missing or
+// non-selectable, return null so the caller falls back to special-use / name detection.
+// This self-heals affected accounts on the next resolve, once folder sync (syncFolders) has
+// flagged the offending folder as no_select.
+export async function mappedFolderUsable(accountId, path) {
+  if (!path) return null;
+  const result = await query(
+    `SELECT 1 FROM folders
+     WHERE account_id = $1 AND path = $2 AND no_select = false
+     LIMIT 1`,
+    [accountId, path]
+  );
+  return result.rows.length ? path : null;
+}
+
+// Without a usable mapping, a folder is Trash or Drafts by its special-use flag, or by a stock name
+// at the top level or directly under INBOX, where servers such as Courier keep every folder.
+// Deleting from either is a permanent expunge, so a word in a name ("Blog drafts") or a stock name
+// further down ("Clients/Drafts") must not count: those are the user's own folders. imapflow
+// already flags one folder per role, localized names included, so the names only add a second
+// stock-named folder, such as a client-created "Trash" beside iCloud's "Deleted Messages".
+const TOP_LEVEL_FOLDER_SQL = `(path = name OR upper(path) = ('INBOX' || delimiter || upper(name)))`;
+const TRASH_FOLDER_SQL = `(special_use = '\\Trash'
+  OR (lower(name) IN ('trash', 'deleted', 'deleted items', 'deleted messages') AND ${TOP_LEVEL_FOLDER_SQL}))`;
+const DRAFTS_FOLDER_SQL = `(special_use = '\\Drafts'
+  OR (lower(name) IN ('drafts', 'draft') AND ${TOP_LEVEL_FOLDER_SQL}))`;
+
+// True for a draft, in a query over messages aliased `m`: flagged \Draft, or held in the account's
+// mapped Drafts folder or a folder the Drafts rules above match. The thread badge leaves drafts out
+// and the thread route marks them, so deleting or moving a conversation can spare an unsent reply.
+export const draftMessageSql = (m = 'm') => `(COALESCE(${m}.flags ? '\\Draft', false)
+  OR EXISTS (
+    SELECT 1 FROM folders df
+    WHERE df.account_id = ${m}.account_id AND df.path = ${m}.folder
+      AND (${DRAFTS_FOLDER_SQL}
+           OR df.path = (SELECT ea.folder_mappings->>'drafts' FROM email_accounts ea WHERE ea.id = ${m}.account_id))
+  ))`;
+
+// Resolve the canonical trash folder path for an account (used as move destination).
+// folder_mappings.trash (user-configured) takes priority over special_use and name heuristics,
+// but only when it points at a selectable folder (see mappedFolderUsable).
+// It tests folders exactly as resolveAllTrashPaths does: a destination outside that set would
+// have deletes from it moved into itself instead of expunged.
+export async function resolveTrashFolder(accountId, folderMappings) {
+  const mapped = await mappedFolderUsable(accountId, folderMappings?.trash);
+  if (mapped) return mapped;
+  const result = await query(
+    `SELECT path FROM folders WHERE account_id = $1
+     AND ${TRASH_FOLDER_SQL}
+     ORDER BY (CASE WHEN special_use = '\\Trash' THEN 0 ELSE 1 END)
+     LIMIT 1`,
+    [accountId]
+  );
+  return result.rows[0]?.path || null;
+}
+
+// Resolve ALL trash-like folder paths for an account (used for expunge-vs-move decisions).
+// When a user-configured trash mapping exists, only that folder is considered "trash."
+// Otherwise every folder that matches the trash heuristic is included — this handles
+// accounts that have both e.g. "Trash" and "Deleted Messages" in their folder list.
+export async function resolveAllTrashPaths(accountId, folderMappings) {
+  const mapped = await mappedFolderUsable(accountId, folderMappings?.trash);
+  if (mapped) return new Set([mapped]);
+  const result = await query(
+    `SELECT path FROM folders WHERE account_id = $1
+     AND ${TRASH_FOLDER_SQL}`,
+    [accountId]
+  );
+  return new Set(result.rows.map(r => r.path));
+}
+
+export async function resolveAllDraftsPaths(accountId, folderMappings) {
+  const mapped = await mappedFolderUsable(accountId, folderMappings?.drafts);
+  if (mapped) return new Set([mapped]);
+  const result = await query(
+    `SELECT path FROM folders WHERE account_id = $1
+     AND ${DRAFTS_FOLDER_SQL}`,
+    [accountId]
+  );
+  return new Set(result.rows.map(r => r.path));
+}
+
+// Resolve the canonical archive folder path for an account.
+// folder_mappings.archive (user-configured) takes priority over special_use and the
+// name heuristic. Falls back to special_use = '\All' (Gmail's "All Mail") last, since
+// stock Gmail over IMAP exposes no '\Archive' folder — archiving there means moving
+// the message to All Mail, which strips the INBOX label.
+// IMPORTANT: callers that persist the destination back to the messages table must
+// special-case an '\All' result — see isAllMailFolder below.
+export async function resolveArchiveFolder(accountId, folderMappings) {
+  const mapped = await mappedFolderUsable(accountId, folderMappings?.archive);
+  if (mapped) return mapped;
+  const result = await query(
+    `SELECT path FROM folders WHERE account_id = $1
+     AND (special_use = '\\Archive' OR lower(name) LIKE '%archive%' OR special_use = '\\All')
+     ORDER BY (CASE
+       WHEN special_use = '\\Archive' THEN 0
+       WHEN lower(name) LIKE '%archive%' THEN 1
+       ELSE 2
+     END)
+     LIMIT 1`,
+    [accountId]
+  );
+  return result.rows[0]?.path || null;
+}
+
+// True when `path` is this account's Gmail-style "All Mail" folder (special_use = '\All').
+// All Mail is excluded from sync/backfill (imapManager.js skipFolderPatterns) and from
+// the relocate guard, so no sync loop ever maintains a messages row filed under it.
+// Callers that move a message there (see resolveArchiveFolder) must delete the source
+// row instead of re-homing it into folder = <All Mail path> — the message should
+// simply vanish from our view, matching how the app treats All Mail everywhere else.
+export async function isAllMailFolder(accountId, path) {
+  if (!path) return false;
+  const result = await query(
+    `SELECT 1 FROM folders WHERE account_id = $1 AND path = $2 AND special_use = '\\All'`,
+    [accountId, path]
+  );
+  return result.rows.length > 0;
+}
+
+// Resolve the canonical spam/junk folder path for an account.
+// folder_mappings.spam (user-configured) takes priority over special_use and
+// the name heuristic. Matches the multilingual names used by major providers:
+//   - Gmail / generic:    Spam, Junk, Junk Mail
+//   - Outlook/Microsoft:  Junk Email, Courrier indésirable (fr)
+//   - Yahoo:              Bulk Mail
+//   - GMX:                Spamverdacht
+//   - Italian providers:  Indesiderata, Posta indesiderata
+export async function resolveSpamFolder(accountId, folderMappings) {
+  const mapped = await mappedFolderUsable(accountId, folderMappings?.spam);
+  if (mapped) return mapped;
+  const result = await query(
+    `SELECT path FROM folders WHERE account_id = $1
+     AND (special_use = '\\Junk'
+          OR lower(name) ~ '(spam|junk|bulk|indesiderata|spamverdacht|courrier ind|posta indesiderata)')
+     ORDER BY (CASE WHEN special_use = '\\Junk' THEN 0 ELSE 1 END)
+     LIMIT 1`,
+    [accountId]
+  );
+  return result.rows[0]?.path || null;
+}
+
+// Resolve ALL spam-like folder paths for an account (used for already-spam checks).
+// Same pattern as resolveAllTrashPaths: when user has configured folder_mappings.spam,
+// only that path is returned. Otherwise every folder matching the heuristic.
+export async function resolveAllSpamPaths(accountId, folderMappings) {
+  const mapped = await mappedFolderUsable(accountId, folderMappings?.spam);
+  if (mapped) return new Set([mapped]);
+  const result = await query(
+    `SELECT path FROM folders WHERE account_id = $1
+     AND (special_use = '\\Junk'
+          OR lower(name) ~ '(spam|junk|bulk|indesiderata|spamverdacht|courrier ind|posta indesiderata)')`,
+    [accountId]
+  );
+  return new Set(result.rows.map(r => r.path));
+}
+
+// Resolve the canonical Sent folder path for an account (APPEND target for sent copies).
+// folder_mappings.sent (user-configured) takes priority over special_use auto-detect, but
+// only when it points at a selectable folder (see mappedFolderUsable) — a mapping left on a
+// non-selectable parent like "[Gmail]" would make every sent copy fail to APPEND/sync.
+export async function resolveSentFolder(accountId, folderMappings) {
+  const mapped = await mappedFolderUsable(accountId, folderMappings?.sent);
+  if (mapped) return mapped;
+  const result = await query(
+    "SELECT path FROM folders WHERE account_id = $1 AND special_use = '\\Sent' LIMIT 1",
+    [accountId]
+  );
+  return result.rows[0]?.path || null;
+}
+
+// Adjust cached folder row counts after local message mutations so that pagination
+// totals stay accurate without waiting for the next IMAP sync. Fire-and-forget —
+// errors are logged but never block the caller; sync will correct any discrepancy.
+export function adjustFolderCounts(accountId, path, totalDelta, unreadDelta) {
+  if (totalDelta === 0 && unreadDelta === 0) return;
+  // Snapshot the pre-update counters (prev) so RETURNING can tell whether the GREATEST(0, …)
+  // clamp actually fired. A clamp means the cached counter was already below the applied
+  // delta — i.e. the incremental count had drifted under the true value, which is exactly the
+  // phantom-badge mechanism. The clamped writes are unchanged; this only observes them.
+  query(
+    `WITH prev AS (
+       SELECT total_count AS ot, unread_count AS ou
+         FROM folders WHERE account_id = $3 AND path = $4
+     )
+     UPDATE folders f
+        SET total_count  = GREATEST(0, f.total_count  + $1),
+            unread_count = GREATEST(0, f.unread_count + $2)
+       FROM prev
+      WHERE f.account_id = $3 AND f.path = $4
+      RETURNING (prev.ou + $2 < 0) AS unread_clamped, (prev.ot + $1 < 0) AS total_clamped`,
+    [totalDelta, unreadDelta, accountId, path]
+  ).then(r => {
+    const row = r.rows[0];
+    if (row && (row.unread_clamped || row.total_clamped)) {
+      recordSyncSignal('badge_count_clamp', { accountId });
+    }
+  }).catch(err => console.error('Folder count adjust failed:', err.message));
+}
+
+// Fan a read-state change out to a message's sibling label rows. Under GTD a single
+// message_id owns one row per folder it is filed in (INBOX + Todo + Watch …); the
+// caller has already updated the acted row by PK, so this catches the rest. The
+// `is_read <> $1` filter both makes the write idempotent and excludes the acted row
+// (already at the target state), so only rows that genuinely flip are returned — and
+// each returned folder gets its unread count adjusted. Callers gate on the message
+// actually having siblings, so a plain single-folder message never reaches here.
+export async function fanOutReadToSiblings(accountId, messageId, read, { action } = {}) {
+  if (!messageId) return []; // no shared header → no siblings to fan out to
+  const version = action && await action.version;
+  const res = await query(
+    `UPDATE messages SET is_read = $1, read_changed_at = ${action ? '$4, read_intent_version = $5::bigint' : 'NOW()'}
+      WHERE account_id = $2 AND message_id = $3 AND is_read <> $1
+      ${action ? 'AND (read_intent_version < $5::bigint OR (read_intent_version = $5::bigint AND read_changed_at = $4::timestamptz))' : ''}
+      RETURNING id, account_id, uid, folder, message_id, is_deleted`,
+    [read, accountId, messageId, ...(action ? [action.marker, version] : [])]
+  );
+  for (const row of res.rows) {
+    adjustFolderCounts(accountId, row.folder, 0, read ? -1 : 1);
+  }
+  return res.rows;
+}
+
+// Star fan-out counterpart. Stars never contribute to folder unread counts (the star
+// route has never touched adjustFolderCounts), so this only mirrors the flag across
+// sibling rows.
+export async function fanOutStarToSiblings(accountId, messageId, starred, { action } = {}) {
+  if (!messageId) return [];
+  const version = action && await action.version;
+  const res = await query(
+    `UPDATE messages SET is_starred = $1, star_changed_at = ${action ? '$4, star_intent_version = $5::bigint' : 'NOW()'}
+      WHERE account_id = $2 AND message_id = $3 ${action ? 'AND is_deleted = false' : 'AND is_starred <> $1'}
+      ${action ? 'AND (star_intent_version < $5::bigint OR (star_intent_version = $5::bigint AND star_changed_at = $4::timestamptz))' : ''}
+      RETURNING id, account_id, uid, folder, message_id, is_deleted`,
+    [starred, accountId, messageId, ...(action ? [action.marker, version] : [])]
+  );
+  return res.rows;
+}
+
+// Set-based read fan-out for bulk-read. Derives the acted (account_id, message_id)
+// pairs from the ids the route just updated, flips every sibling row of those pairs
+// that is not itself in the acted set (`m.id <> ALL`) and not already at the target
+// state, and adjusts unread counts per returned (account, folder). Ids are bound as a
+// single array param so the statement composes with the route's 500-id cap without
+// per-id placeholder expansion.
+export async function fanOutBulkReadToSiblings(actedIds, read, { action } = {}) {
+  if (!actedIds.length) return [];
+  const version = action && await action.version;
+  const res = await query(
+    `UPDATE messages m SET is_read = $1, read_changed_at = ${action ? '$3, read_intent_version = $4::bigint' : 'NOW()'}
+       FROM (
+         SELECT DISTINCT account_id, message_id
+           FROM messages
+          WHERE id = ANY($2::uuid[]) AND message_id IS NOT NULL
+       ) acted
+      WHERE m.account_id = acted.account_id
+        AND m.message_id = acted.message_id
+        AND m.is_read <> $1
+        AND m.id <> ALL($2::uuid[])
+        ${action ? 'AND (m.read_intent_version < $4::bigint OR (m.read_intent_version = $4::bigint AND m.read_changed_at = $3::timestamptz))' : ''}
+      RETURNING m.id, m.account_id, m.uid, m.folder, m.message_id, m.is_deleted`,
+    [read, actedIds, ...(action ? [action.marker, version] : [])]
+  );
+  const deltas = {};
+  for (const row of res.rows) {
+    const key = `${row.account_id}:${row.folder}`;
+    if (!deltas[key]) deltas[key] = { accountId: row.account_id, folder: row.folder, unread: 0 };
+    deltas[key].unread += read ? -1 : 1;
+  }
+  for (const { accountId, folder, unread } of Object.values(deltas)) {
+    adjustFolderCounts(accountId, folder, 0, unread);
+  }
+  return res.rows;
+}
+
+// Header identity and a configured label relationship are conservative copy evidence.
+// Check every live row, not just flipped rows, and require an unchanged acted witness.
+// Display bodies are mutable caches, so their representation cannot disprove a copy.
+export async function readCopyTargets(accountId, messageId, actedRows) {
+  if (typeof messageId !== 'string') return [];
+  const bare = messageId.trim().replace(/^<([^<>]+)>$/, '$1');
+  if (!/^[^<>\s@]+@[^<>\s@]+$/.test(bare)) return [];
+  const folders = new Set((await pluginRegistry.collectHook('relocateExemptFolders', { accountId })).flat());
+  if (!folders.size) return [];
+  const { rows } = await query(
+    `SELECT id, account_id, uid, folder, message_id, is_deleted, is_read, is_starred, from_email, date, subject,
+            to_addresses, cc_addresses
+       FROM messages WHERE account_id = $1 AND message_id = $2 AND is_deleted = false LIMIT 65`,
+    [accountId, messageId]
+  );
+  if (rows.length < 2 || rows.length > 64 || new Set(rows.map(r => r.folder)).size !== rows.length) return [];
+  if (!rows.some(r => folders.has(r.folder))) return [];
+  const witnesses = Array.isArray(actedRows) ? actedRows : [actedRows];
+  if (!witnesses.some(w => w && !w.is_deleted && rows.some(r => r.id === w.id && r.folder === w.folder && Number(r.uid) === Number(w.uid)))) return [];
+  if (rows.some(r => !r.from_email || !r.date || !Number.isSafeInteger(Number(r.uid)) || Number(r.uid) <= 0)) return [];
+  for (const field of ['from_email', 'date', 'subject', 'to_addresses', 'cc_addresses']) {
+    if (new Set(rows.map(r => JSON.stringify(r[field] ?? null))).size > 1) return [];
+  }
+  return rows;
+}
+
+// The caller may detach added-copy work after its clicked write. A failed copy enters the
+// existing retry queue; successful IDs describe confirmed STOREs only.
+// Capture this context before the first request await; late copies reuse the action.
+export function admitFlagChanges(manager, accountId, rows, flag, value, { intents = new Map(), action = manager._newFlagAction() } = {}) {
+  for (const row of rows) {
+    if (!row.id) continue;
+    const key = `${row.id}:${flag}`;
+    if (!intents.has(key)) intents.set(key, manager._admitFlagIntent(accountId, row.id, flag, value, action));
+  }
+  return { intents, action };
+}
+
+// Release only this action's stamps, including rows that could not be admitted.
+export async function releaseFlagChanges(manager, accountId, rows, flag, { intents, action }) {
+  await Promise.all(rows.map(row => {
+    const intent = intents.get(`${row.id}:${flag}`);
+    return intent ? manager._resolveFlagPush(accountId, row.id, flag, intent)
+      : manager._clearFlagMarker(row.id, flag, action);
+  }));
+}
+
+export async function pushFlag(manager, account, accountId, rows, flag, value, options = {}) {
+  const field = flag === '\\Seen' ? 'is_read' : 'is_starred';
+  const unique = [...new Map(rows.filter(r => !r.is_deleted && r[field] === value && Number(r.uid) > 0).map(r => [r.id, r])).values()];
+  const context = admitFlagChanges(manager, accountId, unique, flag, value, options);
+  const pushedIds = [];
+  await Promise.all(unique.map(async row => {
+    const intent = context.intents.get(`${row.id}:${flag}`);
+    if (!manager._isFlagIntentCurrent(intent)) return;
+    try {
+      if (await manager.setFlag(account, row.uid, row.folder, flag, value, { intent }) !== true) {
+        if (manager._isFlagIntentCurrent(intent)) manager._enqueueFlagPush(accountId, row.id, flag, value, intent);
+        return;
+      }
+      await manager._resolveFlagPush(accountId, row.id, flag, intent);
+      pushedIds.push(row.id);
+    } catch (err) {
+      console.warn(`Copy flag push failed for ${row.id}:`, err.message);
+      manager._enqueueFlagPush(accountId, row.id, flag, value, intent);
+    }
+  }));
+  return pushedIds;
+}
+
+export const pushSeen = (manager, account, accountId, rows, read, options = {}) =>
+  pushFlag(manager, account, accountId, rows, '\\Seen', read, options);
+
+// Determine what action to take when deleting a message.
+// Returns { action: 'move', destination } | { action: 'expunge' } | { action: 'no_trash' }.
+// 'no_trash' must be treated as a safe failure — never permanently delete when
+// no Trash folder is configured (user would have no way to recover the message).
+// allTrashPaths (optional Set) broadens the expunge check to cover accounts that have
+// multiple trash-like folders (e.g. both "Trash" and "Deleted Messages").
+export function getDeleteStrategy(messageFolder, trashPath, allTrashPaths = null) {
+  if (!trashPath) return { action: 'no_trash' };
+  const isAlreadyInTrash = allTrashPaths ? allTrashPaths.has(messageFolder) : messageFolder === trashPath;
+  if (isAlreadyInTrash) return { action: 'expunge' };
+  return { action: 'move', destination: trashPath };
+}

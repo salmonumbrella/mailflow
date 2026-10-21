@@ -1,0 +1,910 @@
+{
+  "status": "SOURCE_ONLY_UNRUN_NOT_ACCEPTED",
+  "source": {
+    "repository": "salmonumbrella/mailflow",
+    "sha": "123ba32ec5cd8c30f9c174201428ba9bcb06b433",
+    "tree": "d32a97d55ff16e02f0e134ce34ef4f7ad060fa2d",
+    "candidate_commit": null,
+    "package_lock_sha256": "6543e04c27b0168917d04559d173d2e3efb5e1d955e760894600d6b80f0f1d70",
+    "node": "22.23.3",
+    "vitest": "4.1.11",
+    "imapflow": "1.7.8",
+    "pg": "8.20.0",
+    "status": "SOURCE_ONLY_UNRUN_NOT_ACCEPTED",
+    "effective_tree": "2248333ab67881ce5903fede22420dc142e23c1a",
+    "predecessor": {
+      "public_commit": "3383f9d7b297eeb6e3925ae1f674addb2b60472d",
+      "manifest_sha256": "e2fe271c59ff947a46317d082e8929a8ff04a5263090b7de904c0ab5f349b46d",
+      "effective_tree": "dce9459a8906352d92a577d0d9fabd7f7e3ba719",
+      "run_id": 39623050793,
+      "native": {
+        "passed": 292,
+        "failed": 36,
+        "total": 328
+      }
+    },
+    "overlay_files": {
+      "backend/src/plugins/api.js": {
+        "sha256": "6d7ed2c72133285884eae5347ca37bad10b893cba6b4469fe5f1f84bad72ee2e",
+        "base_sha256": "b286d8a4bbe971c07fe81b3fb6039716b045e7b31e5b644d17849657a74ca989",
+        "mode": "100644"
+      },
+      "backend/src/routes/mail.bulkStar.test.js": {
+        "sha256": "1662d13bececa5e6598d5704227ea25ea691e34e70fbb57038b5c51ce935332b",
+        "base_sha256": "93c40f3b4a1d0c52c175da9a67bd63a3772c52a65d0520a90b0aa177cca64162",
+        "mode": "100644"
+      },
+      "backend/src/routes/mail.deleteIdentity.test.js": {
+        "sha256": "297a87e37010449ce16119a08d7c6e0b9b67538180c47b599f6295660dc628c4",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/routes/mail.js": {
+        "sha256": "00506c2d8af332b871c28afceb025c4cd795925413adf6ec5a91bc695eed1f1b",
+        "base_sha256": "269033216a9d68ce5050973d14634ef49eb31de417a984332990e8598ae7a3eb",
+        "mode": "100644"
+      },
+      "backend/src/routes/mail.markAllConfirmation.test.js": {
+        "sha256": "983e4f085baa196c9e661c1549a416000234a71d315f4e42ff94e98711a7930b",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/routes/mail.starCopiesReview.test.js": {
+        "sha256": "fec3daf3ccc00573db97294f82539a4889ddc1a21b603e20bbb066d6bdb9779a",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/services/imapIdentity.js": {
+        "sha256": "b0dd326a4bfcbd11a6038387c206443bf734c5b005e070d2c9a5db8405fdbe79",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/services/imapManager.flagAddress.test.js": {
+        "sha256": "59686118cd33ea442244a965e9b1e171be0e7454b2644f84a76c11632d547cbf",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/services/imapManager.flagIntent.postgres.test.js": {
+        "sha256": "1c2057310250021b79184538e93350dfd1b87af863ad8f9cf69105267a471455",
+        "base_sha256": "2a9626576d9fc2351f3c86a74f395ed6d5b4430095719359b9970f73649249e4",
+        "mode": "100644"
+      },
+      "backend/src/services/imapManager.js": {
+        "sha256": "4349c2ab2816ff2d69602979af4f12c27b4a0cd73aa951a5e034f7c9b79cf9cb",
+        "base_sha256": "55c49090f309965b9ddea88ba4a2cf91c207774a48faa422494c2e019cae3f4a",
+        "mode": "100644"
+      },
+      "backend/src/services/imapManager.retryReview.test.js": {
+        "sha256": "e44c61f0427eb893278e856bc2d463975cf712196ef8a7e399a9ac99b3a276a9",
+        "base_sha256": "04f0eb9e4bef8586cb2d24643fad07a6ce80f602e7ffbc58921e2f7cb55b5f34",
+        "mode": "100644"
+      },
+      "backend/src/services/imapManager.snoozeIdentity.test.js": {
+        "sha256": "ccfb87a72eaa893cf8a23b35763c4c07b3a121b3cf0834aac844a9fbb0ccedd8",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/services/imapManager.snoozeWake.test.js": {
+        "sha256": "876ad1fd56162c979f64396851e4f0a51c69f785a842fd23554304458a1fe5d5",
+        "base_sha256": "dc91aef848adc1adb77afd3af2aa57c78f2e9a88da82652c45e0c50430ffad92",
+        "mode": "100644"
+      },
+      "backend/src/services/imapMarkAllConfirmation.test.js": {
+        "sha256": "8bbb54d819e21ebc951b92fc7a0560453ffab80c6e239394037895ce1f17b1d3",
+        "base_sha256": null,
+        "mode": "100644"
+      },
+      "backend/src/services/imapMoveFallback.test.js": {
+        "sha256": "bfc52f9f4d4df6c32b2bc0871f745aa8fe2bbbbaf1cf3be1b880e37c2d450b39",
+        "base_sha256": "ee0b346e0dcdfbc22c9bbcd88ae2209aa180a8e481c93495683abfe67dfd5f47",
+        "mode": "100644"
+      },
+      "backend/src/services/labels.js": {
+        "sha256": "c976dbf358521c808fd18416edcc06c67e6a8ef422357a0a089e11de51ee408e",
+        "base_sha256": "f40cb7b4ae0ee7cdd29c516ae34a3629c9cf60889f914e08647415d533bd9516",
+        "mode": "100644"
+      },
+      "backend/src/utils/mailUtils.copies.postgres.test.js": {
+        "sha256": "e00a581f08db0c85962dbbf82ff76b57f6df77159f212be2d725fe8c242d1f2b",
+        "base_sha256": "2e5ef87c294abe7780634d30fd6d3a4ef9499b69fa80176c06af5b558e78715c",
+        "mode": "100644"
+      },
+      "backend/src/utils/mailUtils.js": {
+        "sha256": "762209675534385a9977d9dd4db55c842469ff3f11202d27bbf945d8ccb44b90",
+        "base_sha256": "3d404184113c7901f81aaba81cefb3142db4d3e310edebb79476ceb4fc5cabb4",
+        "mode": "100644"
+      }
+    },
+    "fragments": [
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "_reconcileFlagPushes",
+        "owner": "retry",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "d8cc4b3cacf5ff779e52b426e4f72c4f2e08016f47e6fc8c76ffbc1a1d45b26a",
+        "candidate_sha256": "96950aed0cbb06fae7cb2af3a5fc7aad8cb31b6826552145c85221284d8bc978"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "_rememberFlagAddress",
+        "owner": "retry",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "87540f60e129b62826a973ebed8c12e747d07de62bc242a1f126b52da1cad977",
+        "candidate_sha256": "be9bd2dfe87a00a94d28c4e9ab345f605634190fe7bed7e28476b72d2be4b000"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "_storeFlag",
+        "owner": "retry",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "c1d5bb0484fbb77d7d6b82c1ad6bfcffa80b8fe14358170d9f75a161c31bddc3",
+        "candidate_sha256": "efe25cb719acc8aa895c33f51560df0a93b5f98461ea4be67347993a26f5bf4c"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "insert _captureFlagProof",
+        "owner": "retry",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "135ca8bfeafd2d8d7df45a69ce2df14ae43670e0fa3bebd7cf16b6810115e35c",
+        "candidate_sha256": "728c9a2038cd468e41cb3cf183608c1ca872d8c6ec922624b51c974a718ec88d"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "insert _bindFlagIntentAddress",
+        "owner": "retry",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "135ca8bfeafd2d8d7df45a69ce2df14ae43670e0fa3bebd7cf16b6810115e35c",
+        "candidate_sha256": "7ab2855cee60a9050a15818092745cb37f870fa6c66265162ada9bb9ac995c85"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "expungeUids",
+        "owner": "safety",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "50e3098d93d97d3e598220e0249e0823727edcc0a1a1b0283775d8f1ca7b062c",
+        "candidate_sha256": "ed461e7aa9292773c5cf90898f4bb0652e80c66f0c4281ee22fc279e801f59e2"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "bulkPermanentDelete",
+        "owner": "safety",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "4d4bdff84f1aee003a03880394166d969763acf6f86995924d85dae358907100",
+        "candidate_sha256": "8632fa4803a8aa5e9e695c701e43cea216255438b07b27e250f90727d79b94a2"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "_markSeenInFolder",
+        "owner": "safety",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "e4b754f87948c6c7d062d4a087038e7b3bdab3ef38f376f6299eb72a09099b67",
+        "candidate_sha256": "47469e91d08661c39486dde62207e3f65a26048da1655025a5538316fc445c71"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "findUidByMessageId",
+        "owner": "safety",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "1b64bf24f6a39cd57e44c0a4d143d1521148b6ae8b15737300d93d64a16e4a71",
+        "candidate_sha256": "aebe6b8b691ca1db85304b0992058a9e5d85c863adf98fd70d93231dca7e09fb"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "insert _recountSnoozeFolders",
+        "owner": "safety",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "2625e44a4dba4c2e2f520102134bb9acffa8ac089af22fd68ebf8dc3b47408be",
+        "candidate_sha256": "e165640241b09c9087b06474afd12dea2a513d69d543f9bab1a7ace87c9c00bd"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "insert _commitSnoozeMove",
+        "owner": "safety",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "2625e44a4dba4c2e2f520102134bb9acffa8ac089af22fd68ebf8dc3b47408be",
+        "candidate_sha256": "ed7533e896dab3871487f6b8f257d285590881149c0060b532f7edf49030a8b4"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "wakeSnoozed",
+        "owner": "safety",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "6e6caa072b9dc4aa0a4b0f9ba48ceead1e2841ba5f71e07993e6a8dc7143919a",
+        "candidate_sha256": "2666711a346c3f44958bd88b08b90adef008adfff30f28660d304ff373b5584a"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "explicit import union ./imapIdentity.js",
+        "owner": "safety",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "e4a5a6b53b5b286ebc6a63623b3e921b9b4e0fa8f5c429921def9572cb5a3656",
+        "candidate_sha256": "a3dd340f4cfa91fd70aa27bea9293145d9f7505347830feb56f990d55de61a54"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "explicit import union ./db.js",
+        "owner": "safety",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "65861a38a121feceb3b24b271d85805c3b3f4f6a9627b9cf39364856fa6f05b2",
+        "candidate_sha256": "dcb98fda83b246309650bb797ef5ef0d2f5ff92fdc562d815afe66d1b7e4b4b2"
+      },
+      {
+        "file": "backend/src/services/imapManager.js",
+        "symbol": "expungeUids",
+        "owner": "safety_legacy",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "ed461e7aa9292773c5cf90898f4bb0652e80c66f0c4281ee22fc279e801f59e2",
+        "candidate_sha256": "5f3db19c8fad9d7404e1bd353231276c11a3d669239f7d3bf14980f50afb44dc"
+      },
+      {
+        "file": "backend/src/routes/mail.js",
+        "symbol": "star helper and single-star handler",
+        "owner": "root",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "518e28913d095b856d795b70f3534cc83e7a83f5fead9c68572621bf2cd8c3bc",
+        "candidate_sha256": "e9296bebc4504cdc1e38c2f10452fb09240bdac1da3721ea75c05433dc77af6c"
+      },
+      {
+        "file": "backend/src/routes/mail.js",
+        "symbol": "bulk-star handler",
+        "owner": "root",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "a3134decd5b68769e9c241dad03c1906478490dfc01777171762b4c7c1198b8d",
+        "candidate_sha256": "11bfe4ca953dd8f50fd4a6b1a6945391370a47db41fcd0dd971d35608b93b5ed"
+      },
+      {
+        "file": "backend/src/utils/mailUtils.js",
+        "symbol": "fanOutStarToSiblings",
+        "owner": "root",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "0428c18e9908440a018c9134ea768232ebee99c92085047b23fb28d97a56281f",
+        "candidate_sha256": "69ff6e8649eec0c3b1dc574866504cbb28e17ef24825ec24889402dff7d424c1"
+      },
+      {
+        "file": "backend/src/utils/mailUtils.js",
+        "symbol": "pushFlag",
+        "owner": "root",
+        "operation": "replace_exact_fragment",
+        "preimage_sha256": "940dc1e85fdb7096f0e354f4b3e920c27f8a1c341c46f5e620cc42e9366d456f",
+        "candidate_sha256": "7f6037815644f46b3c2a2e68cedfd2e75520eb06bf357d384271dc4ae8a2e53a"
+      },
+      {
+        "file": "backend/src/services/imapManager.flagAddress.test.js",
+        "owner": "retry",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "1e05ac733dddbf4d95f5068887feb610537f205e3e37beceb6cdace66d8f1190",
+        "candidate_sha256": "59686118cd33ea442244a965e9b1e171be0e7454b2644f84a76c11632d547cbf"
+      },
+      {
+        "file": "backend/src/services/imapManager.retryReview.test.js",
+        "owner": "retry",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "5903a10c4000d9f68fb393b0c07ee50bc64837f590ac35bcd03bf19240d50dc9",
+        "candidate_sha256": "e44c61f0427eb893278e856bc2d463975cf712196ef8a7e399a9ac99b3a276a9"
+      },
+      {
+        "file": "backend/src/services/imapManager.flagIntent.postgres.test.js",
+        "owner": "retry",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "2a9626576d9fc2351f3c86a74f395ed6d5b4430095719359b9970f73649249e4",
+        "candidate_sha256": "1c2057310250021b79184538e93350dfd1b87af863ad8f9cf69105267a471455"
+      },
+      {
+        "file": "backend/src/routes/mail.deleteIdentity.test.js",
+        "owner": "safety",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "297a87e37010449ce16119a08d7c6e0b9b67538180c47b599f6295660dc628c4",
+        "candidate_sha256": "297a87e37010449ce16119a08d7c6e0b9b67538180c47b599f6295660dc628c4"
+      },
+      {
+        "file": "backend/src/routes/mail.markAllConfirmation.test.js",
+        "owner": "safety",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "452c580ff446f58d796c6b2651d7387cad7fa737b720972e69a39dad270b8f8a",
+        "candidate_sha256": "983e4f085baa196c9e661c1549a416000234a71d315f4e42ff94e98711a7930b"
+      },
+      {
+        "file": "backend/src/routes/mail.snooze.test.js",
+        "owner": "safety",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "376dc3404b32d625f2b04ffcc761407fe9f229ce04b82147fb5f7898e4334f08",
+        "candidate_sha256": "376dc3404b32d625f2b04ffcc761407fe9f229ce04b82147fb5f7898e4334f08"
+      },
+      {
+        "file": "backend/src/services/imapManager.snoozeIdentity.test.js",
+        "owner": "safety",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": null,
+        "candidate_sha256": "ccfb87a72eaa893cf8a23b35763c4c07b3a121b3cf0834aac844a9fbb0ccedd8"
+      },
+      {
+        "file": "backend/src/services/imapManager.snoozeWake.test.js",
+        "owner": "safety",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "dc91aef848adc1adb77afd3af2aa57c78f2e9a88da82652c45e0c50430ffad92",
+        "candidate_sha256": "876ad1fd56162c979f64396851e4f0a51c69f785a842fd23554304458a1fe5d5"
+      },
+      {
+        "file": "backend/src/services/imapMarkAllConfirmation.test.js",
+        "owner": "safety",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "c5beda6b2744381f3642b97f08f43ee03e256ae6df278543c5c372c1f03bc97f",
+        "candidate_sha256": "8bbb54d819e21ebc951b92fc7a0560453ffab80c6e239394037895ce1f17b1d3"
+      },
+      {
+        "file": "backend/src/routes/mail.starCopiesReview.test.js",
+        "owner": "root",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "161f50613a6dada0080ab30a2e47d40a81ea421505df83f04337cf1e6bcef9c4",
+        "candidate_sha256": "fec3daf3ccc00573db97294f82539a4889ddc1a21b603e20bbb066d6bdb9779a"
+      },
+      {
+        "file": "backend/src/routes/mail.bulkStar.test.js",
+        "owner": "root",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "93c40f3b4a1d0c52c175da9a67bd63a3772c52a65d0520a90b0aa177cca64162",
+        "candidate_sha256": "1662d13bececa5e6598d5704227ea25ea691e34e70fbb57038b5c51ce935332b"
+      },
+      {
+        "file": "backend/src/utils/mailUtils.test.js",
+        "owner": "root",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "796a0386e2fe15e437aa93fbc0bf3f156e66ca127c23fcc19de60a03a0ab9e85",
+        "candidate_sha256": "796a0386e2fe15e437aa93fbc0bf3f156e66ca127c23fcc19de60a03a0ab9e85"
+      },
+      {
+        "file": "backend/src/utils/mailUtils.copies.postgres.test.js",
+        "owner": "root",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "2e5ef87c294abe7780634d30fd6d3a4ef9499b69fa80176c06af5b558e78715c",
+        "candidate_sha256": "e00a581f08db0c85962dbbf82ff76b57f6df77159f212be2d725fe8c242d1f2b"
+      },
+      {
+        "file": "backend/src/services/imapMoveFallback.test.js",
+        "owner": "safety_legacy",
+        "operation": "exact_frozen_test_bytes",
+        "preimage_sha256": "ee0b346e0dcdfbc22c9bbcd88ae2209aa180a8e481c93495683abfe67dfd5f47",
+        "candidate_sha256": "bfc52f9f4d4df6c32b2bc0871f745aa8fe2bbbbaf1cf3be1b880e37c2d450b39"
+      }
+    ],
+    "sealed_owner_inputs": {
+      "retry": "6d97fe600691de524a0733b3f21fcd41a65f67a51099d7bba23ccff5cbb7b96c",
+      "safety": "d245819bdff00e70ba1547ae8ae38909e58605d86fa8716ce759ffcbf47fb812",
+      "root": "fa2d98d48dd087c13ac28ef6ae3af6d8565199b5abe0c15179096f27b577d6ef",
+      "safety_legacy": "3e93b232fb8640e5ce7c8031b118543619571edd6e0946a7d4782a2e28350ded"
+    },
+    "excluded": [
+      "read same-value/defer followups",
+      "raw-consumer successor integration",
+      "660 adapter",
+      "global migration union",
+      "fullsuite/performance/liveprovider/deployment"
+    ]
+  },
+  "preupgrade": {
+    "repository": "salmonumbrella/mailflow",
+    "sha": "6ef1a4deeb211f1817c30269350ef3fb0948785d",
+    "tree": "cfeb55655ad459ce0fc4b623ca3fbc134200f456",
+    "package_lock_sha256": "6543e04c27b0168917d04559d173d2e3efb5e1d955e760894600d6b80f0f1d70",
+    "required_env": "MAILFLOW_PREUPGRADE_BACKEND",
+    "dependency_resolution": "guarded legacy backend/node_modules symlink to exact primary locked install; no second install"
+  },
+  "commands": [
+    {
+      "id": "01-address",
+      "file": "backend/src/services/imapManager.flagAddress.test.js",
+      "expected_native_passes": 72,
+      "deadline_seconds": 600,
+      "test_timeout_ms": 30000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "R12-STORE-response-four",
+          "pattern": "does not confirm .* when selection drifts during the actual STORE response",
+          "count": 4
+        },
+        {
+          "id": "R12-invalidated-proof-two",
+          "pattern": "does not let invalidated old-epoch address proof cancel a legitimate moved",
+          "count": 2
+        },
+        {
+          "id": "historical-main-MOVE-migration-two",
+          "pattern": "refuses an unrelated legacy source UID after real preupgrade MOVE and migration",
+          "count": 2
+        }
+      ],
+      "closure_reason": "Changed captured proof invalidation/postSTORE confirmation; all72 native cases including six observed R12 failures and2 markerReady setup adapters.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapManager.flagAddress.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=30000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "02-retry",
+      "file": "backend/src/services/imapManager.retryReview.test.js",
+      "expected_native_passes": 39,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 30000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "retained-10000-bound",
+          "pattern": "bounds retained retries across expiry while terminal SQL is delayed",
+          "count": 1
+        }
+      ],
+      "closure_reason": "Changed core ownership/proof lifecycle; all39 native cases, exact9ab wake assembly and production transaction fixture, unchanged explicit10000/20000ms capacity oracle.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapManager.retryReview.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=30000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "03-deletion",
+      "file": "backend/src/routes/mail.deleteIdentity.test.js",
+      "expected_native_passes": 110,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "R16-zero-EXPUNGE-four",
+          "pattern": "bulk keeps local state when .* fails before any EXPUNGE, UIDPLUS=",
+          "count": 4
+        },
+        {
+          "id": "R16-recovery-array-eight",
+          "pattern": "bulk refuses malformed recovery UID array .* after a lost EXPUNGE reply",
+          "count": 8
+        },
+        {
+          "id": "R16-proof-classification-four",
+          "pattern": "fails closed before expunge on invalid or over-budget SEARCH result",
+          "count": 4
+        }
+      ],
+      "closure_reason": "R16 production guarded EXPUNGE frontier, strict recovery UID subset and proof classification; all110 diagnostic oracles byte-identical.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/routes/mail.deleteIdentity.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "04-markall-service",
+      "file": "backend/src/services/imapMarkAllConfirmation.test.js",
+      "expected_native_passes": 42,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "markall-last-STORE-three",
+          "pattern": "does not certify the last STORE after epoch drift for (?:1|500|501) UIDs",
+          "count": 3
+        }
+      ],
+      "closure_reason": "Captured shared flag proof/binding and postSTORE/settle assertions; all42 native oracles, fake SQL identity/xmin fidelity adapter only.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapMarkAllConfirmation.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "05-markall-route",
+      "file": "backend/src/routes/mail.markAllConfirmation.test.js",
+      "expected_native_passes": 8,
+      "deadline_seconds": 240,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [],
+      "closure_reason": "Same assembled route, production BIGINT epoch type in owned TEMP schema; all8 native controls and assertions preserved.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/routes/mail.markAllConfirmation.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "06-stars",
+      "file": "backend/src/routes/mail.starCopiesReview.test.js",
+      "expected_native_passes": 57,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "star-pending-1",
+          "pattern": "fences\\ all\\ genuine\\ copies\\ when\\ a\\ later\\ bulk\\ no\\-op\\ targets\\ a\\ different\\ copy",
+          "count": 1
+        },
+        {
+          "id": "star-pending-2",
+          "pattern": "keeps\\ a\\ current\\ copy\\ intent\\ queued\\ while\\ a\\ newer\\ refused\\ address\\ proof\\ holds\\ it",
+          "count": 1
+        },
+        {
+          "id": "star-pending-3",
+          "pattern": "confirms\\ or\\ retains\\ a\\ same\\-value\\ pending\\ retry\\ when\\ a\\ repeated\\ bulk\\ request\\ appears\\ unchanged",
+          "count": 1
+        },
+        {
+          "id": "star-pending-4",
+          "pattern": "keeps\\ same\\-value\\ bulk\\ ownership\\ while\\ an\\ earlier\\ in\\-flight\\ STORE\\ fails",
+          "count": 1
+        },
+        {
+          "id": "inherited-selected-setup-two",
+          "pattern": "retains the inherited pending star after (?:single|bulk) setup fails",
+          "count": 2
+        },
+        {
+          "id": "inherited-unselected-selector-eight",
+          "pattern": "retains inherited unselected retry after (?:single|bulk) copy (?:selection|empty), requested=(?:true|false)",
+          "count": 8
+        },
+        {
+          "id": "inherited-tail-capacity-one",
+          "pattern": "preserves an inherited tail retry when new-copy admission refuses at capacity",
+          "count": 1
+        },
+        {
+          "id": "delayed-admission-during-SQL-two",
+          "pattern": "preserves an older retry admitted during (?:single|bulk) fanout SQL",
+          "count": 2
+        },
+        {
+          "id": "persistent-copy-marker-after-restart-one",
+          "pattern": "finishes a proven copy action over a persisted marker after manager restart",
+          "count": 1
+        },
+        {
+          "id": "admitted-before-first-marker-two",
+          "pattern": "preserves an unversioned older copy intent through (?:single|bulk) preparation",
+          "count": 2
+        }
+      ],
+      "closure_reason": "Star production R13-R18 successor; original41 cases unchanged plus16 authored setup/selector/capacity controls. No successor runtime acceptance.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/routes/mail.starCopiesReview.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "07-CAS-PG",
+      "file": "backend/src/services/imapManager.flagIntent.postgres.test.js",
+      "expected_native_passes": 16,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 30000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "actual-JSON-restore-next-intent",
+          "pattern": "allocates the next intent above JSON-restored bigint versions",
+          "count": 1
+        }
+      ],
+      "closure_reason": "Durable lifecycle unchanged SQL guards; original16 native actualPG oracles with expected1 inside-chain stamp barrier only, unchanged deadlines.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapManager.flagIntent.postgres.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=30000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "08-snooze-identity",
+      "file": "backend/src/services/imapManager.snoozeIdentity.test.js",
+      "expected_native_passes": 64,
+      "deadline_seconds": 480,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [
+        {
+          "id": "combined-snooze-held-seven",
+          "pattern": "combined (?:actual )?wake",
+          "count": 7
+        }
+      ],
+      "closure_reason": "Exact9ab named wake/cache/finder methods now adopted with final proof core;57 original(34fake23PG)+exact7 held epoch/identity controls; PG env mandatory, no title filter.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapManager.snoozeIdentity.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "09-snooze-wake",
+      "file": "backend/src/services/imapManager.snoozeWake.test.js",
+      "expected_native_passes": 5,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [],
+      "closure_reason": "Existing accepted9ab finder/wake controls with compatible DB transaction boundary; original assertions/deadlines intact.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapManager.snoozeWake.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "10-snooze-route",
+      "file": "backend/src/routes/mail.snooze.test.js",
+      "expected_native_passes": 17,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [],
+      "closure_reason": "Existing wake/folder-selection consumer closure;15 ordinary plus2 parameter cases, exact frozen accepted fixture.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/routes/mail.snooze.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "11-bulk-star",
+      "file": "backend/src/routes/mail.bulkStar.test.js",
+      "expected_native_passes": 8,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [],
+      "closure_reason": "Existing public route compatibility after captured action/noop/wire separation; frozen root fixture adapters model exact token API.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/routes/mail.bulkStar.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "12-mail-utils",
+      "file": "backend/src/utils/mailUtils.test.js",
+      "expected_native_passes": 44,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [],
+      "closure_reason": "Changed generic pushFlag and star fanout optional exclusion contract; whole existing utility file.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/utils/mailUtils.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "13-copy-selector-PG",
+      "file": "backend/src/utils/mailUtils.copies.postgres.test.js",
+      "expected_native_passes": 10,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [],
+      "closure_reason": "Actual selector projection includes is_starred; preserve all10 identity/topology/mutable-cache controls and owned schema cleanup.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/utils/mailUtils.copies.postgres.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    },
+    {
+      "id": "14-legacy-move-expunge",
+      "file": "backend/src/services/imapMoveFallback.test.js",
+      "expected_native_passes": 31,
+      "deadline_seconds": 300,
+      "test_timeout_ms": 5000,
+      "database": "mailflow_flag_test_main",
+      "startup_options": "-c timezone=UTC -c statement_timeout=6000 -c lock_timeout=5000",
+      "application_name_prefix": "pr662-",
+      "required_case_patterns": [],
+      "closure_reason": "Guarded/default bulk direct EXPUNGE notification after targetSTORE; preserve legacy26 plus acceptedda55 unflag regression1 and4 authored UIDPLUS/noUIDPLUS partial-reply/refused-preflight cases.",
+      "argv_template": [
+        "node",
+        "--max-old-space-size=512",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/services/imapMoveFallback.test.js",
+        "--maxWorkers=1",
+        "--no-file-parallelism",
+        "--testTimeout=5000",
+        "--no-cache",
+        "--reporter=json",
+        "--outputFile=<private-native-report>"
+      ]
+    }
+  ],
+  "expected_native_passes": 523,
+  "enumeration_status": "SOURCE_DERIVED_UNRUN; native discovery and result required",
+  "required_pending_probes": {
+    "diagnostic_all29_preserved": 29,
+    "new_root_star_controls": 16,
+    "accepted_snooze_held_controls": 7,
+    "legacy_protocol_new_controls": 4
+  },
+  "not_claimed": [
+    "successor product acceptance before all native results/source review",
+    "earlier7933/385 results for this source",
+    "full suite",
+    "global migration union0076-0079",
+    "read same-value/defer followups",
+    "raw-consumer successor integration",
+    "660 adoption",
+    "provider/live mailbox/performance/deployment"
+  ],
+  "postgres": {
+    "image": "postgres:16.15-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0",
+    "server_version_num": 160015,
+    "primary_database": "mailflow_flag_test_main",
+    "backup_database": "mailflow_flag_test_backup",
+    "role": "mailflow_fixture NOSUPERUSER NOCREATEDB NOCREATEROLE CONNECTION LIMIT2; owns both disposable databases",
+    "privileges": [
+      "CONNECT",
+      "TEMP",
+      "CREATE/DROP owned schema/table/sequence",
+      "SET search_path",
+      "xmin::text",
+      "gen_random_uuid()",
+      "bigint/timestamptz/jsonb",
+      "real writeBackup/restoreBackup"
+    ],
+    "environment": [
+      "MAILFLOW_TEST_DATABASE_URL",
+      "MAILFLOW_FLAG_BACKUP_TEST_DATABASE_URL",
+      "MAILFLOW_PREUPGRADE_BACKEND"
+    ],
+    "persistent_backup_objects": [
+      "email_accounts",
+      "folders",
+      "message_flag_intent_version_seq",
+      "messages",
+      "schema_migrations"
+    ],
+    "cleanup": "main DB must have no leftover custom schemas/public relations/backends per command; backup exact known fixture inventory audited and both discarded with owned tmpfs service"
+  },
+  "timeout_policy": "Preserve historical retry/address/CAS general testTimeout30000, other files default5000, and explicit per-test20000. No assertion/limit/timeout weakening. Outer bounded file deadline is not an oracle timeout.",
+  "failure_policy": "Run every native test in each selected complete file; no bail, no skips/todo/pending accepted. Retain failure reports, continue other files only after source/process/SQL cleanup audit. Any failed/missing/skipped/timeout case makes final status failed_or_incomplete.",
+  "expected_file_count": 14,
+  "predecessor_native_result": {
+    "run": 39623050793,
+    "passed": 292,
+    "failed": 36,
+    "total": 328,
+    "all29_strengthened_RED": true
+  },
+  "execution_release": "NOT_GRANTED; independent exact combined source and Root harness review/new release mandatory; diagnostic release consumed"
+}

@@ -1,0 +1,23 @@
+{
+  "parent_run": 39623050793,
+  "parent_public_commit": "3383f9d7b297eeb6e3925ae1f674addb2b60472d",
+  "parent_manifest": "e2fe271c59ff947a46317d082e8929a8ff04a5263090b7de904c0ab5f349b46d",
+  "parent_runner_sha256": "b0fac1784df661320c2c1c5a472c15999dbfa7e7f3c03761ee19c5535bb79824",
+  "successor_runner_sha256": "5635226ff4b13adc31731da5e1e3ca229a18182475430b3fb3408d4e827f3026",
+  "runner_changes": [
+    "task/artifact identity v1=>v2",
+    "metadata guard7=>exact14 commands with expected_file_count"
+  ],
+  "pg_admin_unchanged": true,
+  "unchanged": [
+    "Node22.23.3/Linuxx64 pin",
+    "ownedPG16.15 image and role/database isolation",
+    "process containment/deadlines/memory budget",
+    "source/lock/manifest guards",
+    "original general/per-case oracle deadlines",
+    "failure continuation/native report retention",
+    "PG audit and owned service cleanup",
+    "automatic attempt1 only; no rerun/force/bypass"
+  ],
+  "state": "SOURCE_ONLY_UNRUN_NOT_ACCEPTED; no successor execution/publication release"
+}
