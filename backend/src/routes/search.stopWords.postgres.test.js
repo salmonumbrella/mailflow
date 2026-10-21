@@ -25,7 +25,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('stop-word body search 
       CREATE TEMP TABLE messages (id text, account_id text DEFAULT 'main', folder text DEFAULT 'INBOX',
         uid bigint, message_id text, subject text DEFAULT 'Status', from_name text DEFAULT 'Sender',
         from_email text DEFAULT 'sender@example.test', to_addresses jsonb, cc_addresses jsonb,
-        in_reply_to text, thread_references text, date timestamptz DEFAULT now(), snippet text,
+        in_reply_to text, thread_references text, reply_to jsonb, delivery_addresses jsonb, thread_id text,
+        date timestamptz DEFAULT now(), snippet text,
         is_read boolean, is_starred boolean, has_attachments boolean, is_deleted boolean DEFAULT false,
         search_vector tsvector, body_text text);
       INSERT INTO email_accounts VALUES
