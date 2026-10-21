@@ -20,6 +20,7 @@ vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }
 
 import { query, withTransaction } from './db.js';
 import { admitArchiveMetadata, runArchiveCoverageBatch } from './archiveCoverage.js';
+import { createBackgroundBudget } from './backgroundDownloadBudget.js';
 import { ImapManager, insertCopiedSibling, prepareArchiveRecord } from './imapManager.js';
 
 const accountId = '11111111-1111-4111-8111-111111111111';
@@ -76,6 +77,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
       ADD COLUMN forwarded_from_name text, ADD COLUMN forwarded_from_email text, ADD COLUMN forwarded_via text,
       ADD COLUMN plugin_annotations jsonb`);
     await db.query(await readFile(new URL('../../migrations/0069_gmail_archive_coverage.sql', import.meta.url), 'utf8'));
+    await db.query(await readFile(new URL('../../migrations/0076_archive_coverage_sweep_cadence.sql', import.meta.url), 'utf8'));
     const indexes = await readFile(new URL('../../migrations/0070_archive_identity_indexes.sql', import.meta.url), 'utf8');
     for (const statement of indexes.replace(/--[^\n]*/g, '').split(';').map(sql => sql.trim()).filter(Boolean)) await db.query(statement);
     peer = new pg.Client(config); await peer.connect();
@@ -250,6 +252,245 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
   }
   const scan = (client, options = {}) => runArchiveCoverageBatch({ id: accountId, imap_host: 'imap.gmail.test' }, {
     client, profile, reserveBudget: async () => ({ allowed: true }), ...options,
+  });
+
+  function maintenanceProvider({ condstore = true, messages = [1, 2, 3], advanceModseq = true,
+    normalCopies = new Map([[21, identity]]) } = {}) {
+    const client = provider(messages);
+    const examine = client.getMailboxLock;
+    const fetch = client.fetch;
+    let inboxCopy = true, modseq = 20n;
+    client.enabled = new Set(condstore ? ['CONDSTORE'] : []);
+    if (condstore) client.capabilities.add('CONDSTORE');
+    client.getMailboxLock = async function (...args) {
+      const lock = await examine.call(this, ...args);
+      if (condstore && this.mailbox.path === folder) this.mailbox.highestModseq = modseq;
+      return lock;
+    };
+    client.fetch = async function* (range, fields, options) {
+      if (this.mailbox.path === 'INBOX') {
+        expect(options).toEqual({ uid: true });
+        const requested = range.split(',').map(Number);
+        this.commands.push(['FETCH', 'INBOX', requested, fields]);
+        if (inboxCopy) for (const uid of requested) {
+          if (normalCopies.has(uid)) yield { uid, emailId: normalCopies.get(uid) };
+        }
+        return;
+      }
+      yield* fetch.call(this, range, fields, options);
+    };
+    return { client, setModseq: value => { modseq = value; }, archiveExisting: () => {
+      inboxCopy = false;
+      if (advanceModseq) modseq++;
+    } };
+  }
+
+  function maintenanceClock(limits = {}) {
+    const clock = { time: Date.parse('2026-10-21T12:00:00Z') };
+    const budget = createBackgroundBudget({ queryFn: (sql, values) => db.query(sql, values), limits });
+    const approved = [];
+    const reserveBudget = vi.fn(async (account, host, debit) => {
+      const result = await budget.reserve(account, host, debit, clock.time);
+      if (result.allowed) approved.push(debit);
+      return result;
+    });
+    return { budget, clock, approved, options: { reserveBudget, now: () => clock.time } };
+  }
+  const seedRepresented = uids => db.query(`INSERT INTO messages(account_id,folder,uid,provider_msgid,is_archive_residue)
+    SELECT $1,$2,x.uid,x.identity,true FROM unnest($3::bigint[],$4::text[]) AS x(uid,identity)`,
+  [accountId, folder, uids, uids.map(uid => String(9007199254740992n + BigInt(uid)))]);
+  const seedSweep = ({ high = 3, cursor = high, modseq = '20', checked = '2026-10-21T10:00:00Z' } = {}) =>
+    db.query(`UPDATE archive_coverage SET phase='sweep',scan_cursor=0,scan_high_uid=$3,
+      sweep_cursor=$4,label_modseq=$5,sweep_checked_at=$6 WHERE account_id=$1 AND folder=$2`,
+    [accountId, folder, high, cursor, modseq, checked]);
+
+  it.each([true, false])('does not re-read settled metadata or spend host message tokens on an unchanged tick (CONDSTORE=%s)', async condstore => {
+    const { client } = maintenanceProvider({ condstore });
+    let instant = Date.parse('2026-10-21T12:00:00Z');
+    const budget = createBackgroundBudget({ queryFn: (sql, values) => db.query(sql, values) });
+    const reserveBudget = vi.fn((...args) => budget.reserve(...args, instant));
+    const options = { reserveBudget, now: () => instant };
+    expect(await scan(client, options)).toEqual({ stored: 3, suppressed: 0, pending: 0 });
+    const bytes = async () => BigInt((await db.query(
+      'SELECT bytes FROM background_download_debits WHERE account_id=$1', [accountId])).rows[0].bytes);
+    const charged = await bytes();
+    const commands = client.commands.length;
+    const reservations = reserveBudget.mock.calls.length;
+    instant += 1000;
+    await scan(client, options);
+    expect(reserveBudget.mock.calls.slice(reservations).every(([, , debit]) => debit.messages === 0)).toBe(true);
+    expect(client.commands.slice(commands)).toEqual([['EXAMINE', folder]]);
+    // One All Mail probe plus the shared singleton's protocol overhead.
+    expect(await bytes() - charged).toBe(2048n);
+    expect(await budget.reserve(otherId, 'imap.gmail.test', { messages: 117, bytes: 1 }, instant))
+      .toEqual({ allowed: true, deferAt: null });
+    expect(await rows()).toHaveLength(3);
+  });
+
+  it.each(['changed', 'unchanged', 'absent', 'unusable'])('discovers an existing UID archived elsewhere without UIDNEXT growth (MODSEQ=%s)', async mode => {
+    const { client, archiveExisting, setModseq } = maintenanceProvider({ condstore: mode !== 'absent', advanceModseq: mode === 'changed' });
+    if (mode === 'unusable') setModseq(null);
+    const { clock, options } = maintenanceClock();
+    await db.query('INSERT INTO messages(account_id,folder,uid,provider_msgid) VALUES($1,$2,21,$3)', [accountId, 'INBOX', identity]);
+    expect(await scan(client, options)).toEqual({ stored: 2, suppressed: 1, pending: 0 });
+    expect((await rows()).filter(row => row.provider_msgid === identity))
+      .toEqual([{ account_id: accountId, folder: 'INBOX', uid: '21', provider_msgid: identity, is_archive_residue: false }]);
+    const checkpoint = (await db.query('SELECT uid_validity,scan_high_uid FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0];
+    archiveExisting();
+    // Existing reconcileDeletes has confirmed removal of the cached normal copy.
+    // This seam does not infer deletion from a missing FETCH response.
+    await db.query('DELETE FROM messages WHERE account_id=$1 AND folder=$2 AND uid=21 AND NOT is_archive_residue', [accountId, 'INBOX']);
+    clock.time += (mode === 'changed' ? 6 : 61) * 60000;
+    expect(await scan(client, options)).toEqual({ stored: 3, suppressed: 0, pending: 0 });
+    expect((await rows()).filter(row => row.provider_msgid === identity))
+      .toEqual([{ account_id: accountId, folder, uid: '1', provider_msgid: identity, is_archive_residue: true }]);
+    expect((await db.query('SELECT uid_validity,scan_high_uid FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0])
+      .toEqual(checkpoint);
+    for (const name of ['messageMove', 'messageCopy', 'messageDelete', 'messageFlagsAdd', 'messageFlagsRemove', 'append', 'send']) {
+      expect(client[name]).not.toHaveBeenCalled();
+    }
+  });
+
+  it('scans an arrival immediately during a paced sweep without losing either cursor', async () => {
+    const { client } = maintenanceProvider({ messages: [1, 2, 3, 4, 5] });
+    const { clock, options } = maintenanceClock();
+    await seedRepresented([1, 2, 3]);
+    await seedSweep({ cursor: 2, checked: new Date(clock.time).toISOString() });
+    expect(await scan(client, options)).toEqual({ stored: 2, suppressed: 0, pending: 0 });
+    expect(client.commands.find(command => command[0] === 'FETCH' && command[3].envelope)[2]).toEqual([5, 4]);
+    expect((await db.query('SELECT scan_cursor,sweep_cursor,scan_high_uid,label_modseq,sweep_checked_at FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0])
+      .toEqual({ scan_cursor: '0', sweep_cursor: '2', scan_high_uid: '5', label_modseq: '20', sweep_checked_at: new Date(clock.time) });
+  });
+
+  it('keeps a BigInt pass snapshot across mid-pass changes and starts the next pass only after five minutes', async () => {
+    const { client, setModseq } = maintenanceProvider({ messages: [1, 63, 125] });
+    const { clock, options } = maintenanceClock();
+    setModseq(9007199254740993n);
+    await seedRepresented([1, 63, 125]);
+    await seedSweep({ high: 125, modseq: '9007199254740993' });
+    const state = async () => (await db.query('SELECT label_modseq,sweep_cursor FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0];
+    await scan(client, options);
+    // The real default 120-message budget shrinks the first 125-UID window to62.
+    expect(await state()).toEqual({ label_modseq: '9007199254740993', sweep_cursor: '63' });
+    setModseq('9007199254740994');
+    clock.time += 6 * 60000;
+    await scan(client, options);
+    expect(await state()).toEqual({ label_modseq: '9007199254740993', sweep_cursor: '0' });
+    const before = client.commands.length;
+    clock.time += 1000;
+    await scan(client, options);
+    expect(client.commands.slice(before)).toEqual([['EXAMINE', folder]]);
+    clock.time += 6 * 60000;
+    await scan(client, options);
+    expect(await state()).toEqual({ label_modseq: '9007199254740994', sweep_cursor: '63' });
+  });
+
+  it('uses the persisted sweep timestamp after restart rather than refetching settled history', async () => {
+    const { clock, options } = maintenanceClock();
+    await scan(maintenanceProvider().client, options);
+    expect((await db.query('SELECT sweep_checked_at FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0].sweep_checked_at)
+      .toEqual(new Date(clock.time));
+    const restarted = maintenanceProvider().client;
+    clock.time += 1000;
+    await scan(restarted, options);
+    expect(restarted.commands).toEqual([['EXAMINE', folder]]);
+    expect(await rows()).toHaveLength(3);
+  });
+
+  it('clears All Mail maintenance on UIDVALIDITY reset before a denied catch-up read', async () => {
+    const { client } = maintenanceProvider();
+    const { options } = maintenanceClock({ messages: 0 });
+    await seedSweep({ cursor: 2 });
+    await seedRepresented([1, 2, 3]);
+    await db.query('INSERT INTO messages(account_id,folder,uid,provider_msgid) VALUES($1,$2,21,$3)', [accountId, 'INBOX', identity]);
+    const examine = client.getMailboxLock;
+    client.getMailboxLock = async function (...args) {
+      const lock = await examine.call(this, ...args);
+      if (this.mailbox.path === folder) this.mailbox.uidValidity = 8n;
+      return lock;
+    };
+    expect((await scan(client, options)).pending).toBeTruthy();
+    expect((await db.query('SELECT uid_validity,label_modseq,sweep_cursor,sweep_checked_at FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0])
+      .toEqual({ uid_validity: '8', label_modseq: null, sweep_cursor: null, sweep_checked_at: null });
+    expect((await rows()).map(row => [row.folder, row.uid])).toEqual([['INBOX', '21']]);
+    expect(client.commands.some(command => command[0] === 'FETCH')).toBe(false);
+  });
+
+  it('fetches full metadata only for unrepresented identities in an ID-only maintenance window with exact debits', async () => {
+    const { client } = maintenanceProvider();
+    const { approved, options } = maintenanceClock();
+    await seedSweep();
+    await seedRepresented([3]);
+    await db.query('INSERT INTO messages(account_id,folder,uid,provider_msgid) VALUES($1,$2,21,$3)', [accountId, 'INBOX', identity]);
+    expect(await scan(client, options)).toEqual({ stored: 2, suppressed: 1, pending: 0 });
+    const archiveFetches = client.commands.filter(command => command[0] === 'FETCH' && command[1] === folder);
+    expect(archiveFetches.some(command => !command[3].size && !command[3].envelope && command[2].length === 3)).toBe(true);
+    expect(archiveFetches.filter(command => command[3].size).map(command => command[2])).toEqual([[2]]);
+    expect(archiveFetches.filter(command => command[3].envelope).map(command => command[2])).toEqual([[2]]);
+    expect(approved).toContainEqual({ messages: 0, bytes: 1024 + 4 * 100 + 4096 });
+    const bytes = BigInt((await db.query('SELECT bytes FROM background_download_debits WHERE account_id=$1', [accountId])).rows[0].bytes);
+    expect(bytes).toBe(approved.reduce((sum, debit) => sum + BigInt(debit.bytes + 1024), 0n));
+    const copies = (await rows()).map(row => [row.folder, row.uid]);
+    expect(copies).toHaveLength(3);
+    expect(copies).toEqual(expect.arrayContaining([[folder, '2'], [folder, '3'], ['INBOX', '21']]));
+  });
+
+  it('keeps an ID-only cached normal identity pending when its live locator is missing', async () => {
+    const { client, archiveExisting } = maintenanceProvider();
+    const { options } = maintenanceClock();
+    await seedSweep();
+    await seedRepresented([2, 3]);
+    await db.query('INSERT INTO messages(account_id,folder,uid,provider_msgid) VALUES($1,$2,21,$3)', [accountId, 'INBOX', identity]);
+    archiveExisting(); // No confirmed normal-cache removal: missing FETCH is not deletion proof.
+    expect((await scan(client, options)).pending).toBe(1);
+    expect((await db.query('SELECT sweep_cursor,sweep_checked_at FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0])
+      .toEqual({ sweep_cursor: '3', sweep_checked_at: new Date('2026-10-21T10:00:00Z') });
+    expect((await rows()).filter(row => row.provider_msgid === identity))
+      .toEqual([{ account_id: accountId, folder: 'INBOX', uid: '21', provider_msgid: identity, is_archive_residue: false }]);
+    expect(client.commands.some(command => command[0] === 'FETCH' && command[3].envelope)).toBe(false);
+  });
+
+  it.each([
+    { label: 'default 120-message cap with 63 identities', count: 63, refusals: 0, window: 63, cursor: '0' },
+    { label: 'adaptive one-message floor after seven refusals', count: 3, refusals: 7, window: 1, cursor: '2' },
+  ])('accounts normal-copy UID proof only as bytes and advances at $label', async ({ count, refusals, window, cursor }) => {
+    const messages = Array.from({ length: count }, (_, index) => index + 1);
+    const normalCopies = new Map(messages.map(uid => [uid + 100, String(9007199254740992n + BigInt(uid))]));
+    const { client } = maintenanceProvider({ messages, normalCopies });
+    const { budget, clock, approved, options } = maintenanceClock();
+    await db.query(`INSERT INTO messages(account_id,folder,uid,provider_msgid)
+      SELECT $1,'INBOX',x.uid,x.identity FROM unnest($2::bigint[],$3::text[]) AS x(uid,identity)`,
+    [accountId, [...normalCopies.keys()], [...normalCopies.values()]]);
+    await seedSweep({ high: count });
+    for (let n = 0; n < refusals; n++) budget.refuse('imap.gmail.test', clock.time);
+    if (refusals) clock.time += 60000; // End the actual refusal cooldown, retaining its reduced rate.
+
+    expect(await scan(client, options)).toEqual({ stored: 0, suppressed: window, pending: 0 });
+    expect((await db.query('SELECT scan_cursor,sweep_cursor,sweep_checked_at FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0])
+      .toEqual({ scan_cursor: '0', sweep_cursor: cursor, sweep_checked_at: new Date(clock.time) });
+    expect(client.commands.filter(command => command[0] === 'SEARCH').map(command => command.slice(1)))
+      .toEqual([[count - window + 1, count]]);
+    const fetches = client.commands.filter(command => command[0] === 'FETCH');
+    expect(fetches).toHaveLength(2);
+    expect(fetches.every(command => Object.keys(command[3]).join(',') === 'uid' && command[3].uid === true)).toBe(true);
+    expect(fetches.find(command => command[1] === 'INBOX')[2].slice().sort((a, b) => a - b))
+      .toEqual(messages.slice(-window).map(uid => uid + 100));
+    // Five EXAMINEs; the source window alone consumes logical message tokens.
+    // The normal UID proof covers the same identities and reserves framing bytes only.
+    const probe = { messages: 0, bytes: 1024 };
+    expect(approved).toEqual([probe, { messages: window, bytes: 1024 + 256 * window }, probe, probe,
+      { messages: 0, bytes: 1024 + 256 * window }, probe, probe]);
+    expect(BigInt((await db.query('SELECT bytes FROM background_download_debits WHERE account_id=$1', [accountId])).rows[0].bytes))
+      .toBe(BigInt(5 * 2048 + 2 * (2048 + 256 * window)));
+    expect((await rows()).every(row => row.folder === 'INBOX' && !row.is_archive_residue)).toBe(true);
+    expect(await rows()).toHaveLength(count);
+    if (refusals) {
+      expect(await budget.reserve(otherId, 'imap.gmail.test', { messages: 1, bytes: 0 }, clock.time))
+        .toMatchObject({ allowed: false });
+    } else {
+      expect(await budget.reserve(otherId, 'imap.gmail.test', { messages: 120 - window, bytes: 0 }, clock.time))
+        .toEqual({ allowed: true, deferAt: null });
+    }
   });
 
   it('ingests newest first, commits progress, and never issues a provider mutation', async () => {

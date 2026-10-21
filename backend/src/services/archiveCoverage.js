@@ -3,6 +3,11 @@ import { reserveBackgroundBudget } from './backgroundDownloadBudget.js';
 import { parseMessage } from './messageParser.js';
 import { sanitizeStr } from '../utils/sanitizeStr.js';
 
+const SWEEP_WINDOW_MS = 5 * 60000;
+const SWEEP_FALLBACK_MS = 60 * 60000;
+const modseqValue = value => (typeof value === 'bigint' || typeof value === 'string') && /^[1-9]\d*$/.test(String(value))
+  ? BigInt(value).toString() : null;
+
 export function sanitizeArchiveMetadata(record) {
   const clean = value => {
     if (typeof value === 'string') return sanitizeStr(value);
@@ -109,6 +114,14 @@ export async function admitArchiveMetadata(client, { accountId, folder, uidValid
       if (sibling) {
         await db.query('DELETE FROM messages WHERE account_id=$1 AND provider_msgid=$2 AND is_archive_residue', [accountId, record.providerMsgid]);
         result.suppressed++;
+      } else if (record.identityOnly) {
+        // An earlier cache lookup saves a metadata transfer, not this fence.
+        // If representation vanished meanwhile, retry with metadata next time.
+        const { rows: present } = await db.query(`SELECT id FROM messages WHERE account_id=$1 AND folder=$2 AND uid=$3
+          AND provider_msgid=$4 AND is_archive_residue AND NOT is_deleted FOR SHARE`,
+        [accountId, folder, record.uid, record.providerMsgid]);
+        if (!present.length) continue;
+        result.stored++;
       } else {
         await db.query(`DELETE FROM messages WHERE account_id=$1 AND provider_msgid=$2 AND is_archive_residue
           AND (folder<>$3 OR uid<>$4)`, [accountId, record.providerMsgid, folder, record.uid]);
@@ -137,7 +150,7 @@ export async function admitArchiveMetadata(client, { accountId, folder, uidValid
 
 export async function runArchiveCoverageBatch(account, {
   client, profile, signal, foregroundPending = () => false, reserveBudget = reserveBackgroundBudget,
-  prepareRecord = parseMessage,
+  prepareRecord = parseMessage, now = Date.now,
 } = {}) {
   const stopped = () => signal?.aborted || foregroundPending();
   const pending = { stored: 0, suppressed: 0, pending: true };
@@ -169,19 +182,6 @@ export async function runArchiveCoverageBatch(account, {
     const lock = await read(() => client.getMailboxLock(path, { readOnly: true }));
     return { lock, epoch: String(client.mailbox?.uidValidity || '') };
   };
-  // Cache readiness is insufficient if a normally synchronized mailbox rolled
-  // over since bootstrap. Observe epochs before relying on any of its rows.
-  for (const row of normal) {
-    const selected = await examine(row.path);
-    if (!selected) return pending;
-    try {
-      if (selected.epoch !== String(row.uid_validity)) {
-        await query(`UPDATE archive_coverage SET bootstrap_complete=false,last_error='Mailbox epoch changed'
-          WHERE account_id=$1 AND folder=$2`, [account.id, row.path]);
-        return pending;
-      }
-    } finally { selected.lock.release(); }
-  }
   let selected;
   try {
     selected = await examine(folder);
@@ -189,6 +189,9 @@ export async function runArchiveCoverageBatch(account, {
     const epoch = selected.epoch;
     const high = Number(client.mailbox?.uidNext) - 1;
     if (!epoch || !Number.isSafeInteger(high) || high < 0) return pending;
+    const observedModseq = client.enabled?.has('CONDSTORE') && !client.mailbox?.noModseq
+      ? modseqValue(client.mailbox?.highestModseq) : null;
+    const tick = now();
     const sameEpoch = state && String(state.uid_validity) === epoch;
     if (!sameEpoch) await withTransaction(async db => {
       const { rows: accounts } = await db.query('SELECT id FROM email_accounts WHERE id=$1 AND enabled FOR SHARE', [account.id]);
@@ -203,13 +206,26 @@ export async function runArchiveCoverageBatch(account, {
       }
       await db.query(`INSERT INTO archive_coverage(account_id,folder,uid_validity,phase,scan_cursor,scan_high_uid)
         VALUES($1,$2,$3,'scan',$4,$4) ON CONFLICT(account_id,folder) DO UPDATE
-        SET uid_validity=$3,phase='scan',scan_cursor=$4,scan_high_uid=$4,label_modseq=NULL,sweep_cursor=NULL,last_error=NULL`,
+        SET uid_validity=$3,phase='scan',scan_cursor=$4,scan_high_uid=$4,label_modseq=NULL,sweep_cursor=NULL,sweep_checked_at=NULL,last_error=NULL`,
       [account.id, folder, epoch, high]);
     });
     const previousHigh = sameEpoch ? Number(state.scan_high_uid ?? high) : high;
     const history = sameEpoch ? Number(state.scan_cursor ?? high) : high;
     const arrivals = high > previousHigh;
-    const upper = arrivals ? high : history || high;
+    const maintenance = sameEpoch && !arrivals && history === 0;
+    const sweep = sameEpoch ? Number(state.sweep_cursor || 0) : 0;
+    const savedModseq = sameEpoch ? modseqValue(state.label_modseq) : null;
+    const checkedAt = sameEpoch && state.sweep_checked_at != null ? new Date(state.sweep_checked_at).getTime() : NaN;
+    if (maintenance && Number.isFinite(checkedAt) && checkedAt <= tick) {
+      const elapsed = tick - checkedAt;
+      if (elapsed < SWEEP_WINDOW_MS || (!sweep && elapsed < SWEEP_FALLBACK_MS &&
+          (!observedModseq || !savedModseq || observedModseq === savedModseq))) return pending;
+    }
+    // A snapshot belongs to the whole pass. Advancing it at the final window
+    // would hide label changes behind the cursor while that pass was running.
+    const passModseq = maintenance ? (sweep ? savedModseq : observedModseq)
+      : (!sameEpoch || state.scan_cursor == null ? observedModseq : savedModseq);
+    const upper = arrivals ? high : maintenance ? sweep || high : history;
     let span = Math.min(500, arrivals ? high - previousHigh : upper);
     let budget;
     while (span > 0) {
@@ -224,42 +240,79 @@ export async function runArchiveCoverageBatch(account, {
     if (!Array.isArray(uids) || uids.some(uid => !Number.isSafeInteger(uid) || uid < lower || uid > upper)) {
       throw new Error('Incomplete archive UID snapshot');
     }
-    const sizes = new Map();
-    if (uids.length) for await (const msg of fetch(uids.join(','), { uid: true, size: true }, { uid: true })) {
-      if (uids.includes(msg.uid) && Number.isSafeInteger(msg.size) && msg.size >= 0) sizes.set(msg.uid, msg.size);
-    }
-    if (sizes.size !== uids.length || stopped()) return pending;
-    let requested = [...uids].sort((a, b) => b - a);
-    while (requested.length) {
-      // RFC822.SIZE bounds the fetched headers/envelope/structure. Charge the
-      // escaped protocol representation conservatively; never fetch bodies.
-      const bytes = 1024 + requested.reduce((sum, uid) => sum + 4 * sizes.get(uid) + 4096, 0);
-      if (!Number.isSafeInteger(bytes)) return pending;
-      budget = await reserveBudget(account.id, account.imap_host, { messages: 0, bytes });
-      if (stopped()) return pending;
-      if (budget.allowed) break;
-      if (requested.length === 1) return { ...pending, deferAt: budget.deferAt };
-      requested = requested.slice(0, Math.floor(requested.length / 2));
-      lower = Math.min(...requested);
-    }
     const records = new Map();
-    if (requested.length) for await (const raw of fetch(requested.join(','), {
-      uid: true, flags: true, envelope: true, bodyStructure: true, headers: true, internalDate: true,
-    }, { uid: true })) {
-      if (requested.includes(raw.uid) && typeof raw.emailId === 'string' && raw.emailId) {
-        const record = await prepareRecord(raw);
-        records.set(raw.uid, { ...record, providerMsgid: raw.emailId, normalCopies: [] });
+    const loadMetadata = async input => {
+      let requested = [...input].sort((a, b) => b - a);
+      if (!requested.length) return;
+      if (maintenance) {
+        budget = await reserveBudget(account.id, account.imap_host, { messages: 0, bytes: 1024 + requested.length * 256 });
+        if (!budget.allowed || stopped()) return { ...pending, deferAt: budget.deferAt };
       }
+      const sizes = new Map();
+      for await (const msg of fetch(requested.join(','), { uid: true, size: true }, { uid: true })) {
+        if (requested.includes(msg.uid) && Number.isSafeInteger(msg.size) && msg.size >= 0) sizes.set(msg.uid, msg.size);
+      }
+      if (sizes.size !== requested.length || stopped()) return pending;
+      while (requested.length) {
+        // Reserve only missing metadata, never represented history on a sweep.
+        const bytes = 1024 + requested.reduce((sum, uid) => sum + 4 * sizes.get(uid) + 4096, 0);
+        if (!Number.isSafeInteger(bytes)) return pending;
+        budget = await reserveBudget(account.id, account.imap_host, { messages: 0, bytes });
+        if (stopped()) return pending;
+        if (budget.allowed) break;
+        if (requested.length === 1) return { ...pending, deferAt: budget.deferAt };
+        requested = requested.slice(0, Math.floor(requested.length / 2));
+        lower = Math.min(...requested);
+      }
+      const received = new Set();
+      for await (const raw of fetch(requested.join(','), {
+        uid: true, flags: true, envelope: true, bodyStructure: true, headers: true, internalDate: true,
+      }, { uid: true })) {
+        if (requested.includes(raw.uid) && typeof raw.emailId === 'string' && raw.emailId &&
+            (!records.has(raw.uid) || records.get(raw.uid).providerMsgid === raw.emailId)) {
+          const record = await prepareRecord(raw);
+          records.set(raw.uid, { ...record, identityOnly: false, providerMsgid: raw.emailId,
+            normalCopies: records.get(raw.uid)?.normalCopies || [] });
+          received.add(raw.uid);
+        }
+      }
+      if (received.size !== requested.length || stopped()) return pending;
+      for (const uid of records.keys()) if (uid < lower) records.delete(uid);
+    };
+    if (maintenance) {
+      if (uids.length) for await (const raw of fetch([...uids].sort((a, b) => b - a).join(','), { uid: true }, { uid: true })) {
+        if (uids.includes(raw.uid) && typeof raw.emailId === 'string' && raw.emailId) {
+          records.set(raw.uid, { uid: raw.uid, providerMsgid: raw.emailId, identityOnly: true, normalCopies: [] });
+        }
+      }
+      if (records.size !== uids.length || stopped()) return pending;
+    } else {
+      const blocked = await loadMetadata(uids);
+      if (blocked) return blocked;
     }
-    if (records.size !== requested.length || stopped()) return pending;
     selected.lock.release(); selected = null;
+    // Idle ticks never select normal mailboxes. Before accounting for any
+    // records, cached bootstrap readiness still needs live epoch validation.
+    for (const row of records.size ? normal : []) {
+      const proof = await examine(row.path);
+      if (!proof) return pending;
+      try {
+        if (proof.epoch !== String(row.uid_validity)) {
+          await query(`UPDATE archive_coverage SET bootstrap_complete=false,last_error='Mailbox epoch changed'
+            WHERE account_id=$1 AND folder=$2`, [account.id, row.path]);
+          return pending;
+        }
+      } finally { proof.lock.release(); }
+    }
     const { rows: copies } = await query(`SELECT DISTINCT ON(provider_msgid) folder,uid,provider_msgid FROM messages WHERE account_id=$1
       AND provider_msgid=ANY($2::text[]) AND folder=ANY($3::text[]) AND NOT is_archive_residue AND NOT is_deleted
       ORDER BY provider_msgid,folder,uid`,
     [account.id, [...records.values()].map(row => row.providerMsgid), normal.map(row => row.path)]);
     for (const path of [...new Set(copies.map(row => row.folder))]) {
       const candidates = copies.filter(row => row.folder === path);
-      budget = await reserveBudget(account.id, account.imap_host, { messages: candidates.length, bytes: 1024 + 256 * candidates.length });
+      // DISTINCT identities already consume source-window message tokens. Their
+      // bounded UID-only membership proof adds bytes, not another logical message.
+      budget = await reserveBudget(account.id, account.imap_host, { messages: 0, bytes: 1024 + 256 * candidates.length });
       if (!budget.allowed || stopped()) return pending;
       const proof = await examine(path);
       if (!proof) return pending;
@@ -273,14 +326,30 @@ export async function runArchiveCoverageBatch(account, {
     }
     selected = await examine(folder);
     if (!selected || selected.epoch !== epoch || stopped()) return pending;
+    if (maintenance) {
+      const { rows: represented } = await query(`SELECT uid,provider_msgid FROM messages
+        WHERE account_id=$1 AND folder=$2 AND uid=ANY($3::bigint[]) AND is_archive_residue AND NOT is_deleted`,
+      [account.id, folder, [...records.keys()]]);
+      const missing = [...records.values()].filter(record => !record.normalCopies.length &&
+        !copies.some(copy => copy.provider_msgid === record.providerMsgid) &&
+        !represented.some(row => String(row.uid) === String(record.uid) && row.provider_msgid === record.providerMsgid));
+      const blocked = await loadMetadata(missing.map(record => record.uid));
+      if (blocked) return blocked;
+    }
     return await withTransaction(async db => {
       const result = await admitArchiveMetadata(db, { accountId: account.id, folder, uidValidity: epoch,
         records: [...records.values()], profile, normalEpochs });
       if (!result.pending) {
-        const cursor = arrivals ? (lower > previousHigh + 1 ? Math.max(history, lower - 1) : history) : Math.max(0, lower - 1);
-        await db.query(`UPDATE archive_coverage SET phase=$4,scan_cursor=$5,scan_high_uid=$6,last_error=NULL
+        const cursor = arrivals ? (lower > previousHigh + 1 ? Math.max(history, lower - 1) : history)
+          : maintenance ? history : Math.max(0, lower - 1);
+        const nextSweep = maintenance ? Math.max(0, lower - 1) : cursor === 0 ? 0 : state?.sweep_cursor;
+        await db.query(`UPDATE archive_coverage SET phase=$4,scan_cursor=$5,scan_high_uid=$6,
+          label_modseq=CASE WHEN $10 THEN label_modseq ELSE $7::numeric END,
+          sweep_cursor=CASE WHEN $10 THEN sweep_cursor ELSE $8::bigint END,
+          sweep_checked_at=CASE WHEN $10 OR $5::bigint>0 THEN sweep_checked_at ELSE $9::timestamptz END,last_error=NULL
           WHERE account_id=$1 AND folder=$2 AND uid_validity=$3 AND phase<>'paused'`,
-        [account.id, folder, epoch, cursor === 0 ? 'sweep' : 'scan', cursor, Math.max(previousHigh, high)]);
+        [account.id, folder, epoch, cursor === 0 ? 'sweep' : 'scan', cursor, Math.max(previousHigh, high),
+          passModseq, nextSweep ?? null, new Date(tick), arrivals]);
       }
       return result;
     });
