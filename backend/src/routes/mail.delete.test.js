@@ -121,7 +121,7 @@ function wireImap() {
     server[from].delete(uid);
     return uidplus ? newUid : null;
   });
-  imapManager.permanentDeleteMessage.mockImplementation(async (_account, uid, folder) => { server[folder].delete(uid); });
+  imapManager.permanentDeleteMessage.mockImplementation(async (_account, uid, folder) => { server[folder].delete(uid); return true; });
 }
 
 const trashRow = () => [...rows.values()].find(r => r.folder === 'Trash');
@@ -162,7 +162,7 @@ describe('DELETE /api/mail/messages/:id', () => {
 
     // Deleting it from the Trash view, by the id the Trash listing shows, is still permanent.
     expect(await del(trashed.id)).toBe(200);
-    expect(imapManager.permanentDeleteMessage.mock.calls.map(c => c.slice(1))).toEqual([[900, 'Trash']]);
+    expect(imapManager.permanentDeleteMessage.mock.calls.map(c => c.slice(1))).toEqual([[900, 'Trash', { expectMessageId: '<a@example.com>' }]]);
     expect(rows.size).toBe(0);
   });
 

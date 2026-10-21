@@ -1523,6 +1523,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
     // expungeSucceeded: permanently deleted (already in Trash, or no Trash folder on account).
     // trashMoveSucceeded: moved from a non-Trash folder into Trash.
     const expungeSucceeded = [];
+    const expungeUnverified = [];
     const trashMoveSucceeded = []; // { msg, trashPath, newUid }
     const accountsById = {};
 
@@ -1551,9 +1552,14 @@ router.post('/messages/bulk-delete', async (req, res) => {
         }
         for (const [expungeFolder, folderMsgs] of Object.entries(byExpungeFolder)) {
           const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
-          const { succeeded, failed } = await imapManager.bulkPermanentDelete(account, folderMsgs.map(m => m.uid), expungeFolder);
+          const { succeeded, failed, unverified = [] } = await imapManager.bulkPermanentDelete(account, folderMsgs.map(m => m.uid), expungeFolder,
+            { expectMessageIds: new Map(folderMsgs.map(m => [Number(m.uid), m.message_id ?? null])) });
           for (const uid of succeeded) expungeSucceeded.push(uidToMsg.get(String(uid)));
-          for (const uid of failed) console.error(`bulk-delete IMAP expunge uid ${uid} from ${expungeFolder}: IMAP delete failed`);
+          for (const uid of unverified) expungeUnverified.push(uidToMsg.get(String(uid)).id);
+          const refused = new Set(unverified.map(String));
+          for (const uid of failed) {
+            if (!refused.has(String(uid))) console.error(`bulk-delete IMAP expunge uid ${uid} from ${expungeFolder}: IMAP delete failed`);
+          }
         }
       }
 
@@ -1664,7 +1670,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
     // Refresh GTD section data for any deleted thread that still carries a GTD label sibling.
     notifyMailMutation(owned, req.session.userId);
 
-    res.json({ ok: true, deleted: allSucceeded });
+    res.json({ ok: true, deleted: allSucceeded, ...(expungeUnverified.length ? { unverified: expungeUnverified } : {}) });
   } catch (err) {
     console.error('bulk-delete error:', err);
     res.status(500).json({ error: 'Failed to delete messages' });
@@ -2394,7 +2400,12 @@ async function deleteMessage(req, res, id) {
   const allDraftsPaths = await resolveAllDraftsPaths(message.account_id, account.folder_mappings);
   if (allDraftsPaths.has(message.folder)) {
     try {
-      await imapManager.permanentDeleteMessage(account, message.uid, message.folder);
+      const deleted = await imapManager.permanentDeleteMessage(account, message.uid, message.folder,
+        { expectMessageId: message.message_id ?? null });
+      if (deleted !== true) return res.status(409).json({
+        error: 'Cannot safely delete this message: its server identity is missing or ambiguous',
+        code: 'message_identity_unverified',
+      });
     } catch (err) {
       console.error('IMAP permanent delete (draft) failed:', err.message);
       return res.status(500).json({ error: 'Failed to delete draft' });
@@ -2449,7 +2460,12 @@ async function deleteMessage(req, res, id) {
   } else {
     // strategy.action === 'expunge': message is already in Trash — permanently delete.
     try {
-      await imapManager.permanentDeleteMessage(account, message.uid, message.folder);
+      const deleted = await imapManager.permanentDeleteMessage(account, message.uid, message.folder,
+        { expectMessageId: message.message_id ?? null });
+      if (deleted !== true) return res.status(409).json({
+        error: 'Cannot safely delete this message: its server identity is missing or ambiguous',
+        code: 'message_identity_unverified',
+      });
     } catch (err) {
       console.error('IMAP permanent delete failed:', err.message);
       return res.status(500).json({ error: 'Failed to delete message' });

@@ -5808,6 +5808,11 @@ describe('permanentDeleteMessage with expectMessageId', () => {
       close: vi.fn(),
       noop: vi.fn(async () => true),
       getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      search: vi.fn(async (q, opts) => {
+        expect(opts).toEqual({ uid: true });
+        const needle = q.header['Message-ID'];
+        return [...serverCopies].filter(([, id]) => id?.includes(needle)).map(([uid]) => uid);
+      }),
       fetch: vi.fn(async function* (range) {
         for (const uid of String(range).split(',').map(Number)) {
           if (serverCopies.has(uid)) yield { uid, envelope: { messageId: serverCopies.get(uid) } };
