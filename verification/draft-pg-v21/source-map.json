@@ -1,0 +1,9 @@
+{
+  "repository": "salmonumbrella/mailflow",
+  "accepted_private_sha": "bc538c0ae6827e8c94f5b824d5d12a881a5da092",
+  "accepted_tree": "85ee5f47109f0c01b8f595c32b88c3f26e24cd56",
+  "public_sha": "593c452372137286e40bf519eff4e896dc86caf4",
+  "fixture_path": "backend/src/services/imapManager.draftIngest.test.js",
+  "fixture_sha256": "b5d960914c673139191ce70268bb2ac9afdcbab3a7b3132d3174590ec267b051",
+  "status": "PUBLIC_MAPPING_REQUIRED_FROM_EXISTING_PUBLISHER_NO_GUESSED_SHA"
+}

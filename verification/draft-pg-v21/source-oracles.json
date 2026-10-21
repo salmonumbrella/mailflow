@@ -1,0 +1,36 @@
+{
+  "identity_helper": "archiveCoverage.js26-64 actual source pinned in full-pins; never substituted",
+  "draft_method": "ImapManager._ingestDraftUidWithClient actual source pinned in full-pins",
+  "transaction": "db.js45-58 BEGIN -> await callback(client) -> await COMMIT -> return; on failure await ROLLBACK then rethrow. Fixture uses one dedicated pg.Client; transaction client.query forwards to it; no live pool/app",
+  "case_count": 10,
+  "safe_write_cases": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "rejected_cases": {
+    "7": "stored8/current9 mismatch: real transaction account/folder locks, incomplete returned, read-only COMMIT then caller rejects",
+    "8": "storedNULL/current9: same read-only refusal/COMMIT",
+    "9": "unknown live epoch: helper refuses before withTransaction; caller rejects, no transaction client queries",
+    "10": "missing Drafts folder epoch: real transaction account/folder locks, read-only incomplete/COMMIT then caller rejects"
+  },
+  "six_safe_oracles": [
+    "same canonical root/body retained",
+    "provisional self-root upgraded, body retained",
+    "replacement identity recomputes root/clears body",
+    "missing new identity clears root/body",
+    "missing stored identity recomputes root/clears body",
+    "empty identities clear root/body"
+  ],
+  "all_negative_oracles": "exact rejection + unchanged snapshot of all account/folder/normal/residue fields (identity/provider/body/root/Bcc included); no advisory/INSERT/DELETE",
+  "extra_in_case_controls": [
+    "first safe case real SQL UPDATE followed by division-by-zero through adapter must ROLLBACK and restore full snapshot, then observation state resets before actual ingestion",
+    "six safe writes prove BEGIN/COMMIT, real account/folder/advisory/INSERT/selective-residue-cleanup dispatch, updated metadata and original field oracles",
+    "matching residue removed only after verified normal write; ancestor and unrelated residue retained"
+  ],
+  "not_observed_red": true,
+  "all_controls_unrun": true
+}

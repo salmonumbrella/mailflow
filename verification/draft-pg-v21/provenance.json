@@ -1,0 +1,26 @@
+{
+  "task": "vault#zdwm",
+  "frozen_fjve_manifest_sha256": "ec4d812a012119f6effc70d08cfdecddec613f5c81b2c23441a90f7dd364595d",
+  "frozen_fjve_runner_sha256": "9f532ee8352e273bf4a276b439cbefab068234f374bb3c8ea907f1f4c2a01f0c",
+  "frozen_fjve_pg_admin_sha256": "600bd933d8ddbeceeca41ad544e1e1996bb1dba5c6597aec3611794244daea25",
+  "accepted_private_v21": "bc538c0ae6827e8c94f5b824d5d12a881a5da092",
+  "accepted_v21_tree": "85ee5f47109f0c01b8f595c32b88c3f26e24cd56",
+  "source_files_rehashed": 113,
+  "changed_from_v20": [
+    "backend/src/services/imapManager.draftIngest.test.js"
+  ],
+  "v20_fixture_sha256": "8c88e88043edfab2739150d9f99328ea35f4bbc82374dd52359e2cb5f0231102",
+  "v21_fixture_sha256": "b5d960914c673139191ce70268bb2ac9afdcbab3a7b3132d3174590ec267b051",
+  "source_test_edits_performed": false,
+  "source_test_execution_performed": false,
+  "old_failures_modified": false,
+  "public_mapping": "requested from lead; unresolved; no guessed SHA",
+  "bootstrap_correction": {
+    "failed_run": 39606786966,
+    "phase": "before tests, CREATE ROLE format parameter SQLSTATE42P18",
+    "accepted_helper_sha256": "1db8613c9f9ed9de3ac9244337cfba8a1ec0d1a3911961b566f08be6844a0680",
+    "own_change": "Only format argument $1 becomes $1::text; copied into E10 own helper",
+    "old_evidence_modified": false,
+    "tests_observed_in_failed_run": 0
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "branch": "verification/ci-mailflow-draft-pg-v21",
+  "repository": "salmonumbrella/mailflow",
+  "publish_directory": "verification/draft-pg-v21",
+  "workflow_destination": ".github/workflows/mailflow-draft-pg-v21.yml",
+  "runtime_argv": [
+    "python3",
+    "harness/verification/draft-pg-v21/runner.py",
+    "--source",
+    "source",
+    "--out",
+    "draft-pg-results",
+    "--execute"
+  ],
+  "cleanup_argv": [
+    "python3",
+    "harness/verification/draft-pg-v21/runner.py",
+    "--out",
+    "draft-pg-results",
+    "--cleanup-owned"
+  ],
+  "public_source_input": "source-map.json:public_sha (currently null; lead asked for factual mapping)",
+  "expected_sql_cases": 10,
+  "duplicate_units": 0,
+  "unselected_A_D_cases": 375,
+  "runtime": "UNRUN"
+}

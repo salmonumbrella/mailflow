@@ -1,0 +1,72 @@
+name: MailFlow draft-ingestion E10 v21
+on:
+  push:
+    branches: [verification/ci-mailflow-draft-pg-v21]
+    paths:
+      - .github/workflows/mailflow-draft-pg-v21.yml
+      - verification/draft-pg-v21/**
+permissions:
+  contents: read
+concurrency:
+  group: mailflow-draft-pg-v21
+  cancel-in-progress: false
+jobs:
+  draft-postgres:
+    if: github.repository == 'salmonumbrella/mailflow' && github.ref == 'refs/heads/verification/ci-mailflow-draft-pg-v21' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out reviewed focused harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: salmonumbrella/mailflow
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Require exact publisher-supplied public v21 mapping
+        id: source
+        run: |
+          python3 - <<'PYMAP'
+          import json, os, re
+          from pathlib import Path
+          directory = Path('harness/verification/draft-pg-v21')
+          mapping = json.loads((directory / 'source-map.json').read_text())
+          plan = json.loads((directory / 'plan.json').read_text())
+          assert mapping['repository'] == 'salmonumbrella/mailflow'
+          assert mapping['accepted_private_sha'] == plan['source']['accepted_private_sha'] == 'bc538c0ae6827e8c94f5b824d5d12a881a5da092'
+          assert mapping['accepted_tree'] == plan['source']['tree'] == '85ee5f47109f0c01b8f595c32b88c3f26e24cd56'
+          assert re.fullmatch('[0-9a-f]{40}', mapping['public_sha'] or ''), 'Public v21 mapping missing; no guessed source, install or SQL run'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write('sha=' + mapping['public_sha'] + '\n')
+          PYMAP
+      - name: Check out exactly mapped accepted source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: salmonumbrella/mailflow
+          ref: ${{ steps.source.outputs.sha }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install exact Node runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22.23.3'
+          package-manager-cache: false
+      - name: Run only ten draft-ingestion PostgreSQL cases
+        run: python3 harness/verification/draft-pg-v21/runner.py --source source --out draft-pg-results --execute
+      - name: Clean only the recorded owned service
+        if: always()
+        run: |
+          if [ -d draft-pg-results ]; then
+            python3 harness/verification/draft-pg-v21/runner.py --out draft-pg-results --cleanup-owned
+          fi
+      - name: Retain native report and sanitized logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mailflow-draft-pg-v21-${{ github.run_id }}-${{ github.run_attempt }}
+          path: draft-pg-results/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 14

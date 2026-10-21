@@ -1,0 +1,27 @@
+{
+  "status": "STATIC_READY_PUBLIC_MAPPING_REQUIRED_RUNTIME_UNRUN",
+  "python_compile": true,
+  "json_yaml_actionlint": "pass; no shellcheck/pyflakes/application execution",
+  "source_files_rehashed": 113,
+  "only_fixture_pin_changed_from_v20": "backend/src/services/imapManager.draftIngest.test.js",
+  "native_files": 1,
+  "expected_sql_passes": 10,
+  "duplicate_units": 0,
+  "unselected_A_D_cases": 375,
+  "parent_fjve_unchanged": true,
+  "shared_process_source_native_count_and_cleanup_AST_unchanged": true,
+  "bootstrap_cast": "Accepted $1::text; no actual SQL executed here",
+  "npm_config": "Distinct empty private0600 files retained",
+  "public_mapping": "null; workflow and runner block execution; factual mapping requested from lead",
+  "not_run": [
+    "Node/import/install",
+    "PG/SQL/Docker",
+    "tests/CI/GitHub writes",
+    "old-source control"
+  ],
+  "not_claimed": [
+    "Observed RED/GREEN",
+    "ten-case proof",
+    "full385/migrations/provider/Mini/performance"
+  ]
+}

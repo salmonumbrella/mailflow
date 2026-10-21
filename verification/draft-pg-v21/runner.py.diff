@@ -1,0 +1,157 @@
+--- frozen-fjve/runner.py
++++ draft-pg-v21/runner.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Managed, exact-source hosted SQL subset. Static preparation is NOT execution."""
++"""Focused accepted-v21 E10 only. Public mapping and root review precede execution."""
+ import argparse
+ import codecs
+ import ctypes
+@@ -21,8 +21,8 @@
+ from urllib.parse import urlencode
+ 
+ HERE = Path(__file__).resolve().parent
+-TASK = 'mailflow-pg-fjve-v20'
+-DATABASES = ('mailflow_svtw', 'mailflow_pyws_backup')
++TASK = 'mailflow-draft-pg-zdwm-v21'
++DATABASES = ('mailflow_svtw',)
+ 
+ 
+ class Stop(RuntimeError):
+@@ -67,10 +67,16 @@
+         require(path.is_file() and not path.is_symlink() and sha(path) == expected, 'harness pin drift: ' + name)
+     plan = json.loads((HERE / 'plan.json').read_text())
+     require(len(plan['source']['source_files']) == 113, 'inventory size')
+-    require(len(plan['commands']) == 30, 'selected files')
+-    require(sum(c['expected_sql_passes'] for c in plan['commands']) == 375, 'SQL count')
+-    require(sum(c['expected_duplicate_unit_passes'] for c in plan['commands']) == 4, 'duplicate unit count')
+-    require(plan['held']['sql_targets'] == 10, 'held E count')
++    require(len(plan['commands']) == 1, 'selected files')
++    require(sum(c['expected_sql_passes'] for c in plan['commands']) == 10, 'SQL count')
++    require(sum(c['expected_duplicate_unit_passes'] for c in plan['commands']) == 0, 'duplicate unit count')
++    require(plan['commands'][0]['file'] == 'backend/src/services/imapManager.draftIngest.test.js', 'only E10 file allowed')
++    mapping = json.loads((HERE / 'source-map.json').read_text())
++    require(mapping['repository'] == plan['source']['repository']
++            and mapping['accepted_private_sha'] == plan['source']['accepted_private_sha']
++            and mapping['accepted_tree'] == plan['source']['tree']
++            and mapping['fixture_sha256'] == plan['source']['source_files'][mapping['fixture_path']], 'source mapping identity drift')
++    plan['source']['sha'] = mapping['public_sha']
+     return plan
+ 
+ 
+@@ -333,7 +339,7 @@
+     lease = json.loads(lease_path.read_text())
+     require(lease['task'] == TASK and re.fullmatch('[0-9a-f]{12}', lease['run_id']), 'invalid owned lease')
+     # Fallback after workflow cancellation: no Node/test/SQL or new service.
+-    with tempfile.TemporaryDirectory(prefix='fjve-cleanup-') as temporary:
++    with tempfile.TemporaryDirectory(prefix='zdwm-cleanup-') as temporary:
+         pg = ManagedPG(out, Path(temporary), env, lease['image_ref'], lease['run_id'], ())
+         pg.identifier = lease['id'] or lease['name']
+         if pg.absent(pg.identifier):
+@@ -366,7 +372,7 @@
+     require(not sys.flags.optimize, 'Python optimization forbidden')
+     plan = metadata()
+     # Exact allowlist, fresh HOME/temp/cache. No inherited tokens, PG*, DB*, dotenv or npm credentials.
+-    with tempfile.TemporaryDirectory(prefix='fjve-private-') as temporary:
++    with tempfile.TemporaryDirectory(prefix='zdwm-private-') as temporary:
+         private = Path(temporary)
+         # npm refuses to load the same file as both user and global config.
+         # These are distinct, empty, task-private files; no existing config is read.
+@@ -387,14 +393,15 @@
+             save(out / ('fallback-cleanup-' + secrets.token_hex(4) + '.json'), result)
+             return
+         require(args.execute and args.source, 'Explicit reviewed hosted execution required')
++        require(re.fullmatch('[0-9a-f]{40}', plan['source']['sha'] or ''), 'exact public v21 mapping missing; publisher must supply reviewed mapping')
+         require(os.environ.get('GITHUB_REPOSITORY') == plan['source']['repository']
+-                and os.environ.get('GITHUB_REF') == 'refs/heads/verification/ci-mailflow-pg-v20'
++                and os.environ.get('GITHUB_REF') == 'refs/heads/verification/ci-mailflow-draft-pg-v21'
+                 and os.environ.get('GITHUB_RUN_ATTEMPT') == '1', 'wrong hosted repository/ref or retry attempt')
+         require(platform.system() == 'Linux' and platform.machine() == 'x86_64', 'native Ubuntu x64 hosted runner required')
+         root = args.source.resolve(strict=True)
+         require(not out.exists() and not out.is_relative_to(root), 'fresh separate output required')
+         out.mkdir(parents=True)
+-        lock = open('/tmp/mailflow-managed-pg-fjve.lock', 'a')
++        lock = open('/tmp/mailflow-managed-pg-zdwm.lock', 'a')
+         try:
+             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+         except BlockingIOError:
+@@ -407,15 +414,15 @@
+         run_id = secrets.token_hex(6)
+         passwords = [secrets.token_hex(32), secrets.token_hex(32)]
+         sensitive = list(passwords)
+-        paths = [(root, 'source'), (HERE, 'verification/pg-v20'), (private, '<private>'), (out, 'pg-results')]
++        paths = [(root, 'source'), (HERE, 'verification/draft-pg-v21'), (private, '<private>'), (out, 'pg-results')]
+         pg = ManagedPG(out, private, env, json.loads((HERE / 'postgres-image.json').read_text())['image'], run_id, sensitive)
+         records, failure, cleanup = [], None, None
+         started = time.monotonic()
+         try:
+             source_guard(root, plan, env)
+             save(out / 'scope.json', {'source_sha': plan['source']['sha'], 'source_tree': plan['source']['tree'],
+-                 'selected_sql_targets': 375, 'duplicate_unit_cases': 4, 'expected_native_passes': 379,
+-                 'held_E_sql_cases': 10, 'files': 30, 'not_claimed': ['full385', 'full migration chain', 'provider/Mini/corpus/performance']})
++                 'selected_sql_targets': 10, 'duplicate_unit_cases': 0, 'expected_native_passes': 10,
++                 'unselected_A_D_sql_cases': 375, 'files': 1, 'not_claimed': ['full385', 'full migration chain', 'provider/Mini/corpus/performance']})
+             node = shutil.which('node', path=env['PATH']); npm = shutil.which('npm', path=env['PATH'])
+             require(node and npm, 'Node/npm unavailable')
+             node_check = run_logged([node, '--version'], root / 'backend', env, out / 'node-version', 10, sensitive, paths)
+@@ -440,16 +447,16 @@
+                 value = 'postgresql://' + role + ':' + password + '@127.0.0.1:' + str(port) + '/' + database + '?' + urlencode({'application_name': application, 'options': options})
+                 sensitive.append(value)
+                 return value
+-            fixture_base = uri('mailflow_svtw', 'mailflow_fixture', passwords[1], 'pyws-bootstrap')
+-            admin_base = uri('postgres', 'mailflow_admin', passwords[0], 'fjve-admin')
+-            ready = helper('bootstrap', {'FJVE_ADMIN_URL': admin_base, 'FJVE_FIXTURE_URL': fixture_base,
+-                           'FJVE_FIXTURE_PASSWORD': passwords[1]}, 'tcp-ready', 90)
++            fixture_base = uri('mailflow_svtw', 'mailflow_fixture', passwords[1], 'draft-pg-bootstrap')
++            admin_base = uri('postgres', 'mailflow_admin', passwords[0], 'zdwm-admin')
++            ready = helper('bootstrap', {'ZDWM_ADMIN_URL': admin_base, 'ZDWM_FIXTURE_URL': fixture_base,
++                           'ZDWM_FIXTURE_PASSWORD': passwords[1]}, 'tcp-ready', 90)
+             require(ready.get('finalTcpReady') is True, 'final TCP readiness absent')
+             for command in plan['commands']:
+                 source_guard(root, plan, env)
+                 database = command['database']
+-                admin = uri(database, 'mailflow_admin', passwords[0], 'fjve-audit')
+-                helper('audit', {'FJVE_ADMIN_URL': admin, 'FJVE_EXPECTED_DATABASE': database}, command['id'] + '.preflight')
++                admin = uri(database, 'mailflow_admin', passwords[0], 'zdwm-audit')
++                helper('audit', {'ZDWM_ADMIN_URL': admin, 'ZDWM_EXPECTED_DATABASE': database}, command['id'] + '.preflight')
+                 report_path = private / (command['id'] + '.native.json')
+                 argv = [node, '--max-old-space-size=512', 'node_modules/vitest/vitest.mjs', 'run',
+                         command['file'].removeprefix('backend/'), '--maxWorkers=1', '--no-file-parallelism',
+@@ -475,7 +482,7 @@
+                     native_counts(report, command)
+                     require(result['exit_code'] == 0 and not result['failure_kind'] and not result['lingering_group_at_exit'], 'native exit/descendant failure')
+                     source_guard(root, plan, env)
+-                    helper('audit', {'FJVE_ADMIN_URL': admin, 'FJVE_EXPECTED_DATABASE': database}, command['id'] + '.postflight')
++                    helper('audit', {'ZDWM_ADMIN_URL': admin, 'ZDWM_EXPECTED_DATABASE': database}, command['id'] + '.postflight')
+                     record['status'] = 'passed'
+                 finally:
+                     if report_path.is_file() and not (out / (command['id'] + '.native.json')).exists():
+@@ -484,7 +491,7 @@
+                     if 'status' not in record:
+                         record['status'] = 'failed_or_incomplete'
+                     save(out / (command['id'] + '.execution.json'), record)
+-            require(len(records) == 30 and sum(r['assertion_counts']['passed'] for r in records) == 379, 'aggregate incomplete')
++            require(len(records) == 1 and sum(r['assertion_counts']['passed'] for r in records) == 10, 'aggregate incomplete')
+         except BaseException as error:
+             failure = type(error).__name__ + ': ' + scrub(str(error), sensitive, paths)
+         finally:
+@@ -501,16 +508,16 @@
+                     failure = failure or 'owned cleanup incomplete'
+                 if cleanup.get('errors'):
+                     failure = failure or 'owned cleanup/log retrieval incomplete'
+-                passed = failure is None and len(records) == 30 and not cleanup.get('errors')
++                passed = failure is None and len(records) == 1 and not cleanup.get('errors')
+                 save(out / 'result.json', {'status': 'passed_selected_subset' if passed else 'failed_or_incomplete',
+                      'source_sha': plan['source']['sha'], 'source_tree': plan['source']['tree'], 'node_vitest': locals().get('versions'),
+                      'postgres_server_version_num_required': 160015, 'completed_files': sum(r.get('status') == 'passed' for r in records),
+                      'observed_native_passes': sum(r.get('assertion_counts', {}).get('passed', 0) for r in records),
+                      'selected_sql_target_passes': sum(r['expected_sql_passes'] for r in records if r.get('status') == 'passed'),
+                      'duplicate_unit_passes': sum(r['expected_duplicate_unit_passes'] for r in records if r.get('status') == 'passed'),
+-                     'held_E_sql_cases': 10, 'failure': failure, 'cleanup': cleanup,
++                     'unselected_A_D_sql_cases': 375, 'failure': failure, 'cleanup': cleanup,
+                      'seconds': round(time.monotonic() - started, 3), 'retry_count': 0,
+-                     'not_claimed': ['all385 SQL targets', 'E10 source successor', 'full migrations', 'provider/Mini/corpus/performance']})
++                     'not_claimed': ['all385 SQL targets', 'A-D375 rerun', 'full migrations', 'provider/Mini/corpus/performance']})
+             finally:
+                 fcntl.flock(lock, fcntl.LOCK_UN)
+                 signal.pthread_sigmask(signal.SIG_SETMASK, before)

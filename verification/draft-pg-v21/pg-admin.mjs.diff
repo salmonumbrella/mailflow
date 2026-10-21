@@ -1,0 +1,46 @@
+--- frozen-fjve/pg-admin.mjs
++++ draft-pg-v21/pg-admin.mjs
+@@ -9,8 +9,8 @@
+   console.log(JSON.stringify({ node: process.versions.node, vitest: vitest.version }));
+ } else {
+   const pg = createRequire(resolve('package.json'))('pg');
+-  const admin = process.env.FJVE_ADMIN_URL;
+-  const fixture = process.env.FJVE_FIXTURE_URL;
++  const admin = process.env.ZDWM_ADMIN_URL;
++  const fixture = process.env.ZDWM_FIXTURE_URL;
+   const connect = async url => {
+     const client = new pg.Client({ connectionString: url, connectionTimeoutMillis: 1000 });
+     try { await client.connect(); return client; }
+@@ -32,17 +32,17 @@
+     }
+     try {
+       const ddl = (await db.query(`SELECT format('CREATE ROLE mailflow_fixture LOGIN NOSUPERUSER
+-        NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 2 PASSWORD %L', $1) AS ddl`,
+-      [process.env.FJVE_FIXTURE_PASSWORD])).rows[0].ddl;
++        NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 2 PASSWORD %L', $1::text) AS ddl`,
++      [process.env.ZDWM_FIXTURE_PASSWORD])).rows[0].ddl;
+       await db.query(ddl);
+-      for (const name of ['mailflow_svtw', 'mailflow_pyws_backup']) {
++      for (const name of ['mailflow_svtw']) {
+         await db.query('CREATE DATABASE ' + name + ' OWNER mailflow_fixture');
+       }
+       const limits = (await db.query(`SELECT rolsuper,rolcreatedb,rolcreaterole,rolconnlimit
+         FROM pg_roles WHERE rolname='mailflow_fixture'`)).rows[0];
+       if (limits.rolsuper || limits.rolcreatedb || limits.rolcreaterole || limits.rolconnlimit !== 2) throw Error('role limits mismatch');
+       const verified = [];
+-      for (const name of ['mailflow_svtw', 'mailflow_pyws_backup']) {
++      for (const name of ['mailflow_svtw']) {
+         const url = new URL(fixture); url.pathname = '/' + name;
+         const peer = await connect(url.toString());
+         try { verified.push(await identity(peer, name)); } finally { await peer.end(); }
+@@ -50,8 +50,8 @@
+       console.log(JSON.stringify({ finalTcpReady: true, databases: verified, fixtureConnectionLimit: 2 }));
+     } finally { await db.end(); }
+   } else if (mode === 'audit') {
+-    const expected = process.env.FJVE_EXPECTED_DATABASE;
+-    if (!['mailflow_svtw', 'mailflow_pyws_backup'].includes(expected)) throw Error('unexpected audit database');
++    const expected = process.env.ZDWM_EXPECTED_DATABASE;
++    if (!['mailflow_svtw'].includes(expected)) throw Error('unexpected audit database');
+     const db = await connect(admin);
+     try {
+       const who = await identity(db, expected);
