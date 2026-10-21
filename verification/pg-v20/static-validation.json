@@ -1,0 +1,42 @@
+{
+  "status": "STATIC_CHECKS_PASS_NOT_EXECUTED",
+  "python_compile": true,
+  "json_yaml_parsed": true,
+  "actionlint_no_script_execution": "exit0; -shellcheck= -pyflakes=",
+  "workflow_policy": {
+    "single_new_push_branch": true,
+    "fork_only": true,
+    "contents_read": true,
+    "checkout_credentials_false": true,
+    "source_sha_pinned": true,
+    "actions_primary_metadata_pinned": true,
+    "always_artifact_upload": true
+  },
+  "inventory": {
+    "source_sha": "76146779946849581b5b26dd35933ebd00fe847d",
+    "source_tree": "726385949110b2d1eef6168fa5765942136b955e",
+    "files_rehashed": 113,
+    "native_files": 30,
+    "sql_targets": 375,
+    "duplicate_units": 4,
+    "expected_native_passes": 379,
+    "held_E": 10,
+    "original_inventory_summary_unchanged": true
+  },
+  "npm_config_correction": {
+    "basis": "Root reports prior actual same-/dev/null dual-load install failure; old evidence unchanged",
+    "distinct_private_filenames": [
+      "npm-user.npmrc",
+      "npm-global.npmrc"
+    ],
+    "exclusive_empty_create_and_explicit_mode": "0600",
+    "child_env_only": true,
+    "npm_or_install_executed": false
+  },
+  "inspection_limits": [
+    "Python compiled; JSON/YAML/AST/source hashes inspected only",
+    "JavaScript helper authored/read; no Node syntax/import execution",
+    "No mocked tests, PostgreSQL, Docker, npm, CI or GitHub writes",
+    "Managed cleanup/version/count behavior remains unexecuted until root-reviewed hosted run"
+  ]
+}

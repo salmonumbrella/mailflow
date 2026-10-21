@@ -1,0 +1,28 @@
+{
+  "publication_branch": "verification/ci-mailflow-pg-v20",
+  "publish_directory": "verification/pg-v20",
+  "workflow_destination": ".github/workflows/mailflow-pg-v20.yml",
+  "source_checkout": "source",
+  "source_sha": "76146779946849581b5b26dd35933ebd00fe847d",
+  "runtime_argv": [
+    "python3",
+    "harness/verification/pg-v20/runner.py",
+    "--source",
+    "source",
+    "--out",
+    "pg-results",
+    "--execute"
+  ],
+  "fallback_cleanup_argv": [
+    "python3",
+    "harness/verification/pg-v20/runner.py",
+    "--out",
+    "pg-results",
+    "--cleanup-owned"
+  ],
+  "selected_sql": 375,
+  "duplicate_unit": 4,
+  "held_E": 10,
+  "execution_status": "NOT_RUN",
+  "user_supplied_credentials_or_endpoints": false
+}
