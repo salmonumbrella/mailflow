@@ -1,0 +1,64 @@
+# Example overlay: runs mailflow-mcp's HTTP mode as one more service of MailFlow's own compose
+# project. From MailFlow's directory:
+#
+#   docker compose -f docker-compose.yml -f ../mailflow-mcp/deploy/docker-compose.mcp.yml up -d --build
+#
+# To make it hard to forget, put this line in MailFlow's .env, so a plain `docker compose up -d --build`
+# includes the overlay (COMPOSE_FILE is ignored whenever -f is passed):
+#
+#   COMPOSE_FILE=docker-compose.yml:../mailflow-mcp/deploy/docker-compose.mcp.yml
+#
+# An update run without the overlay recreates the backend off the mcp network; the mcp container
+# then turns unhealthy, which is how that shows. `docker compose config` prints the merged result.
+#
+# Relative paths resolve from MailFlow's directory (the first compose file's).
+
+services:
+  mcp:
+    build:
+      # Where this repository is checked out.
+      context: ${MAILFLOW_MCP_SRC:-../mailflow-mcp}
+      args:
+        # node:22-bookworm-slim avoids Alpine's apk; any Node 20+ image works.
+        NODE_BASE: ${MAILFLOW_MCP_NODE_BASE:-node:22-alpine}
+    container_name: mailflow-mcp
+    restart: unless-stopped
+    environment:
+      # Straight to MailFlow's backend over the private network below. Plain http is accepted for a
+      # single-label container name; it never leaves the Docker host.
+      MAILFLOW_URL: http://backend:3000
+      # The host name clients use. Requests for any other Host are refused (DNS-rebinding protection).
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-mcp.example.com}
+      # Must equal the number of reverse proxies in front of this container: 1 for deploy/nginx-mcp.conf.
+      # Too high, and a caller can choose the address MailFlow's rate limits see.
+      MCP_TRUST_PROXY_HOPS: ${MCP_TRUST_PROXY_HOPS:-1}
+      # MAILFLOW_TOKEN is never set here: each caller's own token is passed through to MailFlow.
+    ports:
+      # Published on the host's loopback only, for a reverse proxy on the same host. If the proxy runs
+      # in a container, attach it to the mcp network instead and drop this.
+      - "${MCP_PORT:-127.0.0.1:8787}:8787"
+    # The container needs no writable files, no capabilities and no privilege changes.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # Only the mcp network: from here the backend is reachable, but not Redis (no password, and it
+    # holds every session) or Postgres, which stay on MailFlow's own network.
+    networks: [mcp]
+
+  backend:
+    # The backend joins the mcp network as well as its own.
+    networks: [mailflow, mcp]
+
+networks:
+  mcp:
+    driver: bridge

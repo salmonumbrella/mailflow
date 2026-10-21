@@ -1,0 +1,39 @@
+{
+  "name": "mailflow-mcp",
+  "version": "0.1.1",
+  "description": "MCP server that lets Claude search, organize and draft mail in a self-hosted MailFlow, using a MailFlow API token",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Monkey7539/mailflow-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mailflow",
+    "email",
+    "claude"
+  ],
+  "type": "module",
+  "bin": {
+    "mailflow-mcp": "src/cli.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/cli.js stdio",
+    "start:http": "node src/cli.js http"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  }
+}
