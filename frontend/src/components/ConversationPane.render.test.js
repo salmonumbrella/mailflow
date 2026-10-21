@@ -632,6 +632,11 @@ describe('a conversation another account also received', () => {
   const open = async ({ selectedAccountId = 'acct', selected = ROW, threadMessages = {}, rows = [ROW], folder = 'INBOX' } = {}) => {
     requests.length = 0;
     await React.act(async () => {
+      // Each call remounts a fresh scenario and reseeds the same server fixtures.
+      // Retire the previous fixture session through the public boundary first:
+      // accepted archive guards correctly outlive UNKNOWN count observations.
+      useStore.getState().setLocked(true);
+      useStore.getState().setLocked(false);
       useStore.setState({
         conversationMode: 'pane', selectedAccountId, selectedFolder: folder, searchQuery: '',
         searchResults: [], messages: rows, threadMessages, selectedMessageId: selected.id,
@@ -971,6 +976,23 @@ describe('a conversation another account also received', () => {
       assert.deepEqual(useStore.getState().messages.map(m => m.id), [ROW.id, NEXT.id], `${title} leaves acct's row listed`);
       assert.equal(useStore.getState().selectedMessageId, null, `${title} opens nothing in its place`);
     }
+  });
+
+  test('accepted archive guards survive within a fixture session and retire at the next public session', async () => {
+    const { applyDeleteGuard } = await import('../utils/pendingDeletes.js');
+    const scenario = { selected: B3, threadMessages: { '__dl_b3': [B3] }, rows: [ROW] };
+    await open(scenario);
+    const generation = useStore.getState().countGeneration;
+    await commitWindow(button('message.archive'));
+    assert.deepEqual(sentIds(/bulk-archive/), ['b3'], 'the actual request remains scoped to the opened account');
+    assert.equal(useStore.getState().countGeneration, generation, 'the action does not reset its live session');
+    assert.deepEqual(applyDeleteGuard([B3]), [], 'elapsed undo/cleanup time does not certify an UNKNOWN archive');
+    assert.ok(Object.values(useStore.getState().countOperations.operations || {})
+      .some(operation => operation.targetId === B3.id), 'the archive observation obligation remains live');
+    await open(scenario);
+    assert.equal(useStore.getState().countGeneration, generation + 1, 'fresh scenario uses the real public session boundary');
+    assert.deepEqual(applyDeleteGuard([B3]), [B3], 'the binder retires only the previous-session archive guard');
+    assert.ok(cardIds().includes(B3.id), 'the fresh physical fixture copy is reachable again');
   });
 
   test('with no row of the conversation listed, an action that leaves the opened message there clears the pane', async () => {
