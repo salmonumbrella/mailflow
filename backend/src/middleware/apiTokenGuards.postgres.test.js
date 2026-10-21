@@ -31,10 +31,11 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards Postg
       CREATE TEMP TABLE email_accounts (id uuid PRIMARY KEY, user_id uuid, imap_host text, oauth_provider text,
         folder_mappings jsonb);
       CREATE TEMP TABLE folders (account_id uuid, path text, name text, delimiter text, special_use text,
-        no_select boolean NOT NULL DEFAULT false);
+        no_select boolean NOT NULL DEFAULT false, uid_validity bigint);
       CREATE TEMP TABLE messages (id uuid PRIMARY KEY, account_id uuid, folder text, uid bigint, message_id text,
         in_reply_to text, thread_references text, thread_id text, is_read boolean DEFAULT false,
-        is_deleted boolean DEFAULT false, flags jsonb);
+        is_deleted boolean DEFAULT false, flags jsonb,
+        provider_msgid text, is_archive_residue boolean NOT NULL DEFAULT false);
       CREATE TEMP TABLE snoozed_messages (id uuid, user_id uuid, account_id uuid, message_id_header text,
         original_folder text, snoozed_folder text, snooze_until timestamptz)`);
     query.mockImplementation((sql, values) => database.query(sql, values));
