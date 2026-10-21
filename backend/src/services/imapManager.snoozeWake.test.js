@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
-vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('./db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((p) => p) }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
@@ -19,14 +19,13 @@ vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }
 vi.mock('../utils/mailUtils.js', async (importOriginal) => ({ ...(await importOriginal()), adjustFolderCounts: vi.fn() }));
 
 import { ImapManager } from './imapManager.js';
-import { query } from './db.js';
-import { adjustFolderCounts } from '../utils/mailUtils.js';
+import { query, withTransaction } from './db.js';
 
 const HOUR = 3_600_000;
 const ACCOUNT = { id: 'acct-1', user_id: 'u1' };
 
 // The snooze records and the messages they point at, as the database holds them now.
-let snoozes, messages;
+let snoozes, messages, folderCounts;
 const snooze = (id, { until = -HOUR, uid = 10, isRead = false } = {}) => {
   snoozes.set(id, { id, user_id: 'u1', account_id: 'acct-1', message_id_header: `<${id}@x>`, original_folder: 'INBOX', snoozed_folder: 'Snoozed', snooze_until: Date.now() + until });
   messages.set(`<${id}@x>`, { folder: 'Snoozed', uid, is_read: isRead });
@@ -46,14 +45,27 @@ function fakeQuery(sql, params = []) {
     if (sql.includes('sm.snooze_until <= NOW()')) live = live.filter(sm => sm.snooze_until <= Date.now());
     return { rows: live.map(sm => rowRead(sm.id)) };
   }
+  if (sql.startsWith('SELECT id FROM messages')) {
+    const m = messages.get(params[3]);
+    return { rows: m && m.folder === params[2] && m.uid === params[1] ? [{ id: params[3] }] : [] };
+  }
+  if (sql === 'DELETE FROM messages WHERE id = $1') return { rows: [], rowCount: messages.delete(params[0]) ? 1 : 0 };
+  if (sql.startsWith('UPDATE folders f SET')) {
+    for (const path of params[1]) {
+      const rows = [...messages.values()].filter(m => m.folder === path);
+      folderCounts[path] = { total: rows.length, unread: rows.filter(m => !m.is_read).length };
+    }
+    return { rows: [] };
+  }
   if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [ACCOUNT] };
   if (sql.startsWith('UPDATE messages SET folder')) {
     const m = messages.get(params[2]);
-    if (m && m.folder === params[params.length - 1]) {
+    if (m && m.folder === params[sql.includes('uid = $4') ? 4 : 3]) {
       m.folder = params[0];
       if (sql.includes('uid = $4')) m.uid = params[3];
+      if (sql.includes('is_read = false')) m.is_read = false;
     }
-    return { rows: [] };
+    return { rows: [], rowCount: m ? 1 : 0 };
   }
   if (sql.startsWith('DELETE FROM snoozed_messages WHERE id')) { snoozes.delete(params[0]); return { rows: [] }; }
   return { rows: [] };
@@ -63,8 +75,9 @@ let mgr;
 beforeEach(() => {
   vi.clearAllMocks();
   snoozes = new Map();
-  messages = new Map();
+  messages = new Map(); folderCounts = {};
   query.mockImplementation(async (sql, params) => fakeQuery(sql, params));
+  withTransaction.mockImplementation(fn => fn({ query }));
   mgr = new ImapManager(null);
   mgr.broadcast = vi.fn();
   mgr.setFlag = vi.fn(async () => {});
@@ -78,7 +91,7 @@ describe('waking a snooze that changed after it was read', () => {
     expect(await mgr.wakeSnoozed(rowRead('a'), { markUnread: false })).toBe(true);
     expect(await mgr.wakeSnoozed(stale, { onlyIfDue: true })).toBe(false);
     expect(mgr.moveMessageGetNewUid).toHaveBeenCalledTimes(1);
-    expect(adjustFolderCounts).toHaveBeenCalledTimes(2); // out of Snoozed and into INBOX, once
+    expect(folderCounts.INBOX).toEqual({ total: 1, unread: 1 }); // out of Snoozed and into INBOX, once
     expect(mgr.broadcast).toHaveBeenCalledTimes(1);
   });
 
@@ -98,7 +111,7 @@ describe('waking a snooze that changed after it was read', () => {
     Object.assign(messages.get('<a@x>'), { uid: 12, is_read: true });
     expect(await mgr.wakeSnoozed(stale, { onlyIfDue: true })).toBe(true);
     expect(mgr.moveMessageGetNewUid).toHaveBeenCalledWith(ACCOUNT, 12, 'Snoozed', 'INBOX');
-    expect(adjustFolderCounts).toHaveBeenCalledWith('acct-1', 'Snoozed', -1, 0); // it was read
+    expect(folderCounts.Snoozed).toEqual({ total: 0, unread: 0 }); // it was read
   });
 
   it('tells a wake already under way apart from nothing to wake', async () => {
@@ -130,8 +143,8 @@ describe('the sweep', () => {
     await mgr._runSnoozeWakeup();
     expect(mgr.moveMessageGetNewUid.mock.calls.map(c => c[1])).toEqual([10, 11]); // b once, by hand
     expect(mgr.setFlag).toHaveBeenCalledTimes(1);
-    expect(mgr.setFlag).toHaveBeenCalledWith(ACCOUNT, 110, 'INBOX', '\\Seen', false);
+    expect(mgr.setFlag).toHaveBeenCalledWith(ACCOUNT, 110, 'INBOX', '\\Seen', false, { expectMessageId: '<a@x>' });
     expect(snoozes.size).toBe(0);
-    expect(adjustFolderCounts).toHaveBeenCalledTimes(4);
+    expect(folderCounts.INBOX).toEqual({ total: 2, unread: 2 });
   });
 });
