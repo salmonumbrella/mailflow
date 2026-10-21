@@ -255,19 +255,25 @@ test('a 2xx that is not JSON is not MailFlow', async () => {
 
 test('timeouts and network errors, with the write warning only when the request may have arrived', async () => {
   const hang = (url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)));
-  const read = await failure(client(hang, { timeoutMs: 50 }).listAccounts());
-  assert.match(read.message, /did not answer within 50 ms/);
-  assert.ok(!read.message.includes(MAY_HAVE_COMPLETED));
-  const write = await failure(client(hang, { timeoutMs: 50 }).saveDraft({}));
-  assert.ok(write.message.includes(MAY_HAVE_COMPLETED));
-  assert.equal(write.code, 'timeout');
+  // AbortSignal deadlines do not keep Node alive, and this fake fetch owns no I/O.
+  const keepAlive = setTimeout(() => {}, 2000);
+  try {
+    const read = await failure(client(hang, { timeoutMs: 50 }).listAccounts());
+    assert.match(read.message, /did not answer within 50 ms/);
+    assert.ok(!read.message.includes(MAY_HAVE_COMPLETED));
+    const write = await failure(client(hang, { timeoutMs: 50 }).saveDraft({}));
+    assert.ok(write.message.includes(MAY_HAVE_COMPLETED));
+    assert.equal(write.code, 'timeout');
 
-  const refused = async () => { throw new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) }); };
-  const notSent = await failure(client(refused).saveDraft({}));
-  assert.match(notSent.message, /Could not reach MailFlow at https:\/\/mail.example.com \(ECONNREFUSED\)/);
-  assert.ok(!notSent.message.includes(MAY_HAVE_COMPLETED));
-  const reset = async () => { throw new TypeError('fetch failed', { cause: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }) }); };
-  assert.ok((await failure(client(reset).saveDraft({}))).message.includes(MAY_HAVE_COMPLETED));
+    const refused = async () => { throw new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) }); };
+    const notSent = await failure(client(refused).saveDraft({}));
+    assert.match(notSent.message, /Could not reach MailFlow at https:\/\/mail.example.com \(ECONNREFUSED\)/);
+    assert.ok(!notSent.message.includes(MAY_HAVE_COMPLETED));
+    const reset = async () => { throw new TypeError('fetch failed', { cause: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }) }); };
+    assert.ok((await failure(client(reset).saveDraft({}))).message.includes(MAY_HAVE_COMPLETED));
+  } finally {
+    clearTimeout(keepAlive);
+  }
 });
 
 test('answers over the size cap are not read', async () => {

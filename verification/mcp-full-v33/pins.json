@@ -2,7 +2,7 @@
   "external": {
     "baseCommit": "96c5c7c6410c703672aeef7499ecc15050611a35",
     "baseTree": "0f47a79a64ef79d2930b7f77ba73af785a571c83",
-    "tree": "0e12321da7d5a110d04918c1d4c640e66d960008",
+    "tree": "af971c835caa20efe9bac4ce44714f8022f1e198",
     "files": {
       ".dockerignore": {
         "mode": "100644",
@@ -186,9 +186,9 @@
       },
       "test/client.test.js": {
         "mode": "100644",
-        "oid": "bf3b088200e882466df0cbc3ce637ccd3f09b1fe",
-        "sha256": "7a173e336c17d8480ebc096110088505a3724d5dfb787d1583c10f62c51b6d4f",
-        "bytes": 17616
+        "oid": "a7aec2033dcc582c22213489607d1f4683c37ff6",
+        "sha256": "bab5d404d34c09eeb866c533e37c3e3fa149856f95ae1e406d23c4b54a3786cc",
+        "bytes": 17827
       },
       "test/config.test.js": {
         "mode": "100644",
@@ -265,9 +265,9 @@
     }
   },
   "harness": {
-    "cases.json": "b3ba3b93aae9afe8c9676cc6f9d6cd125635ed7d8547de8329c6d2a0a4762331",
+    "cases.json": "9fbeb95ffb14a1c7c49db964689a1e770742f7387bc42a5ce4937967198cc035",
     "run-isolated.sh": "b12f167f06bf2995e3428df899679f156944b24575a265e837ee14009e05af2b",
-    "verify-source.py": "b14ee7f62a80d90f06fbadb8a3d2179f699cb151a7bee012e7edf7e384758d54"
+    "verify-source.py": "c9296bd91b37816f550016d98a3e0b55d77c43162acddcc5996065c56a683d2b"
   },
   "workflowSHA256": "1d42a0181c59f47e00638d0df1a206f7ff5294111c2cd30866915e850eb442ba",
   "coreLinkage": {
@@ -295,15 +295,25 @@
     "C20",
     "F2 LOWs"
   ],
-  "status": "PROPOSED_TEST_FIXTURE_SUCCESSOR_UNREVIEWED_UNRUN",
-  "previousAcceptedExportManifestSHA256": "856cfbb21b865a4cc163ca3d664dea6f23524eb9a5f2c03dada099e8cc56281d",
-  "exportManifestSHA256": "effc8b5213f1246d786fe45f38d3d5979ac4e2194e2f5882b1e86c7c76a633bb",
+  "status": "PROPOSED_FINITE_FIXTURE_CLASS_SUCCESSOR_UNREVIEWED_UNRUN",
+  "previousAcceptedExportManifestSHA256": "effc8b5213f1246d786fe45f38d3d5979ac4e2194e2f5882b1e86c7c76a633bb",
+  "exportManifestSHA256": "a523cb159b5cc489b5d3e66ce8dac686d2678a1d0f15849ceca78f81eabc9a71",
   "fixtureSuccessor": {
-    "previousExternalTree": "5f442218aae7a660c6fdb4be60c96ff62dbd4d06",
+    "previousExternalTree": "0e12321da7d5a110d04918c1d4c640e66d960008",
     "changedPath": "test/client.test.js",
-    "nativeRedRun": 39640432855,
-    "nativeRed": "185passed/11cancelled, no deadline; baseline native unrun",
-    "guard": "Per-test referenced2000ms timer, cleared in finally; caller30ms and client1000ms unchanged; no product change",
-    "proof": "Successor UNRUN; no retry/execution lease inferred"
+    "nativeRedRun": 39643262023,
+    "nativeRed": "190passed/6cancelled; no deadline; case14 passes; baseline native unrun",
+    "completeAuditedDeadlineOnlyFakeClass": [
+      14,
+      19
+    ],
+    "alreadyGuardedAndPassedV2": [
+      14
+    ],
+    "onlyNewlyGuarded": [
+      19
+    ],
+    "guard": "Per-test referenced2000ms no-op timer/finallyclear; original50ms requests x2, case14 30ms/1000ms and all oracles unchanged.",
+    "proof": "V3 UNRUN; no retry/execution/publication lease inferred"
   }
 }
