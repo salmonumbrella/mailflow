@@ -115,3 +115,160 @@ describe('background download admission', () => {
     await expect(budget.reserve('a', 'imap.test', { messages: 1, bytes: 0, [field]: value }, 0)).rejects.toThrow();
   });
 });
+
+describe('bounded oversized background admission', () => {
+  const roomy = { ...limits, dailyBytes: 1000 };
+
+  it('admits the combined 16MiB quotation once and charges the complete bound', async () => {
+    const queryFn = vi.fn(store());
+    const budget = createBackgroundBudget({ queryFn });
+    expect((await budget.reserve('a', 'IMAP.test', { messages: 1, bytes: 17319936 }, 0)).allowed).toBe(true);
+    expect(queryFn.mock.calls[0][1]).toEqual(['a', '1970-01-01', 17320960, 1073741824]);
+    expect((await budget.reserve('b', 'imap.test', { messages: 0, bytes: 0 }, 0)).allowed).toBe(false);
+    expect(queryFn).toHaveBeenCalledTimes(1);
+  });
+  it.each([{ messages: 1, bytes: 0 }, { messages: 0, bytes: 1 }])('requires a fresh window after prior %j', async prior => {
+    const budget = createBackgroundBudget({ queryFn: store(), limits: { ...roomy, overhead: 0 } });
+    expect((await budget.reserve('a', 'imap.test', prior, 0)).allowed).toBe(true);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 30 }, 0)).allowed).toBe(false);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 30 }, 60000)).allowed).toBe(true);
+    expect((await budget.reserve('c', 'imap.test', { messages: 0, bytes: 0 }, 60000)).allowed).toBe(false);
+  });
+  it.each([[28, [[1, true], [2, true]]], [68, [[1, false], [2, false], [3, true], [4, true]]]])(
+    'repays oversized bytes=%s over subsequent windows', async (bytes, windows) => {
+      const budget = createBackgroundBudget({ queryFn: store(), limits: roomy });
+      expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes }, 0)).allowed).toBe(true);
+      for (const [minute, allowed] of windows) {
+        expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 8 }, minute * 60000)).allowed).toBe(allowed);
+      }
+    });
+  it('repays skipped windows without erasing the last partial debt', async () => {
+    const budget = createBackgroundBudget({ queryFn: store(), limits: roomy });
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 68 }, 0)).allowed).toBe(true);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 8 }, 180000)).allowed).toBe(true);
+    expect((await budget.reserve('c', 'imap.test', { messages: 0, bytes: 0 }, 180000)).allowed).toBe(false);
+  });
+  it('repays at the refusal-reduced cap without rate recovery', async () => {
+    const budget = createBackgroundBudget({ queryFn: store(), limits: roomy });
+    budget.refuse('imap.test', 0);
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, 1)).allowed).toBe(false);
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, 60000)).allowed).toBe(true);
+    for (const minute of [2, 3, 4]) {
+      expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 8 }, minute * 60000)).allowed).toBe(minute === 4);
+    }
+  });
+  it('retains the first owner when its retry quotation changes', async () => {
+    const budget = createBackgroundBudget({ queryFn: store(), limits: roomy });
+    await budget.reserve('a', 'imap.test', { messages: 1, bytes: 8 }, 0);
+    expect(await budget.reserve('b', 'imap.test', { messages: 0, bytes: 28 }, 0)).toEqual({ allowed: false, deferAt: 60000 });
+    expect((await budget.reserve('c', 'imap.test', { messages: 1, bytes: 0 }, 60000)).allowed).toBe(false);
+    expect((await budget.reserve('c', 'imap.test', { messages: 1, bytes: 38 }, 60000)).allowed).toBe(false);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 30 }, 60000)).allowed).toBe(true);
+  });
+  it.each([120000, 180000])('expires an absent owner without replacement at %s', async later => {
+    const budget = createBackgroundBudget({ queryFn: store(), limits: roomy });
+    await budget.reserve('a', 'imap.test', { messages: 1, bytes: 8 }, 0);
+    await budget.reserve('b', 'imap.test', { messages: 1, bytes: 28 }, 0);
+    expect((await budget.reserve('c', 'imap.test', { messages: 1, bytes: 28 }, 60000)).allowed).toBe(false);
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, later)).allowed).toBe(true);
+    await budget.reserve('c', 'imap.test', { messages: 1, bytes: 28 }, later);
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, later + 120000)).allowed).toBe(false);
+    expect((await budget.reserve('c', 'imap.test', { messages: 1, bytes: 28 }, later + 120000)).allowed).toBe(true);
+  });
+  it('protects the first fresh window after another account debt, serving small leftovers', async () => {
+    const budget = createBackgroundBudget({ queryFn: store(), limits: roomy });
+    await budget.reserve('a', 'imap.test', { messages: 1, bytes: 68 }, 0);
+    expect(await budget.reserve('b', 'imap.test', { messages: 0, bytes: 28 }, 60000)).toEqual({ allowed: false, deferAt: 240000 });
+    expect((await budget.reserve('c', 'imap.test', { messages: 1, bytes: 8 }, 180000)).allowed).toBe(true);
+    expect((await budget.reserve('c', 'imap.test', { messages: 1, bytes: 28 }, 240000)).allowed).toBe(false);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 30 }, 240000)).allowed).toBe(true);
+  });
+  it('retargets future protection when refusal reduces repayment capacity', async () => {
+    const budget = createBackgroundBudget({ queryFn: store(), limits: roomy });
+    await budget.reserve('a', 'imap.test', { messages: 1, bytes: 68 }, 0);
+    await budget.reserve('b', 'imap.test', { messages: 0, bytes: 28 }, 60000);
+    budget.refuse('imap.test', 60001);
+    expect(await budget.reserve('b', 'imap.test', { messages: 1, bytes: 28 }, 120001)).toEqual({ allowed: false, deferAt: 300000 });
+    expect((await budget.reserve('c', 'imap.test', { messages: 1, bytes: 28 }, 300000)).allowed).toBe(false);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 28 }, 300000)).allowed).toBe(true);
+  });
+  it('does not extend an already begun protection window on refusal', async () => {
+    const budget = createBackgroundBudget({ queryFn: store(), limits: roomy });
+    await budget.reserve('a', 'imap.test', { messages: 1, bytes: 8 }, 0);
+    await budget.reserve('b', 'imap.test', { messages: 1, bytes: 28 }, 0);
+    expect((await budget.reserve('c', 'imap.test', { messages: 1, bytes: 0 }, 60000)).allowed).toBe(false);
+    budget.refuse('imap.test', 60001);
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, 120001)).allowed).toBe(true);
+  });
+  it.each(['daily', 'foreground', 'hold'])('does not create priority on pre-debit %s denial', async reason => {
+    let foreground = reason === 'foreground';
+    const queryFn = vi.fn(store());
+    const budget = createBackgroundBudget({ queryFn, limits: { ...roomy, dailyBytes: reason === 'daily' ? 20 : 1000 },
+      foregroundPending: () => foreground });
+    if (reason === 'hold') budget.refuse('imap.test', 0);
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, 0)).allowed).toBe(false);
+    foreground = false;
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 8 }, 60000)).allowed).toBe(true);
+    expect(queryFn.mock.calls.filter(call => call[1][0] === 'a')).toHaveLength(reason === 'daily' ? 1 : 0);
+  });
+  it.each(['foreground', 'refusal'])('retains charged-but-denied oversized spend, debt and priority after %s', async reason => {
+    let release; let foreground = false; let first = true;
+    const durable = store();
+    const queryFn = vi.fn(async (...args) => {
+      if (first) { first = false; await new Promise(resolve => { release = resolve; }); }
+      return durable(...args);
+    });
+    const budget = createBackgroundBudget({ queryFn, limits: roomy, foregroundPending: () => foreground });
+    const pending = budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, 0);
+    await Promise.resolve();
+    expect(release).toBeTypeOf('function');
+    if (reason === 'foreground') foreground = true; else budget.refuse('imap.test', 0);
+    release();
+    expect((await pending).allowed).toBe(false);
+    expect(queryFn.mock.calls[0][1][2]).toBe(30);
+    foreground = false;
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 10 }, 60000)).allowed).toBe(false);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 28 }, 120000)).allowed).toBe(false);
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, 120000)).allowed).toBe(true);
+  });
+  it('preserves daily oversize spend across restart without claiming durable minute debt', async () => {
+    const queryFn = store(); const daily = { ...roomy, dailyBytes: 50 };
+    let budget = createBackgroundBudget({ queryFn, limits: daily });
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, 0)).allowed).toBe(true);
+    budget = createBackgroundBudget({ queryFn, limits: daily });
+    expect(await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, 60000)).toEqual({ allowed: false, deferAt: 86400000 });
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 28 }, 60000)).allowed).toBe(true);
+    expect((await budget.reserve('a', 'imap.test', { messages: 1, bytes: 28 }, 86400000)).allowed).toBe(true);
+  });
+  it('serializes oversized competitors before any second debit', async () => {
+    const queryFn = vi.fn(store()); const budget = createBackgroundBudget({ queryFn, limits: roomy });
+    const results = await Promise.all(['a', 'b', 'c'].map(account => budget.reserve(account, 'imap.test', { messages: 1, bytes: 28 }, 0)));
+    expect(results.filter(result => result.allowed)).toHaveLength(1);
+    expect(queryFn).toHaveBeenCalledTimes(1);
+  });
+  it('clamps a backward day without resetting ordinary usage or debiting the earlier day', async () => {
+    const queryFn = vi.fn(store()); const budget = createBackgroundBudget({ queryFn, limits: roomy });
+    await budget.reserve('a', 'imap.test', { messages: 1, bytes: 8 }, 86460000);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 8 }, 0)).allowed).toBe(true);
+    expect(queryFn.mock.calls.map(call => call[1][1])).toEqual(['1970-01-02', '1970-01-02']);
+    expect((await budget.reserve('c', 'imap.test', { messages: 1, bytes: 0 }, 0)).allowed).toBe(false);
+  });
+  it('does not erase or repay debt on a backward minute', async () => {
+    const budget = createBackgroundBudget({ queryFn: store(), limits: roomy });
+    await budget.reserve('a', 'imap.test', { messages: 1, bytes: 68 }, 86460000);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 8 }, 0)).allowed).toBe(false);
+    expect((await budget.reserve('b', 'imap.test', { messages: 1, bytes: 8 }, 86640000)).allowed).toBe(true);
+    expect((await budget.reserve('c', 'imap.test', { messages: 0, bytes: 0 }, 86640000)).allowed).toBe(false);
+  });
+  it.each([{ messages: 3, bytes: 28 }, { messages: 1, bytes: 28, byteCap: 0 }])('does not bypass the message or zero-byte cap: %j', async request => {
+    const queryFn = vi.fn(store());
+    const budget = createBackgroundBudget({ queryFn, limits: { ...roomy, bytes: request.byteCap ?? 20 } });
+    expect((await budget.reserve('a', 'imap.test', request, 0)).allowed).toBe(false);
+    expect(queryFn).not.toHaveBeenCalled();
+  });
+  it('rejects an unsafe charge sum before durable admission', async () => {
+    const queryFn = vi.fn(store()); const budget = createBackgroundBudget({ queryFn, limits: roomy });
+    await expect(budget.reserve('a', 'imap.test', { messages: 1, bytes: Number.MAX_SAFE_INTEGER }, 0)).rejects.toThrow();
+    expect(queryFn).not.toHaveBeenCalled();
+  });
+});
