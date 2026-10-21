@@ -1,7 +1,7 @@
 {
   "addressIndicator": {
     "masked": "Adresse e-mail masquée",
-    "alias": "Alias e-mail"
+    "alias": "Alias d’adresse e-mail"
   },
   "common": {
     "cancel": "Annuler",
@@ -213,6 +213,7 @@
     }
   },
   "message": {
+    "unreadRequested": "Marquage comme non lu demandé",
     "find": {
       "title": "Rechercher",
       "close": "Fermer la recherche",

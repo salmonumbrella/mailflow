@@ -213,6 +213,7 @@
     }
   },
   "message": {
+    "unreadRequested": "已请求标为未读",
     "find": {
       "title": "搜索",
       "close": "关闭搜索",

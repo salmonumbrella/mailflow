@@ -213,6 +213,7 @@
     }
   },
   "message": {
+    "unreadRequested": "Se solicitó marcar como no leído",
     "find": {
       "title": "Buscar",
       "close": "Cerrar búsqueda",

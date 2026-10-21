@@ -213,6 +213,7 @@
     }
   },
   "message": {
+    "unreadRequested": "Solicitada marcação como não lida",
     "find": {
       "title": "Pesquisar",
       "close": "Fechar pesquisa",

@@ -326,6 +326,7 @@
     "snoozedEmptyDesc": "Odložené zprávy tu čekají, dokud se nevrátí."
   },
   "message": {
+    "unreadRequested": "Vyžádáno označení jako nepřečtené",
     "find": {
       "title": "Hledat",
       "close": "Zavřít hledání",

@@ -213,6 +213,7 @@
     }
   },
   "message": {
+    "unreadRequested": "Zażądano oznaczenia jako nieprzeczytane",
     "find": {
       "title": "Wyszukiwanie",
       "close": "Zamknij wyszukiwanie",

@@ -213,6 +213,7 @@
     }
   },
   "message": {
+    "unreadRequested": "Markierung als ungelesen angefordert",
     "find": {
       "title": "Suchen",
       "close": "Suche schließen",

@@ -213,6 +213,7 @@
     }
   },
   "message": {
+    "unreadRequested": "읽지 않음으로 표시 요청됨",
     "printConversation": "대화 인쇄",
     "preparingPrint": "인쇄 준비 중…",
     "find": {
