@@ -45,7 +45,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
     FROM messages ORDER BY account_id,folder,uid`)).rows;
   const waitForBlock = async (observer, waiter) => {
     const until = Date.now() + 2000;
-    let blockers = [];
+    let blockers;
     do {
       blockers = (await observer.query('SELECT pg_blocking_pids($1) AS pids', [waiter.processID])).rows[0].pids;
       if (blockers.includes(observer.processID)) return;
@@ -270,6 +270,12 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
     const fetch = client.fetch;
     client.fetch = async function* (...args) {
       for await (const raw of fetch.call(this, ...args)) {
+        if (args[1].envelope && raw.uid === 1) {
+          raw.envelope = { ...raw.envelope, messageId: '<encoded-subject@example.test>', subject: '\0',
+            from: [{ name: 'Sender', address: 'sender@example.test' }],
+            to: [{ name: 'Recipient', address: 'owner@example.test' }] };
+          raw.headers = Buffer.from('Subject: =?UTF-8?Q?=00?=\r\n');
+        }
         if (args[1].envelope && raw.uid === 2) raw.envelope = {
           ...raw.envelope, messageId: '<nul\0@example.test>', subject: 'Archive\0 text',
           from: [{ name: 'Syn\0thetic', address: 'sender@example.test' }],
@@ -284,6 +290,9 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('guarded residue admiss
     expect((await db.query('SELECT message_id,subject,from_name,to_addresses FROM messages WHERE uid=2')).rows[0])
       .toMatchObject({ message_id: '<nul@example.test>', subject: 'Archive text', from_name: 'Synthetic',
         to_addresses: [{ name: 'Recipient', email: 'owner@example.test' }] });
+    expect((await db.query('SELECT message_id,subject,from_email,thread_id FROM messages WHERE uid=1')).rows[0])
+      .toEqual({ message_id: '<encoded-subject@example.test>', subject: '', from_email: 'sender@example.test',
+        thread_id: '<encoded-subject@example.test>' });
     expect((await db.query('SELECT scan_cursor FROM archive_coverage WHERE account_id=$1 AND folder=$2', [accountId, folder])).rows[0].scan_cursor).toBe('0');
     expect(await rows()).toHaveLength(3);
   });

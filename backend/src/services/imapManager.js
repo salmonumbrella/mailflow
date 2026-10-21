@@ -1690,12 +1690,15 @@ export async function collectRelocateExemptFolders(account) {
 
 // Shared with archive metadata preparation so malformed headers cannot stall a batch.
 export async function prepareArchiveRecord(account, raw, folder) {
-  const parsed = sanitizeArchiveMetadata(await parseMessage(raw));
+  const parsed = await parseMessage(raw);
   enrichParsedMetadata(parsed, { accountEmail: account.email_address, accountName: account.name,
     senderName: account.sender_name, folderPath: folder, sentFolderPath: account.folder_mappings?.sent });
-  parsed.threadId = await computeThreadId(account.id, parsed.messageId, parsed.inReplyTo, parsed.references, parsed.subject,
-    { fromEmail: parsed.fromEmail, to: parsed.to, cc: parsed.cc, own: account.email_address, isBulk: parsed.isBulk });
-  return parsed;
+  // Enrichment may decode encoded header fallbacks. Sanitize its final output
+  // before threading can bind any of that text to PostgreSQL.
+  const safe = sanitizeArchiveMetadata(parsed);
+  safe.threadId = await computeThreadId(account.id, safe.messageId, safe.inReplyTo, safe.references, safe.subject,
+    { fromEmail: safe.fromEmail, to: safe.to, cc: safe.cc, own: account.email_address, isBulk: safe.isBulk });
+  return safe;
 }
 
 // Parse RFC 5322 References header into an ordered array of angle-bracketed Message-IDs.
