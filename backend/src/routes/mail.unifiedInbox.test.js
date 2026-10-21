@@ -107,14 +107,20 @@ describe('GET /api/mail/unread-counts unified total', () => {
           { id: 'excluded', include_in_unified_inbox: false },
         ],
       })
+      .mockResolvedValueOnce({ rows: [{ revision: '7' }] })
       .mockResolvedValueOnce({
-        rows: [{ category: 'primary', unread_count: 2 }],
+        rows: [{ account_id: 'included', category: 'primary', unread_count: 2, total_count: 2 }],
       });
 
     const response = await fetch(`${base}/api/mail/category-counts`);
 
     expect(response.status).toBe(200);
-    expect(query.mock.calls[1][1]).toEqual([['included']]);
+    expect(query.mock.calls[1][0]).toContain("nextval('folder_status_revision')");
+    expect(query.mock.calls[2][1]).toEqual([['included']]);
+    expect(await response.json()).toMatchObject({
+      counts: { primary: 2 }, totals: { primary: 2 }, countRevision: '7',
+      byAccount: { included: { counts: { primary: 2 }, totals: { primary: 2 } } },
+    });
   });
 
   it('uses only opted-in accounts when expanding a unified thread', async () => {
