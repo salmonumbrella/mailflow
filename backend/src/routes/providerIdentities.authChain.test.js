@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import express from 'express';
 
 const state = vi.hoisted(() => ({ enabled: true, token: null, cookieReads: 0 }));
+vi.mock('../index.js', () => ({ imapManager: {} }));
 vi.mock('../services/db.js', () => ({ withTransaction: vi.fn(), query: vi.fn(async (sql, values) => ({ rows: sql.includes('FROM users') ? [{ id: values[0] }]
   : sql.includes('FROM email_accounts') && values[1] === 'user-1' ? [{ id: values[0], user_id: 'user-1', enabled: true,
     smtp_host: 'smtp.fastmail.com', auth_user: 'owner@synthetic.test', fastmail_api_token: null }] : [] })) }));

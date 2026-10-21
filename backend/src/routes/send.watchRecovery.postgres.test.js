@@ -61,7 +61,7 @@ const WATCH = 'Labels/待機';
 const SOURCE_UID = 2147483659;
 const MID = '<sent-watch@synthetic.test>';
 const SOURCE_PINS = {
-  '../services/imapManager.js': '5c2911aa37bb1d97617276875c5368f5b21b7eeb3429d652c220702335bdf2cc',
+  '../services/imapManager.js': 'c1b5a864f717594f455f1aee5da43c53484b01289aa830ba37fcfc21e5c4eff2',
   '../services/labels.js': '5f18aefb6d0b5ca6a8e7d748c58519de945d675ea4a468a1ae2cc3324595649e',
   '../plugins/gtd/routes.js': 'b67b4aa990d5223343c8f91b9ca67f1d510fd656d1df463ba9734753f0d8f04c',
   '../plugins/gtd/gtdWatchClassification.js': '1f1d869f7167d71892a0b694145a3e7812fb66507493da99fd915f205b8a9675',
@@ -381,7 +381,10 @@ describe.skipIf(!process.env.MAILFLOW_SENT_WATCH_DATABASE_URL)('Fastmail Watch C
       return runHook(name, context);
     });
     const app = express(); app.use(express.json()); app.use('/api/gtd', gtdRoutes);
-    app.use((error, _req, res, _next) => res.status(500).json({ error: error.message }));
+    app.use((error, _req, res, next) => {
+      if (res.headersSent) return next(error);
+      return res.status(500).json({ error: error.message });
+    });
     await new Promise(resolve => { server = app.listen(0, '127.0.0.1', resolve); });
     base = `http://127.0.0.1:${server.address().port}`;
   });

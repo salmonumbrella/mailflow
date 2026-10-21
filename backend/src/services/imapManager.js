@@ -7607,7 +7607,12 @@ export class ImapManager {
       try {
         const messageId = value => {
           if (typeof value !== 'string') return null;
-          const match = value.trim().match(/^(?:<([^<>\s\x00-\x1f\x7f]+)>|([^<>\s\x00-\x1f\x7f]+))$/);
+          const trimmed = value.trim();
+          for (let index = 0; index < trimmed.length; index++) {
+            const code = trimmed.charCodeAt(index);
+            if (code <= 0x1f || code === 0x7f) return null;
+          }
+          const match = trimmed.match(/^(?:<([^<>\s]+)>|([^<>\s]+))$/);
           const bare = match?.[1] || match?.[2];
           return bare && /^[^@]+@[^@]+$/.test(bare) ? bare : null;
         };

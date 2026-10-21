@@ -43,7 +43,7 @@ function database() {
       const msg = messages.find(m => m.id === params[0]);
       return { rows: msg && params[1] === USER ? [msg] : [] };
     }
-    if (sql.includes('AND thread_id = $2 AND message_id IS NOT NULL')) {
+    if (sql.includes('WHERE m.account_id = $1 AND m.thread_id = $2 AND m.message_id IS NOT NULL')) {
       return { rows: messages.filter(m => m.account_id === params[0] && m.thread_id === params[1] && m.message_id) };
     }
     if (sql.startsWith('SELECT sm.message_id_header FROM snoozed_messages sm')) return { rows: [] };

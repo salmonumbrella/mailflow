@@ -20,6 +20,7 @@ describe('the API token allowlist matcher', () => {
     expect(API_TOKEN_ROUTES.map(r => `${r.method} ${r.path} ${r.scope}${r.guard ? ` ${r.guard}` : ''}`).sort()).toEqual([
       'GET /api/accounts read',
       'GET /api/accounts/:uuid/folders read',
+      'GET /api/accounts/:uuid/sender-identities identity:read',
       'GET /api/api-tokens/self null',
       'GET /api/health null',
       'GET /api/mail/category-counts read',
@@ -34,6 +35,7 @@ describe('the API token allowlist matcher', () => {
       'GET /api/version null',
       'PATCH /api/mail/messages/:uuid/category organize',
       'PATCH /api/mail/messages/:uuid/snooze organize',
+      'POST /api/accounts/:uuid/masked-emails identity:write',
       'POST /api/mail/draft draft draft',
       'POST /api/mail/messages/:uuid/snooze organize snooze',
       'POST /api/mail/messages/:uuid/unsnooze organize',
