@@ -2979,7 +2979,7 @@ function MailboxList() {
               </svg>
             ) : label}
           </h2>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 6 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', gap: 4, minWidth: 0, flexShrink: 1, marginLeft: 6 }}>
             {!searchQuery && (
               <span title={isSnoozedView && isUnified ? 'Snoozed messages in every account' : filteredCount ? 'Cached results matching this filter' : !headerCountKnown ? 'Mailbox count not yet available' : headerCountStale ? 'Last observed mailbox count; awaiting server refresh' : 'Messages reported by the mail server'} style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
                 {/* The Snoozed view across accounts (#269) counts what the list returned: every account's Snoozed folder. */}
@@ -3099,9 +3099,12 @@ function MailboxList() {
                   style={{
                     background: unreadOnly ? 'var(--accent-dim)' : 'none',
                     border: `1px solid ${unreadOnly ? 'var(--accent)' : 'var(--border)'}`,
-                    borderRadius: 6, padding: '4px 8px',
+                    borderRadius: 6, padding: '0 6px',
                     color: unreadOnly ? 'var(--accent)' : 'var(--text-tertiary)',
                     cursor: 'pointer', fontSize: 11, fontWeight: 500,
+                    boxSizing: 'border-box', minHeight: 24, minWidth: 24, maxWidth: '100%',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    lineHeight: '14px', overflowWrap: 'anywhere', flexShrink: 0,
                   }}
                 >
                   {t('messageList.unread')}
@@ -3150,7 +3153,7 @@ function MailboxList() {
 
         {/* Narrow layouts: filter + page size + layout picker on their own row */}
         {isNarrow && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, marginBottom: 6 }}>
             {sortable && <ListSortMenu accountId={selectedAccountId} folder={selectedFolder} />}
             <button
               onClick={() => setUnreadOnly(!unreadOnly)}
@@ -3158,9 +3161,12 @@ function MailboxList() {
               style={{
                 background: unreadOnly ? 'var(--accent-dim)' : 'none',
                 border: `1px solid ${unreadOnly ? 'var(--accent)' : 'var(--border)'}`,
-                borderRadius: 6, padding: '4px 8px',
+                borderRadius: 6, padding: '0 6px',
                 color: unreadOnly ? 'var(--accent)' : 'var(--text-tertiary)',
                 cursor: 'pointer', fontSize: 11, fontWeight: 500,
+                boxSizing: 'border-box', minHeight: 24, minWidth: 24, maxWidth: '100%',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                lineHeight: '14px', overflowWrap: 'anywhere', flexShrink: 0,
               }}
             >
               {t('messageList.unread')}
