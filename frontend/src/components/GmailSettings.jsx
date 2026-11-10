@@ -5,6 +5,7 @@ import { api } from '../utils/api.js';
 import { moveHiddenPaths } from '../utils/sidebar.js';
 import { ACTION_DEFS, getEffectiveShortcuts } from '../utils/defaultShortcuts.js';
 import SignatureEditor from './SignatureEditor.jsx';
+import GmailLabelManager from './GmailLabelManager.jsx';
 import './GmailSettings.css';
 
 const TABS = [
@@ -49,8 +50,9 @@ export default function GmailSettings({ onClose }) {
   const [accountId, setAccountId] = useState(state.selectedAccountId || state.accounts[0]?.id || '');
   const [signatureRevision, setSignatureRevision] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [labelLocked, setLabelLocked] = useState(false);
   const busyRef = useRef(false);
-  busyRef.current = busy;
+  busyRef.current = busy || labelLocked;
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [rules, setRules] = useState(null);
@@ -73,6 +75,8 @@ export default function GmailSettings({ onClose }) {
     panel.current?.querySelector('button')?.focus();
     const onKey = event => {
       if (event.key === 'Escape') {
+        const labelEditor = panel.current?.querySelector('.mf-native-labels [data-label-editor]');
+        if (labelEditor && labelEditor.closest('.mf-native-labels')?.contains(event.target)) return;
         event.preventDefault(); event.stopPropagation();
         if (!busyRef.current) closeRef.current();
       }
@@ -144,6 +148,7 @@ export default function GmailSettings({ onClose }) {
     setTab(next); setError(''); setNotice(''); setFolderForm(null); setRuleForm(null); setDeleteRule(null); setDeleteFolder(null);
   }
   function tabKeys(event) {
+    if (labelLocked) return;
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const enabled = ['general', 'labels', 'filters'];
@@ -162,7 +167,7 @@ export default function GmailSettings({ onClose }) {
   }
   async function saveFolder(event) {
     event.preventDefault();
-    if (!folderForm.name.trim()) { setError('Enter a label name.'); return; }
+    if (!folderForm.name.trim()) { setError(t('gmail.nativeLabels.folderNameRequired', 'Enter a folder name.')); return; }
     await run(async () => {
       let renamed;
       if (folderForm.path) renamed = await api.renameFolder(accountId, folderForm.path, folderForm.name.trim());
@@ -183,12 +188,12 @@ export default function GmailSettings({ onClose }) {
           try { await api.savePreferences({ hiddenFolders: next }); }
           catch (err) {
             current.setFolders(accountId, await api.getFolders(accountId));
-            throw new Error(`Label renamed, but sidebar visibility could not be saved: ${err.message}`, { cause: err });
+            throw new Error(t('gmail.nativeLabels.folderRenamedError', 'Folder renamed, but sidebar visibility could not be saved: {{error}}', { error: err.message }), { cause: err });
           }
         }
       }
       useStore.getState().setFolders(accountId, await api.getFolders(accountId));
-      setNotice('Label saved on your mail server.');
+      setNotice(t('gmail.nativeLabels.folderSaved', 'Folder saved on your mail server.'));
     });
   }
   function openRule(rule) {
@@ -250,9 +255,9 @@ export default function GmailSettings({ onClose }) {
 
   return <div className="mf-gmail-settings-backdrop">
     <section ref={panel} role="dialog" aria-modal="true" aria-labelledby="mf-gmail-settings-title" tabIndex={-1} className="mf-gmail-settings">
-      <header className="mf-gmail-settings-header"><h1 id="mf-gmail-settings-title">{t("gmail.settings.settings", "Settings")}</h1><button type="button" onClick={onClose} disabled={busy} aria-label={t("gmail.settings.close_settings", "Close settings")}>×</button></header>
+      <header className="mf-gmail-settings-header"><h1 id="mf-gmail-settings-title">{t("gmail.settings.settings", "Settings")}</h1><button type="button" onClick={onClose} disabled={busy || labelLocked} aria-label={t("gmail.settings.close_settings", "Close settings")}>×</button></header>
       <div role="tablist" aria-label={t("gmail.settings.settings", "Settings")} className="mf-gmail-settings-tabs" onKeyDown={tabKeys}>
-        {TABS.map(([id, name]) => <button type="button" key={name} role="tab" id={id ? `mf-settings-tab-${id}` : undefined} aria-controls={id ? 'mf-settings-panel' : undefined} aria-selected={id === tab} tabIndex={id === tab ? 0 : -1} disabled={!id || busy} title={!id ? 'Not available in this settings view. Use MailFlow settings for account and appearance options.' : undefined} onClick={() => changeTab(id)}>{name}</button>)}
+        {TABS.map(([id, name]) => <button type="button" key={name} role="tab" id={id ? `mf-settings-tab-${id}` : undefined} aria-controls={id ? 'mf-settings-panel' : undefined} aria-selected={id === tab} tabIndex={id === tab ? 0 : -1} disabled={!id || busy || labelLocked} title={!id ? 'Not available in this settings view. Use MailFlow settings for account and appearance options.' : undefined} onClick={() => changeTab(id)}>{name}</button>)}
       </div>
       <div className="mf-gmail-settings-messages" aria-live="polite">
         {error && <div role="alert">{error}{loadState === 'error' && <button type="button" onClick={() => setReload(r => r + 1)}>{t("gmail.settings.retry", "Retry")}</button>}<button type="button" aria-label={t("gmail.settings.dismiss_error", "Dismiss error")} onClick={() => setError('')}>×</button></div>}
@@ -288,11 +293,14 @@ export default function GmailSettings({ onClose }) {
             <Row title={t("gmail.settings.vacation_responder", "Vacation responder")}><p>{t("gmail.settings.automatic_vacation_replies_are_not_supported_by_mailflow_configure", "Automatic vacation replies are not supported by MailFlow. Configure them with your email provider; no automatic replies will be sent from this view.")}</p><button type="button" disabled>{t("gmail.settings.vacation_responder_on", "Vacation responder on")}</button></Row>
           </>}
           {tab === 'labels' && <div className="mf-gmail-settings-labels">
-            <p>{t("gmail.settings.labels_here_are_real_imap_folders_changes_apply_to", "Labels here are real IMAP folders. Changes apply to the selected mail account immediately.")}</p>
-            <label>{t("gmail.settings.account", "Account")} <select aria-label={t("gmail.settings.label_account", "Label account")} value={accountId} onChange={e => { setAccountId(e.target.value); setFolderForm(null); setDeleteFolder(null); }}>{state.accounts.map(a => <option key={a.id} value={a.id}>{a.name || a.email_address}</option>)}</select></label>
+
+            <label>{t("gmail.settings.account", "Account")} <select aria-label={t("gmail.settings.label_account", "Label account")} disabled={labelLocked} value={accountId} onChange={e => { setAccountId(e.target.value); setFolderForm(null); setDeleteFolder(null); }}>{state.accounts.map(a => <option key={a.id} value={a.id}>{a.name || a.email_address}</option>)}</select></label>
+            {account && <GmailLabelManager key={accountId} accountId={accountId} onLockChange={setLabelLocked} />}
+            <h2>{t('gmail.nativeLabels.foldersTitle', 'IMAP folders')}</h2>
+            <p>{t('gmail.nativeLabels.foldersScope', 'These are folders on your mail server, not MailFlow labels. Folder changes apply immediately and deleting a folder can permanently delete its messages.')}</p>
             {!account && <p>{t("gmail.settings.connect_an_account_to_manage_labels", "Connect an account to manage labels.")}</p>}
-            {loadState === 'loading' && <p role="status">{t("gmail.settings.loading_labels", "Loading labels…")}</p>}
-            <div className="mf-gmail-settings-table-wrap"><table><thead><tr><th>{t("gmail.settings.labels", "Labels")}</th><th>{t("gmail.settings.show_in_label_list", "Show in label list")}</th><th>{t("gmail.settings.show_in_imap", "Show in IMAP")}</th><th>{t("gmail.settings.actions", "Actions")}</th></tr></thead><tbody>
+            {loadState === 'loading' && <p role="status">{t("gmail.nativeLabels.loadingFolders", "Loading IMAP folders…")}</p>}
+            <div className="mf-gmail-settings-table-wrap"><table><thead><tr><th>{t("gmail.nativeLabels.folderColumn", "Folders")}</th><th>{t("gmail.settings.show_in_label_list", "Show in label list")}</th><th>{t("gmail.settings.show_in_imap", "Show in IMAP")}</th><th>{t("gmail.settings.actions", "Actions")}</th></tr></thead><tbody>
               {folders.map(folder => {
                 const hidden = (state.hiddenFolders[accountId] || []).includes(folder.path);
                 const system = folder.path.toUpperCase() === 'INBOX' || !!folder.special_use || Object.values(account?.folder_mappings || {}).includes(folder.path);
@@ -301,8 +309,8 @@ export default function GmailSettings({ onClose }) {
             </tbody></table></div>
             {account && loadState === 'ready' && !folders.length && <p>{t("gmail.settings.no_folders_found", "No folders found.")}</p>}
             <p>{t("gmail.settings.imap_visibility_and_categorymessagelist_visibility_cannot_be_changed_independently", "IMAP visibility and category/message-list visibility cannot be changed independently here. Hiding a folder only changes MailFlow’s sidebar.")}</p>
-            <button type="button" disabled={!account} onClick={() => { setFolderForm({ name: '', parentPath: '' }); setDeleteFolder(null); }}>{t("gmail.settings.create_new_label", "Create new label")}</button>
-            {folderForm && <form onSubmit={saveFolder} className="mf-gmail-settings-editor"><h2>{folderForm.path ? 'Edit label' : 'New label'}</h2><label>{t("gmail.settings.label_name", "Label name")}<input required maxLength={200} value={folderForm.name} onChange={e => setFolderForm(f => ({ ...f, name: e.target.value }))} /></label>{!folderForm.path && <label>{t("gmail.settings.nest_label_under", "Nest label under")}<select value={folderForm.parentPath} onChange={e => setFolderForm(f => ({ ...f, parentPath: e.target.value }))}><option value="">{t("gmail.settings.none", "None")}</option>{folders.map(f => <option key={f.path} value={f.path}>{f.path}</option>)}</select></label>}<div><button type="submit">{t("gmail.settings.save_label", "Save label")}</button><button type="button" onClick={() => setFolderForm(null)}>{t("gmail.settings.cancel", "Cancel")}</button></div></form>}
+            <button type="button" disabled={!account} onClick={() => { setFolderForm({ name: '', parentPath: '' }); setDeleteFolder(null); }}>{t("gmail.nativeLabels.createFolder", "Create IMAP folder")}</button>
+            {folderForm && <form onSubmit={saveFolder} className="mf-gmail-settings-editor"><h2>{folderForm.path ? t('gmail.nativeLabels.editFolder', 'Edit IMAP folder') : t('gmail.nativeLabels.newFolder', 'New IMAP folder')}</h2><label>{t("gmail.nativeLabels.folderName", "Folder name")}<input required maxLength={200} value={folderForm.name} onChange={e => setFolderForm(f => ({ ...f, name: e.target.value }))} /></label>{!folderForm.path && <label>{t("gmail.nativeLabels.nestFolder", "Nest folder under")}<select value={folderForm.parentPath} onChange={e => setFolderForm(f => ({ ...f, parentPath: e.target.value }))}><option value="">{t("gmail.settings.none", "None")}</option>{folders.map(f => <option key={f.path} value={f.path}>{f.path}</option>)}</select></label>}<div><button type="submit">{t("gmail.nativeLabels.saveFolder", "Save folder")}</button><button type="button" onClick={() => setFolderForm(null)}>{t("gmail.settings.cancel", "Cancel")}</button></div></form>}
             {deleteFolder && <div className="mf-gmail-settings-editor" role="alert"><h2>{t("gmail.settings.remove", "Remove")} {deleteFolder}?</h2><p>{t("gmail.settings.this_deletes_the_folder_on_your_mail_server_and", "This deletes the folder on your mail server and may permanently delete the messages it contains. This is not just hiding a Gmail label.")}</p><button type="button" onClick={() => run(async () => {
               await api.deleteFolder(accountId, deleteFolder);
               const current = useStore.getState();
@@ -345,7 +353,7 @@ export default function GmailSettings({ onClose }) {
           </div>}
         </fieldset>
       </div>
-      <footer className="mf-gmail-settings-footer">{dirty && <span>{t("gmail.settings.unsaved_general_settings", "Unsaved general settings")}</span>}{tab === 'general' && <button type="button" disabled={!dirty || busy} onClick={saveGeneral}>{busy ? 'Saving…' : 'Save Changes'}</button>}<button type="button" disabled={busy} onClick={onClose}>{dirty ? 'Cancel' : 'Back to mail'}</button></footer>
+      <footer className="mf-gmail-settings-footer">{dirty && <span>{t("gmail.settings.unsaved_general_settings", "Unsaved general settings")}</span>}{tab === 'general' && <button type="button" disabled={!dirty || busy} onClick={saveGeneral}>{busy ? 'Saving…' : 'Save Changes'}</button>}<button type="button" disabled={busy || labelLocked} onClick={onClose}>{dirty ? 'Cancel' : 'Back to mail'}</button></footer>
     </section>
   </div>;
 }

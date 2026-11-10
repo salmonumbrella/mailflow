@@ -1684,7 +1684,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid
+      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid, rfc822_size_bytes
     )
     SELECT
       account_id, $4, $5, message_id, subject,
@@ -1695,7 +1695,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid
+      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid, rfc822_size_bytes
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
     ON CONFLICT (account_id, uid, folder) DO NOTHING
@@ -5054,6 +5054,7 @@ export class ImapManager {
 
         let newMessages = [];
         let insertedCount = 0;
+        let unknownSizes = 0;
         let broadcastedNewMessages = false;
 
         // Inbox-ingest facts core hands to plugins after this batch (via the `inboxIngest` hook):
@@ -5078,6 +5079,7 @@ export class ImapManager {
         const processMsg = async (msg) => {
           try {
             const parsed = await parseMessage(msg);
+            if (parsed.rfc822SizeBytes === null) unknownSizes++;
             enrichParsedMetadata(parsed, {
               accountEmail: account.email_address,
               accountName: account.name,
@@ -5126,10 +5128,11 @@ export class ImapManager {
                 thread_references, thread_id, is_bulk, category,
                 list_unsubscribe, list_unsubscribe_post, delivery_addresses,
                 sender_name, sender_email,
-                forwarded_from_name, forwarded_from_email, forwarded_via, provider_msgid
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
+                forwarded_from_name, forwarded_from_email, forwarded_via, provider_msgid, rfc822_size_bytes
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
               ON CONFLICT (account_id, uid, folder) DO UPDATE
-              SET provider_msgid = COALESCE(EXCLUDED.provider_msgid, messages.provider_msgid),
+              SET rfc822_size_bytes = COALESCE(EXCLUDED.rfc822_size_bytes, messages.rfc822_size_bytes),
+                  provider_msgid = COALESCE(EXCLUDED.provider_msgid, messages.provider_msgid),
                   subject = CASE
                     WHEN EXCLUDED.subject IS NOT NULL
                          AND EXCLUDED.subject != ''
@@ -5208,6 +5211,7 @@ export class ImapManager {
               sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
               sanitizeStr(parsed.forwardedFromName), sanitizeStr(parsed.forwardedFromEmail), sanitizeStr(parsed.forwardedVia),
               providerProfile(account).labelStore ? parsed.providerMsgid || null : null,
+              parsed.rfc822SizeBytes ?? null,
             ]);
             // A message a move dropped the row of, filed again here: it gets back what MailFlow
             // knew about it and is not new mail, as a move with a known uid is not
@@ -5587,6 +5591,7 @@ export class ImapManager {
         // worked out from synced rows (routes/draft.js), so say when a Drafts folder gained rows.
         if (insertedCount > 0 && folder !== 'INBOX') await noteDraftsChanged(this, account, folder);
         await stampLastSync(account.id);
+        if (unknownSizes) console.warn(`RFC822.SIZE unavailable for ${unknownSizes} fetched messages in ${logAccount(account)}/${folder}; size coverage remains partial`);
         return { insertedCount, broadcastedNewMessages };
       } finally {
         lock.release();
@@ -5784,6 +5789,7 @@ export class ImapManager {
       // refreshed once at completion when the account is gtd_enabled — the tick's fingerprint
       // can't see rows backfill already wrote (before==after). See emitSectionsChanged.
       let backfilledRows = 0;
+      let unknownSizes = 0;
 
       while (i < missingUids.length) {
         // Stop immediately if the account was deleted or disabled while backfilling
@@ -5834,6 +5840,7 @@ export class ImapManager {
               receivedUids.add(Number(msg.uid));
               try {
                 const parsed = await parseMessage(msg);
+                if (parsed.rfc822SizeBytes === null) unknownSizes++;
                 enrichParsedMetadata(parsed, {
                   accountEmail: account.email_address,
                   accountName: account.name,
@@ -5881,10 +5888,11 @@ export class ImapManager {
                     thread_references, thread_id, is_bulk, category,
                     list_unsubscribe, list_unsubscribe_post, delivery_addresses,
                     sender_name, sender_email,
-                    forwarded_from_name, forwarded_from_email, forwarded_via, provider_msgid
-                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
+                    forwarded_from_name, forwarded_from_email, forwarded_via, provider_msgid, rfc822_size_bytes
+                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
                   ON CONFLICT (account_id, uid, folder) DO UPDATE
-                  SET provider_msgid = COALESCE(EXCLUDED.provider_msgid, messages.provider_msgid),
+                  SET rfc822_size_bytes = COALESCE(EXCLUDED.rfc822_size_bytes, messages.rfc822_size_bytes),
+                      provider_msgid = COALESCE(EXCLUDED.provider_msgid, messages.provider_msgid),
                       subject = CASE
                         WHEN EXCLUDED.subject IS NOT NULL
                              AND EXCLUDED.subject != ''
@@ -5961,6 +5969,7 @@ export class ImapManager {
                   sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
                   sanitizeStr(parsed.forwardedFromName), sanitizeStr(parsed.forwardedFromEmail), sanitizeStr(parsed.forwardedVia),
                   providerProfile(account).labelStore ? parsed.providerMsgid || null : null,
+                  parsed.rfc822SizeBytes ?? null,
                 ]);
                 backfilledRows++;
                 // v0.2 antispam: classify genuinely-new rows — the same hook the
@@ -6069,6 +6078,7 @@ export class ImapManager {
         }
       }
 
+      if (unknownSizes) console.warn(`RFC822.SIZE unavailable for ${unknownSizes} fetched messages in ${logAccount(account)}/${folder}; size coverage remains partial`);
       console.log(`Backfill complete for ${logAccount(account)}/${folder}`);
       // Backfill inserts rows directly without going through adjustFolderCounts,
       // so folder counters would stay at 0 without this reconciliation step.
@@ -6538,6 +6548,9 @@ export class ImapManager {
         in_reply_to, thread_references, provider_msgid
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,true,false,$14,'[]',$12,$13::jsonb,$15,$16,$17)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
+        -- APPEND does not carry a verified UIDVALIDITY here. Even equal Message-IDs
+        -- cannot prove this cached measurement belongs to the newly appended UID.
+        rfc822_size_bytes = NULL,
         provider_msgid = COALESCE(EXCLUDED.provider_msgid, messages.provider_msgid),
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
@@ -6619,6 +6632,9 @@ export class ImapManager {
         flags, body_html, body_text, thread_id, bcc_addresses, thread_references, provider_msgid
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,$19,$13::jsonb,$14,$15,$16,$17::jsonb,$18,$20)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
+        -- APPEND does not carry a verified UIDVALIDITY here. Even equal Message-IDs
+        -- cannot prove this cached measurement belongs to the newly appended UID.
+        rfc822_size_bytes = NULL,
         provider_msgid = COALESCE(EXCLUDED.provider_msgid, messages.provider_msgid),
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
@@ -6714,7 +6730,7 @@ export class ImapManager {
       try {
         for (let i = 0; i < uids.length; i += 50) {
           for await (const msg of client.fetch(uids.slice(i, i + 50).join(','), {
-            uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, headers: true,
+            uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, headers: true, size: true,
           }, { uid: true })) {
             if (!uids.includes(Number(msg.uid))) continue;
             const row = await this._ingestDraftUidWithClient(account, folder, msg.uid, client, msg);
@@ -6734,7 +6750,7 @@ export class ImapManager {
       const lock = await client.getMailboxLock(folder);
       try {
         for await (const item of client.fetch(String(uid), {
-          uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, headers: true,
+          uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, headers: true, size: true,
         }, { uid: true })) if (Number(item.uid) === Number(uid)) msg = item;
       } finally {
         lock.release();
@@ -6761,10 +6777,13 @@ export class ImapManager {
     const { rows } = await query(`
       INSERT INTO messages (account_id, uid, folder, message_id, subject, from_name, from_email,
         to_addresses, cc_addresses, bcc_addresses, in_reply_to, thread_references, thread_id,
-        date, flags, has_attachments, attachments, is_read, provider_msgid)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,true,$20)
+        date, flags, has_attachments, attachments, is_read, provider_msgid, rfc822_size_bytes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,true,$20,$21)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
         provider_msgid = EXCLUDED.provider_msgid,
+        rfc822_size_bytes = CASE WHEN ${sameIdentity}
+          THEN COALESCE(EXCLUDED.rfc822_size_bytes, messages.rfc822_size_bytes)
+          ELSE EXCLUDED.rfc822_size_bytes END,
         message_id = EXCLUDED.message_id, subject = EXCLUDED.subject,
         from_name = EXCLUDED.from_name, from_email = EXCLUDED.from_email,
         to_addresses = EXCLUDED.to_addresses, cc_addresses = EXCLUDED.cc_addresses,
@@ -6784,7 +6803,8 @@ export class ImapManager {
       JSON.stringify(parsed.cc || []), JSON.stringify(bcc), parsed.inReplyTo || null,
       parsed.references || null, threadId || null, safeDate(parsed.date),
       JSON.stringify(parsed.flags || []), parsed.hasAttachments, JSON.stringify(structure.attachments),
-      uidValidity, validIdentity, providerProfile(account).labelStore ? parsed.providerMsgid || null : null]);
+      uidValidity, validIdentity, providerProfile(account).labelStore ? parsed.providerMsgid || null : null,
+      parsed.rfc822SizeBytes ?? null]);
     if (!rows.length) throw new Error('Draft ingestion did not persist a row');
     return { id: rows[0].id, account_id: account.id, uid, folder, message_id: parsed.messageId,
       subject: parsed.subject || '', from_email: parsed.fromEmail, from_name: parsed.fromName,

@@ -1,0 +1,16 @@
+.mf-native-labels { border-bottom: 1px solid var(--border, #dadce0); padding-block: 12px 24px; margin-bottom: 24px; }
+.mf-native-labels p { max-width: 80ch; line-height: 1.5; }
+.mf-native-labels-toolbar, .mf-native-labels-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-block: 12px; }
+.mf-native-labels-tree { list-style: none; padding: 0; }
+.mf-native-labels-tree > li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; padding: 12px; padding-inline-start: calc(12px + min(var(--label-depth), 6) * 16px); border-bottom: 1px solid var(--border, #dadce0); }
+.mf-native-labels-definition { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.mf-native-labels-chip { border-radius: 4px; padding: 3px 8px; background: var(--bg-tertiary, #e8eaed); color: var(--text-primary, #202124); overflow-wrap: anywhere; }
+.mf-native-labels-editor, .mf-native-labels-recovery { border: 1px solid var(--border, #dadce0); border-radius: 8px; padding: 16px; margin-top: 16px; }
+.mf-native-labels-editor fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.mf-native-labels-editor label { display: flex; flex-direction: column; gap: 5px; margin-block: 12px; }
+.mf-native-labels-editor input:not([type=checkbox]):not([type=color]), .mf-native-labels-editor select { width: 100%; max-width: 420px; box-sizing: border-box; }
+.mf-native-labels-editor .mf-native-labels-checkbox { flex-direction: row; align-items: center; }
+.mf-native-labels-editor input[type=color] { width: 64px; height: 36px; padding: 2px; }
+.mf-native-labels button:focus-visible, .mf-native-labels input:focus-visible, .mf-native-labels select:focus-visible { outline: 2px solid var(--accent, #1a73e8); outline-offset: 3px; }
+@media (max-width: 480px) { .mf-native-labels-tree > li { padding-inline-start: calc(4px + min(var(--label-depth), 4) * 8px); } }
+@media (forced-colors: active) { .mf-native-labels-chip { border: 1px solid CanvasText; } }

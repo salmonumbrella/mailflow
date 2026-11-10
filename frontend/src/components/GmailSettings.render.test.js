@@ -66,6 +66,7 @@ beforeEach(() => {
   useStore.setState({ user: { id: 'user-one', username: 'Tester' }, accounts: [account], accountsReady: true, selectedAccountId: account.id, selectedFolder: 'INBOX', folders: { [account.id]: folderList }, hiddenFolders: {}, shortcuts: {}, showMessagePreviews: true, replyDefault: 'reply', pageSize: 50, theme: 'nord', font: 'system', layout: 'gmail' });
   api.savePreferences = async data => { calls.push(['preferences', data]); return {}; };
   api.updateAccount = async (id, data) => { calls.push(['signature', id, data]); return { ...account, ...data }; };
+  api.getNativeLabels = async () => ({ labels: [], treeRevision: '0', assignmentSupported: false, coverage: 'not_indexed' });
   api.getFolders = async id => { calls.push(['getFolders', id]); return folderList; };
   api.createFolder = async (id, name, parent) => { calls.push(['createFolder', id, name, parent]); folderList = [...folderList, { path: parent ? `${parent}/${name}` : name, name }]; return {}; };
   api.renameFolder = async (id, path, name) => { calls.push(['renameFolder', id, path, name]); folderList = folderList.map(f => f.path === path ? { ...f, path: name, name } : f); return { newPath: name }; };
@@ -161,7 +162,7 @@ test('label visibility updates real preference only after success; create, renam
   assert.match(host.textContent, /2 messages/);
   await click(host.querySelector('[aria-label="Hide Projects"]'));
   assert.deepEqual(useStore.getState().hiddenFolders, { [account.id]: ['Projects'] });
-  await click(button('Create new label'));
+  await click(button('Create IMAP folder'));
   await change(host.querySelector('form input'), 'Invoices');
   await submit(host.querySelector('form'));
   assert.ok(calls.some(c => c[0] === 'createFolder' && c[1] === account.id && c[2] === 'Invoices'));
@@ -250,7 +251,7 @@ test('failed visibility write leaves the real sidebar preference unchanged', asy
 
 test('a successful create followed by refresh failure cannot resubmit the same folder', async () => {
   await mount(); await click(button('Labels'));
-  await click(button('Create new label'));
+  await click(button('Create IMAP folder'));
   await change(host.querySelector('form input'), 'Invoices');
   api.getFolders = async () => { throw new Error('Refresh failed'); };
   await submit(host.querySelector('form'));
@@ -283,7 +284,7 @@ test('acknowledged rename retains correct nested local identity even when visibi
   await submit(host.querySelector('form'));
   assert.deepEqual(useStore.getState().hiddenFolders[account.id], ['Jobs/Client']);
   assert.equal(useStore.getState().selectedFolder, 'Jobs/Client');
-  assert.match(host.querySelector('[role=alert]').textContent, /Label renamed, but sidebar visibility could not be saved/);
+  assert.match(host.querySelector('[role=alert]').textContent, /Folder renamed, but sidebar visibility could not be saved/);
 });
 
 async function prepareRule() {
@@ -372,4 +373,28 @@ test('HTTP 408 create timeout is reconciled rather than permitting an immediate 
   assert.equal(button('Create a new filter').disabled, true);
   await submit(form);
   assert.equal(calls.filter(c => c[0] === 'createRule').length, 1);
+});
+
+test('native label editing Escape cancels its editor without closing settings or mutating folders', async () => {
+  await mount(); await click(button('Labels')); await click(button('Create MailFlow label'));
+  const input = host.querySelector('.mf-native-labels input');
+  assert.equal(document.activeElement, input); await change(input, 'Draft label'); await key(input, 'Escape');
+  assert.equal(host.querySelector('.mf-native-labels form'), null); assert.equal(closed, 0);
+  assert.ok(document.activeElement === button('Create MailFlow label'));
+  assert.equal(calls.some(call => ['createFolder', 'deleteFolder', 'renameFolder'].includes(call[0])), false);
+});
+
+test('uncertain native label mutation locks account, tabs and settings close until exact retry resolves', async () => {
+  window.sessionStorage.clear();
+  api.createNativeLabel = async data => { calls.push(['createNativeLabel', structuredClone(data)]); throw new TypeError('Network lost'); };
+  await mount(); await click(button('Labels')); await click(button('Create MailFlow label'));
+  await change(host.querySelector('.mf-native-labels input'), 'Pending'); await submit(host.querySelector('.mf-native-labels form'));
+  assert.equal(host.querySelector('[aria-label="Label account"]').disabled, true);
+  assert.equal(button('General').disabled, true); assert.equal(button('Back to mail').disabled, true);
+  assert.equal(host.querySelector('[aria-label="Close settings"]').disabled, true);
+  await key(host.querySelector('[aria-label="Close settings"]'), 'Escape'); assert.equal(closed, 0);
+  api.createNativeLabel = async data => { calls.push(['createNativeLabel', structuredClone(data)]); return {}; };
+  await click(button('Retry pending label request'));
+  const mutations = calls.filter(call => call[0] === 'createNativeLabel'); assert.deepEqual(mutations[0][1], mutations[1][1]);
+  assert.equal(button('Back to mail').disabled, false); assert.equal(host.querySelector('[aria-label="Label account"]').disabled, false);
 });

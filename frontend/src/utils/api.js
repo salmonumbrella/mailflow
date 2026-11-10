@@ -375,6 +375,13 @@ export const api = {
   // { wait: true } answers with how the attempt went: { connection, code, error }.
   reconnectAccount: (id, { wait = false } = {}) => request('POST', `/accounts/${id}/reconnect${wait ? '?wait=1' : ''}`),
   reindexAccount: (id) => request('POST', `/accounts/${id}/reindex`),
+  // Native MailFlow definitions are independent of IMAP folder operations.
+  getNativeLabels: accountId => request('GET', `/labels?accountId=${encodeURIComponent(accountId)}`),
+  createNativeLabel: data => request('POST', '/labels', data),
+  updateNativeLabel: (id, data) => request('PATCH', `/labels/${encodeURIComponent(id)}`, data),
+  previewNativeLabelDelete: (id, accountId) => request('POST', `/labels/${encodeURIComponent(id)}/delete-preview`, { accountId }),
+  deleteNativeLabel: (id, data) => request('DELETE', `/labels/${encodeURIComponent(id)}`, data),
+
   getFolders: (accountId) => request('GET', `/accounts/${accountId}/folders`),
   getAliases: (accountId) => request('GET', `/accounts/${accountId}/aliases`),
   addAlias: (accountId, data) => request('POST', `/accounts/${accountId}/aliases`, data),

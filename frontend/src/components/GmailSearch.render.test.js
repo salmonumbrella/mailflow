@@ -340,3 +340,41 @@ test('a sender action cannot replace an in-flight save, and reopening starts wit
   await click(button('Cancel'));
   assert.equal(payloads.length, 1);
 });
+
+test('advanced size controls submit exact decimal bytes and preserve original bounds on cancel', async () => {
+  await mount('from:alice larger:2M smaller:3M');
+  await click(button('Advanced search options'));
+  const amount = container().querySelector('[aria-label="Size value"]');
+  const units = container().querySelector('[aria-label="Size unit"]');
+  assert.equal(amount.disabled, false);
+  assert.equal(amount.value, '2097152');
+  assert.equal(units.value, 'B');
+  assert.match(container().textContent, /not a search of all mail/);
+  await input(amount, '1.25');
+  await React.act(async () => { units.value = 'MB'; units.dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
+  await click(button('Cancel'));
+  assert.equal(query, 'from:alice larger:2M smaller:3M');
+  await click(button('Advanced search options'));
+  await input(container().querySelector('[aria-label="Size value"]'), '');
+  await click(button('Search'));
+  assert.equal(query, 'from:alice smaller:3M');
+  await click(button('Advanced search options'));
+  await input(container().querySelector('[aria-label="Size value"]'), '1.25');
+  const nextUnits = container().querySelector('[aria-label="Size unit"]');
+  await React.act(async () => { nextUnits.value = 'MB'; nextUnits.dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
+  await click(button('Search'));
+  assert.equal(query, 'from:alice smaller:1250000');
+});
+
+test('invalid size stays visible and size searches cannot create broader filters', async () => {
+  await mount('from:alice larger:2M');
+  await click(button('Advanced search options'));
+  await click(button('Create filter'));
+  assert.match(container().querySelector('[role="alert"]').textContent, /cannot yet save/);
+  assert.equal(payloads.length, 0);
+  await input(container().querySelector('[aria-label="Size value"]'), '1e6');
+  await click(button('Search'));
+  assert.ok(container().querySelector('[aria-label="Advanced search"]'));
+  assert.match(container().querySelector('[role="alert"]').textContent, /size/);
+  assert.equal(query, 'from:alice larger:2M');
+});

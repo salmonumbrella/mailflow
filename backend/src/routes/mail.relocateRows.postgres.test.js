@@ -24,7 +24,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('relocateRows on Postgr
       .filter(c => !['account_id', 'uid', 'folder', 'message_id', 'date'].includes(c));
     await database.query(`CREATE TEMP TABLE messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid, uid bigint, folder text,
-      message_id text, date timestamptz, ${carried.map(c => `${c} text`).join(', ')},
+      message_id text, date timestamptz, ${carried.map(c => `${c} ${c === 'rfc822_size_bytes' ? 'bigint' : 'text'}`).join(', ')},
       UNIQUE (account_id, uid, folder))`);
     query.mockImplementation((sql, values) => database.query(sql, values));
   });
@@ -45,6 +45,23 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('relocateRows on Postgr
     expect(rows).toEqual([{ uid: '500', folder: 'INBOX', subject: 'Known', spam_user_override: 'ham', category: 'social' }]);
     expect(takeCarry(ACC, 'INBOX', '<a@x>', '2026-11-04T10:00:00Z')).toBeNull();
     expect(takeCarry(ACC, 'INBOX', '<b@x>', '2026-11-04T10:00:00Z')).toMatchObject({ spam_user_override: 'ham', category: 'social' });
+  });
+
+  it('carries only confirmed move sizes, never the heuristic no-UIDPLUS carry', async () => {
+    await database.query('UPDATE messages SET rfc822_size_bytes = 1234');
+    await relocateRows([A, B], new Map([[A, 500]]), 'INBOX');
+    expect((await database.query('SELECT rfc822_size_bytes FROM messages')).rows).toEqual([{ rfc822_size_bytes: '1234' }]);
+    const carried = takeCarry(ACC, 'INBOX', '<b@x>', '2026-11-04T10:00:00Z');
+    expect(carried).not.toHaveProperty('rfc822_size_bytes');
+  });
+
+  it('retains the destination measurement when sync wins a move race', async () => {
+    await database.query('UPDATE messages SET rfc822_size_bytes = 1234');
+    await database.query(`INSERT INTO messages(account_id, uid, folder, rfc822_size_bytes)
+      VALUES ($1, 500, 'INBOX', 2345)`, [ACC]);
+    await relocateRows([A], new Map([[A, 500]]), 'INBOX');
+    expect((await database.query("SELECT rfc822_size_bytes FROM messages WHERE folder = 'INBOX'")).rows)
+      .toEqual([{ rfc822_size_bytes: '2345' }]);
   });
 
   it('keeps the row a sync already filed at the new uid, with what only MailFlow knew, and does not count it as dropped', async () => {

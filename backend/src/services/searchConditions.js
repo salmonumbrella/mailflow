@@ -26,6 +26,21 @@ export function freeTextTermCondition(likeIdx, ftsIdx) {
 const escapeLike = value => value.replace(/[\\%_]/g, '\\$&');
 const negate = sql => `NOT COALESCE((${sql}), false)`;
 const CATEGORIES = new Set(['primary', 'newsletter', 'promotion', 'automated', 'social']);
+const SIZE_KEYS = new Set(['size', 'larger', 'smaller']);
+const hasSize = node => !!node && (node.type === 'filter' ? SIZE_KEYS.has(node.key) : node.type === 'not' ? hasSize(node.child) : !!node.children?.some(hasSize));
+
+// Typed suffixes deliberately use binary units, unlike the advanced form's
+// decimal KB/MB. BigInt rational arithmetic avoids rounding at safe-size bounds.
+export function parseSearchSize(value) {
+  const match = /^(\d+)(?:\.(\d+))?(b|k|kb|m|mb|g|gb)?$/i.exec(value);
+  if (!match || value.length > 100) throw new SearchQueryError('Use a nonnegative size with B, K, KB, M, MB, G, or GB.');
+  const scale = 10n ** BigInt(match[2]?.length || 0);
+  const units = { b: 1n, k: 1024n, kb: 1024n, m: 1048576n, mb: 1048576n, g: 1073741824n, gb: 1073741824n };
+  const bytes = BigInt(match[1] + (match[2] || '')) * units[(match[3] || 'b').toLowerCase()];
+  if (bytes % scale !== 0n) throw new SearchQueryError('Message size must resolve to whole bytes.');
+  if (bytes / scale > 9007199254740991n) throw new SearchQueryError('Message size must not exceed 9007199254740991 bytes.');
+  return (bytes / scale).toString();
+}
 
 function searchDate(value) {
   // Date.parse silently normalizes February 31 and interprets short numbers as
@@ -61,10 +76,17 @@ function relativeDate(value, now) {
 export function buildSearchConditions(raw, { folder = '', firstParam = 2, now = Date.now() } = {}) {
   const tree = parseSearchExpression(raw);
   const params = [];
+  const requiresSize = hasSize(tree);
   let explicitFolder = false, includesTrash = false;
   const bind = value => { params.push(value); return `$${firstParam + params.length - 1}`; };
   const compile = (node, positive = true) => {
-    if (node.type === 'not') return negate(compile(node.child, !positive));
+    const sql = compileNode(node, positive);
+    // Only size metadata is unknown evidence. Normalize ordinary subexpressions
+    // before composing them with size, without changing existing text searches.
+    return requiresSize && !hasSize(node) ? `COALESCE((${sql}), false)` : sql;
+  };
+  const compileNode = (node, positive) => {
+    if (node.type === 'not') return hasSize(node.child) ? `NOT (${compile(node.child, !positive)})` : negate(compile(node.child, !positive));
     if (node.type === 'and' || node.type === 'or') return `(${node.children.map(child => compile(child, positive)).join(node.type === 'and' ? ' AND ' : ' OR ')})`;
     if (node.type === 'term') {
       const like = bind(`%${escapeLike(node.value)}%`);
@@ -73,7 +95,8 @@ export function buildSearchConditions(raw, { folder = '', firstParam = 2, now = 
       return freeTextTermCondition(Number(like.slice(1)), Number(fts.slice(1)));
     }
     const { key, value } = node;
-    if (['label', 'size', 'larger', 'smaller', 'bcc'].includes(key)) throw new SearchQueryError(`${key}: is not available in MailFlow’s search index.`);
+    if (SIZE_KEYS.has(key)) return `m.rfc822_size_bytes ${key === 'smaller' ? '<' : '>'} ${bind(parseSearchSize(value))}::bigint`;
+    if (['label', 'bcc'].includes(key)) throw new SearchQueryError(`${key}: is not available in MailFlow’s search index.`);
     if (key === 'from') { const p = bind(`%${escapeLike(value)}%`); return `(m.from_email ILIKE ${p} OR m.from_name ILIKE ${p})`; }
     if (key === 'subject') return `m.subject ILIKE ${bind(`%${escapeLike(value)}%`)}`;
     if (key === 'to' || key === 'cc') {
@@ -108,5 +131,5 @@ export function buildSearchConditions(raw, { folder = '', firstParam = 2, now = 
   };
   const conditions = tree ? [compile(tree)] : [];
   if (!explicitFolder && folder.trim()) conditions.push(`m.folder = ${bind(folder.trim())}`);
-  return { conditions, params, excludeTrash: !includesTrash && (explicitFolder || !folder.trim()) };
+  return { conditions, params, requiresSize, effectiveFolder: !explicitFolder ? folder.trim() : '', excludeTrash: !includesTrash && (explicitFolder || !folder.trim()) };
 }

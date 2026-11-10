@@ -121,11 +121,26 @@ router.get('/', searchLimiter, async (req, res) => {
       WHERE m.account_id = ANY($1)
         AND m.is_deleted = false
         AND ${conditions.join('\n        AND ')}
-      ORDER BY m.date DESC
+      ORDER BY m.date DESC, m.id DESC
       LIMIT $${p} OFFSET $${p + 1}
     `, params);
 
-    res.json({ messages: result.rows, query: q });
+    let sizeIndex;
+    if (search.requiresSize) {
+      // Coverage describes this authorized synchronized cache, not matching
+      // messages or all provider mail. EXISTS stops at the first unknown row.
+      const coverageParams = [targetIds];
+      const coverageScope = ['m.account_id = ANY($1)', 'm.is_deleted = false', 'm.rfc822_size_bytes IS NULL'];
+      if (search.effectiveFolder) { coverageParams.push(search.effectiveFolder); coverageScope.push('m.folder = $2'); }
+      if (search.excludeTrash) coverageScope.push(trashFolderExclusionCondition());
+      const coverage = await query(`SELECT EXISTS (SELECT 1 FROM messages m WHERE ${coverageScope.join(' AND ')}) AS has_unknown`, coverageParams);
+      sizeIndex = {
+        state: coverage.rows[0]?.has_unknown === false ? 'complete-for-cache' : 'partial',
+        scope: search.effectiveFolder ? 'selected-folder-synchronized-cache' : 'selected-accounts-synchronized-cache',
+        providerComplete: false,
+      };
+    }
+    res.json({ messages: result.rows, query: q, ...(sizeIndex ? { sizeIndex } : {}) });
   } catch (err) {
     console.error('Search error:', err);
     res.status(500).json({ error: 'Search failed' });

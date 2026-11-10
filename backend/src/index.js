@@ -20,6 +20,7 @@ import integrationsRoutes, { loadIntegrationConfigs } from './routes/integration
 import authRoutes from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
 import mailRoutes from './routes/mail.js';
+import labelRoutes from './routes/labels.js';
 import searchRoutes from './routes/search.js';
 import adminRoutes from './routes/admin.js';
 import totpRoutes from './routes/totp.js';
@@ -156,6 +157,7 @@ app.use('/api/accounts', accountRoutes);
 app.use('/api/accounts', accountSpamRouter);
 app.use('/api/spam', spamRoutes);
 app.use('/api/mail', mailRoutes);
+app.use('/api/labels', labelRoutes);
 app.use('/api/mail', sendRoutes);
 app.use('/api/mail', draftRoutes);
 app.use('/api/mail', scheduledRoutes);

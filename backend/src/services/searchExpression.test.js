@@ -71,7 +71,7 @@ describe('bounded Boolean search', () => {
     const now = Date.parse('2026-03-31T12:00:00Z');
     expect(buildSearchConditions('newer_than:1m older_than:7d', { now }).params).toEqual(['2026-02-28T12:00:00.000Z', '2026-03-24T12:00:00.000Z']);
   });
-  it.each(['is:important', 'label:work', 'size:1000', 'larger:2M', 'category:forums', 'has:drive', 'after:2026-02-31', 'older_than:forever'])('fails loudly for unavailable or invalid metadata: %s', q => {
+  it.each(['is:important', 'label:work', 'category:forums', 'has:drive', 'after:2026-02-31', 'older_than:forever'])('fails loudly for unavailable or invalid metadata: %s', q => {
     expect(() => buildSearchConditions(q)).toThrow(SearchQueryError);
   });
 });

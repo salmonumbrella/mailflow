@@ -27,7 +27,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('draft ingestion SQL id
         to_addresses jsonb, cc_addresses jsonb, bcc_addresses jsonb,
         in_reply_to text, thread_references text, thread_id text,
         date timestamptz, flags jsonb, has_attachments boolean, attachments jsonb,
-        provider_msgid text, is_read boolean, is_deleted boolean DEFAULT false, body_html text, body_text text,
+        provider_msgid text, rfc822_size_bytes bigint, is_read boolean, is_deleted boolean DEFAULT false, body_html text, body_text text,
         UNIQUE(account_id, uid, folder)
       )`);
   });
@@ -49,12 +49,12 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('draft ingestion SQL id
     { name: 'unknown live generation cannot retain the body or root', oldId: '<draft@example.test>', newId: '<draft@example.test>', stored: '9', current: undefined, root: '<computed@example.test>' },
     { name: 'missing folder generation cannot retain the body or root', oldId: '<draft@example.test>', newId: '<draft@example.test>', stored: undefined, current: 9n, root: '<computed@example.test>' },
   ];
-  it.each(cases)('$name', async ({ oldId, newId, stored, current, oldRoot = '<old-root@example.test>', root, keep }) => {
+  it.each(cases.flatMap(item => [undefined, 0].map(size => ({ ...item, size, name: `${item.name}, size=${size}` }))))('$name', async ({ oldId, newId, stored, current, oldRoot = '<old-root@example.test>', root, keep, size }) => {
     if (stored !== undefined) await database.query('INSERT INTO folders VALUES ($1,$2,$3)', ['account-a', 'Drafts', stored]);
-    await database.query(`INSERT INTO messages(account_id, uid, folder, message_id, thread_id, body_html, body_text)
-      VALUES ('account-a',1,'Drafts',$1,$2,'<p>Cached</p>','Cached'),
-        ('account-a',2,'Sent','<known@example.test>','<computed@example.test>',null,null)`, [oldId, oldRoot]);
-    parseMessage.mockResolvedValueOnce({ messageId: newId, providerMsgid: '9007199254740993', fromEmail: 'me@example.test', subject: 'Fresh subject',
+    await database.query(`INSERT INTO messages(account_id, uid, folder, message_id, thread_id, body_html, body_text, rfc822_size_bytes)
+      VALUES ('account-a',1,'Drafts',$1,$2,'<p>Cached</p>','Cached',1234),
+        ('account-a',2,'Sent','<known@example.test>','<computed@example.test>',null,null,null)`, [oldId, oldRoot]);
+    parseMessage.mockResolvedValueOnce({ rfc822SizeBytes: size, messageId: newId, providerMsgid: '9007199254740993', fromEmail: 'me@example.test', subject: 'Fresh subject',
       to: [], cc: [], inReplyTo: '<known@example.test>', references: '<known@example.test>',
       parsedHeaders: { bcc: 'bcc@example.test' }, flags: [], hasAttachments: false });
     const manager = Object.create(ImapManager.prototype);
@@ -65,6 +65,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('draft ingestion SQL id
     expect(persisted.thread_id).toBe(root);
     expect(persisted.body_html).toBe(keep ? '<p>Cached</p>' : null);
     expect(persisted.body_text).toBe(keep ? 'Cached' : null);
+    expect(persisted.rfc822_size_bytes).toBe(size === 0 ? '0' : keep ? '1234' : null);
     expect(persisted.message_id).toBe(newId);
     expect(persisted.provider_msgid).toBe('9007199254740993');
     expect(persisted.subject).toBe('Fresh subject');

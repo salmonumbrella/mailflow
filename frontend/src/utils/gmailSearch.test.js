@@ -47,3 +47,38 @@ test('refinements filter the complete Boolean result without rewriting grouped l
   const original = 'from:alice AND subject:invoice';
   assert.equal(searchFieldsToQuery(searchQueryToFields(original)), original);
 });
+
+test('size fields use decimal form units while reopening binary suffixes as exact bytes', () => {
+  for (const token of ['larger:2M', 'larger:2MB']) {
+    const fields = searchQueryToFields(token);
+    assert.equal(fields.sizeValue, '2097152');
+    assert.equal(fields.sizeUnit, 'B');
+    assert.equal(searchFieldsToQuery(fields), 'larger:2097152');
+  }
+  const fields = { ...searchQueryToFields('from:alice'), sizeComparison: 'smaller', sizeValue: '1.25', sizeUnit: 'MB' };
+  assert.equal(searchFieldsToQuery(fields), 'from:alice smaller:1250000');
+  assert.equal(searchFieldsToQuery({ ...fields, sizeValue: '' }), 'from:alice');
+});
+
+test('size edits preserve repeated bounds, negation, grouping, and invalid typed tokens', () => {
+  const fields = searchQueryToFields('larger:2M smaller:3M -size:1K subject:invoice');
+  assert.equal(fields.extra, 'smaller:3M -size:1K');
+  assert.equal(searchFieldsToQuery(fields), 'subject:invoice larger:2097152 smaller:3M -size:1K');
+  for (const original of ['-(larger:2M OR subject:invoice)', '{larger:2M smaller:1M}', 'larger:garbage']) {
+    assert.equal(searchFieldsToQuery(searchQueryToFields(original)), original);
+  }
+  for (const token of ['size:2M', 'larger:100', '-smaller:20', 'from:alice smaller:100']) assert.throws(() => searchQueryToRule(token), /cannot yet save/);
+});
+
+test('invalid size form values never disappear or round silently', () => {
+  for (const sizeValue of ['-1', '1e6', 'NaN', 'Infinity', '9007199254740992', '1.0000001', ' ']) {
+    assert.throws(() => searchFieldsToQuery({ ...searchQueryToFields(''), sizeValue, sizeUnit: 'MB' }), /size|bytes/i);
+  }
+  assert.throws(() => searchFieldsToQuery({ ...searchQueryToFields(''), sizeValue: '1', sizeComparison: 'equals' }), /comparison/i);
+  assert.throws(() => searchFieldsToQuery({ ...searchQueryToFields(''), sizeValue: '1', sizeUnit: 'PB' }), /unit/i);
+});
+
+test('adding a size restriction constrains every branch of a preserved Boolean query', () => {
+  const fields = { ...searchQueryToFields('from:alice OR from:bob'), sizeValue: '2', sizeUnit: 'MB' };
+  assert.equal(searchFieldsToQuery(fields), 'larger:2000000 (from:alice OR from:bob)');
+});

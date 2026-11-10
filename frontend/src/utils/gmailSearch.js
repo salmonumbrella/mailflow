@@ -2,7 +2,27 @@
 export const tokenizeSearch = query => String(query || '').match(/(?:[^\s"']|"[^"]*"|'[^']*')+/g) || [];
 const unquote = value => value?.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
 export const quoteSearch = value => /\s/.test(value) ? `"${value.replaceAll('"', '')}"` : value;
-export const emptySearchFields = () => ({ from: '', to: '', subject: '', words: '', without: '', folder: '', attachment: false, after: '', before: '', date: '', dateWithin: '7', extra: '' });
+export const emptySearchFields = () => ({ from: '', to: '', subject: '', words: '', without: '', folder: '', attachment: false, after: '', before: '', date: '', dateWithin: '7', sizeComparison: 'larger', sizeValue: '', sizeUnit: 'MB', extra: '' });
+
+// Keep aligned with backend searchConditions: typed suffixes are binary,
+// while advanced-form KB/MB are decimal. Reject sub-byte values, never round.
+const defaultTranslate = (_key, { defaultValue }) => defaultValue;
+function exactSizeBytes(value, multiplier, t = defaultTranslate) {
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(value);
+  if (!match || value.length > 100) throw new Error(t('gmailSearch.invalidSize', { defaultValue: 'Enter a nonnegative message size.' }));
+  const scale = 10n ** BigInt(match[2]?.length || 0);
+  const bytes = BigInt(match[1] + (match[2] || '')) * multiplier;
+  if (bytes % scale !== 0n) throw new Error(t('gmailSearch.wholeBytesRequired', { defaultValue: 'Message size must resolve to whole bytes.' }));
+  if (bytes / scale > 9007199254740991n) throw new Error(t('gmailSearch.sizeTooLarge', { defaultValue: 'Message size must not exceed 9007199254740991 bytes.' }));
+  return (bytes / scale).toString();
+}
+
+function typedSizeBytes(value) {
+  const match = /^(\d+(?:\.\d+)?)(b|k|kb|m|mb|g|gb)?$/i.exec(unquote(value));
+  if (!match) throw new Error('Invalid message size.');
+  const units = { b: 1n, k: 1024n, kb: 1024n, m: 1048576n, mb: 1048576n, g: 1073741824n, gb: 1073741824n };
+  return exactSizeBytes(match[1], units[(match[2] || 'b').toLowerCase()]);
+}
 
 export function searchQueryToFields(query) {
   const fields = emptySearchFields();
@@ -13,6 +33,13 @@ export function searchQueryToFields(query) {
     if (match) {
       const key = match[1].toLowerCase() === 'in' ? 'folder' : match[1].toLowerCase();
       if (!fields[key]) fields[key] = unquote(match[2]); else extra.push(token);
+    } else if (/^(size|larger|smaller):/i.test(token) && fields.sizeValue === '') {
+      const colon = token.indexOf(':');
+      try {
+        fields.sizeValue = typedSizeBytes(token.slice(colon + 1));
+        fields.sizeUnit = 'B';
+        fields.sizeComparison = token.slice(0, colon).toLowerCase() === 'smaller' ? 'smaller' : 'larger';
+      } catch { extra.push(token); }
     } else if (token === 'has:attachment' && !fields.attachment) fields.attachment = true;
     else if (/[:(){}]|^OR$/.test(token)) extra.push(token);
     else if (token.startsWith('-')) without.push(token.slice(1));
@@ -21,13 +48,19 @@ export function searchQueryToFields(query) {
   return { ...fields, words: words.join(' '), without: without.join(' '), extra: extra.join(' ') };
 }
 
-export function searchFieldsToQuery(fields) {
+export function searchFieldsToQuery(fields, t = defaultTranslate) {
   const tokens = [];
   for (const key of ['from', 'to', 'subject']) if (fields[key].trim()) tokens.push(`${key}:${quoteSearch(fields[key].trim())}`);
   if (fields.words.trim()) tokens.push(fields.words.trim());
   tokens.push(...tokenizeSearch(fields.without).map(word => `-${word.replace(/^-/, '')}`));
   if (fields.folder) tokens.push(`in:${quoteSearch(fields.folder)}`);
   if (fields.attachment) tokens.push('has:attachment');
+  if (fields.sizeValue !== undefined && fields.sizeValue !== '') {
+    if (!['larger', 'smaller'].includes(fields.sizeComparison)) throw new Error(t('gmailSearch.invalidSizeComparison', { defaultValue: 'Choose a valid size comparison.' }));
+    const multiplier = { B: 1n, KB: 1000n, MB: 1000000n }[fields.sizeUnit];
+    if (!multiplier) throw new Error(t('gmailSearch.invalidSizeUnit', { defaultValue: 'Choose a valid size unit.' }));
+    tokens.push(`${fields.sizeComparison}:${exactSizeBytes(fields.sizeValue, multiplier, t)}`);
+  }
   if (fields.date) {
     const date = new Date(`${fields.date}T00:00:00Z`);
     if (Number.isNaN(+date)) throw new Error('Choose a valid date.');
@@ -38,7 +71,12 @@ export function searchFieldsToQuery(fields) {
     if (fields.after) tokens.push(`after:${fields.after}`);
     if (fields.before) tokens.push(`before:${fields.before}`);
   }
-  if (fields.extra.trim()) tokens.push(fields.extra.trim());
+  if (fields.extra.trim()) {
+    const extra = fields.extra.trim();
+    // New form criteria must constrain the complete preserved expression,
+    // especially an OR, rather than only its first branch.
+    tokens.push(tokens.length && /(?:^|\s)(?:OR|AND)(?:\s|$)|[(){}]/.test(extra) ? `(${extra})` : extra);
+  }
   return tokens.join(' ');
 }
 

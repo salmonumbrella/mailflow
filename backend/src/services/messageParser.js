@@ -886,6 +886,8 @@ export async function parseMessage(msg) {
 
   return {
     uid: msg.uid,
+    // Only live RFC822.SIZE is evidence; body/attachment lengths are not equivalent.
+    rfc822SizeBytes: Number.isSafeInteger(msg.size) && msg.size >= 0 ? msg.size : null,
     providerMsgid: typeof msg.emailId === 'string' && msg.emailId ? msg.emailId : null,
     messageId: capHeaderField(envelope.messageId || null),
     subject: resolveSubject(envelope.subject, parsedHeaders),

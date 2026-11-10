@@ -166,7 +166,7 @@ export const useStore = create((set, get) => ({
       // leaves: a cold load has nothing to clear, and clearing there would drop the reading
       // preferences seeded from localStorage until loadPreferences ran.
       ...(state.user && state.user.id !== user?.id ? {
-        messages: [], searchResults: [], searchQuery: '', selectedMessageId: null,
+        messages: [], searchResults: [], searchSizeIndex: null, searchQuery: '', selectedMessageId: null,
         threadMessages: {}, expandedThreadId: null,
         accounts: [], accountsReady: false, folders: {},
         notifications: [], backfillProgress: {},
@@ -246,7 +246,7 @@ export const useStore = create((set, get) => ({
       set({
         serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
         isLocked: true,
-        messages: [], searchResults: [], searchQuery: '',
+        messages: [], searchResults: [], searchSizeIndex: null, searchQuery: '',
         accounts: [], accountsReady: false,
         folders: {}, selectedMessageId: null,
         unreadCounts: { total: 0, byAccount: {} },
@@ -708,12 +708,13 @@ export const useStore = create((set, get) => ({
   })),
   closeAllMessageWindows: () => set({ messageWindows: [] }),
   searchQuery: '',
-  setSearchQuery: (q) => set(state => q === state.searchQuery ? {} : { searchQuery: q,
+  setSearchQuery: (q) => set(state => q === state.searchQuery ? {} : { searchQuery: q, searchSizeIndex: null,
     replyDrafts: {}, replyDraftRevision: state.replyDraftRevision + 1 }),
   isSearching: false,
   setIsSearching: (v) => set({ isSearching: v }),
   searchResults: [],
-  setSearchResults: (r) => set({ searchResults: r }),
+  searchSizeIndex: null,
+  setSearchResults: (r, sizeIndex = null) => set({ searchResults: r, searchSizeIndex: sizeIndex }),
 
   // Loading
   loadingMessages: false,

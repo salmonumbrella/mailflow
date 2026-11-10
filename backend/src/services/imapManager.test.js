@@ -136,7 +136,21 @@ describe('live reply draft lookup', () => {
       bcc_addresses: [{ name: 'Hidden', email: 'hidden@example.test' }], uid_validity: '9', attachments_complete: true });
     const [sql] = query.mock.calls.find(([text]) => text.includes('INSERT INTO messages'));
     expect(sql).toContain('bcc_addresses = EXCLUDED.bcc_addresses');
+    expect(client.fetch.mock.calls[0][1].size).toBe(true);
+    expect(sql).toContain('rfc822_size_bytes');
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('requests authoritative size when finding reply drafts in batches', async () => {
+    const manager = Object.create(ImapManager.prototype);
+    manager._ingestDraftUidWithClient = vi.fn().mockResolvedValue({ id: 'draft' });
+    const client = { getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      search: vi.fn().mockResolvedValue([1]), fetch: vi.fn(async function* () {
+        yield { uid: 1, size: 42, envelope: { inReplyTo: '<parent@example.test>' } };
+      }) };
+    await manager._findReplyDraftsWithClient({ id: 'account-a' }, ['Drafts'], ['<parent@example.test>'], client);
+    expect(client.fetch).toHaveBeenCalled();
+    expect(client.fetch.mock.calls.at(-1)[1].size).toBe(true);
   });
 
   it('computes the canonical thread from known ancestors during partial ingestion', async () => {
@@ -588,6 +602,16 @@ describe('upsertDraftMessageRecord', () => {
     await save({ providerMsgid: '9007199254740993' }, { id: 'acct-1', imap_host: 'imap.gmail.com' });
     expect(insertedValue('provider_msgid')).toBe('9007199254740993');
     expect(findCall('INSERT INTO messages')[0]).toMatch(/provider_msgid = COALESCE\(EXCLUDED\.provider_msgid, messages\.provider_msgid\)/);
+  });
+});
+
+describe('local APPEND rows do not retain unverified measurements', () => {
+  it.each(['upsertSentMessageRecord', 'upsertDraftMessageRecord'])('%s clears size without a confirmed physical epoch', async method => {
+    query.mockReset().mockResolvedValue({ rows: [] });
+    await ImapManager.prototype[method].call({}, { id: 'size-local' }, 'Sent', 5,
+      { messageId: '<saved@example.test>', rfc822SizeBytes: 999, bodyText: 'not size' });
+    const [sql] = query.mock.calls.find(([text]) => text.includes('INSERT INTO messages'));
+    expect(sql).toMatch(/rfc822_size_bytes = NULL/);
   });
 });
 
@@ -1292,6 +1316,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
     });
     parseMessage.mockResolvedValue({
       uid: 501,
+      rfc822SizeBytes: 0,
       messageId: null,
       subject: 'Watch first message',
       fromName: 'External',
@@ -1325,6 +1350,8 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
     const insertIndex = query.mock.calls.findIndex(([sql]) => sql.includes('INSERT INTO messages'));
     const modseqUpdateIndex = query.mock.calls.findIndex(([sql]) => sql.includes('UPDATE folders SET highest_modseq'));
     expect(insertIndex).toBeGreaterThanOrEqual(0);
+    expect(query.mock.calls[insertIndex][0]).toContain('rfc822_size_bytes = COALESCE(EXCLUDED.rfc822_size_bytes, messages.rfc822_size_bytes)');
+    expect(query.mock.calls[insertIndex][1].at(-1)).toBe(0);
     expect(modseqUpdateIndex).toBeGreaterThan(insertIndex);
     expect(result).toEqual(expect.objectContaining({ insertedCount: 1 }));
   });
@@ -3889,6 +3916,35 @@ describe('Gmail label memberships (#418)', () => {
       });
     }
   }
+  for (const mode of ['sync', 'backfill']) {
+    it.each([0, 123456, null])(`${mode} persists authoritative size %s without coercing unknown to zero`, async size => {
+      parseMessage.mockImplementation(async m => ({ ...parsed(m.uid), rfc822SizeBytes: size }));
+      await (mode === 'sync' ? sync : backfill)(manager(), 'INBOX');
+      const [sql, values] = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO messages'));
+      const columns = sql.match(/INSERT INTO messages\s*\(([^)]*)\)/)[1].split(',').map(c => c.trim());
+      expect(columns).toContain('rfc822_size_bytes');
+      expect(values[columns.indexOf('rfc822_size_bytes')]).toBe(size);
+      expect(sql).toContain('rfc822_size_bytes = COALESCE(EXCLUDED.rfc822_size_bytes, messages.rfc822_size_bytes)');
+    });
+  }
+
+  it('minimal backfill fallback still ingests a message with unknown size', async () => {
+    const client = clientFor('INBOX');
+    client.fetch = vi.fn(async function* (_range, options) {
+      if (!options.size) yield { uid: 1, flags: new Set() };
+    });
+    ImapFlow.mockImplementation(function () { return client; });
+    parseMessage.mockImplementation(async m => ({ ...parsed(m.uid), rfc822SizeBytes: m.size ?? null }));
+    const pending = ImapManager.prototype.backfillMessages.call(manager(), acct, 'INBOX');
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(client.fetch.mock.calls.map(([, options]) => options.size)).toEqual([true, undefined]);
+    const [sql, values] = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO messages'));
+    expect(sql).toContain('rfc822_size_bytes');
+    expect(values.at(-1)).toBeNull();
+    expect(rows).toHaveLength(1);
+  });
+
   // A FETCH that names one message the server cannot produce fails as a whole (Gmail's "Some
   // messages could not be FETCHed"). Backfill used to retry it forever at a batch of 10.
   it('isolates a message the server refuses to hand over, skips it, and backfills the rest', async () => {

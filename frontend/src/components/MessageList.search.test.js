@@ -305,3 +305,37 @@ describe('MessageList replacement search feedback', () => {
     await respond({ messages: [] });
   });
 });
+
+const partialSizeIndex = { state: 'partial', scope: 'selected-folder-synchronized-cache', providerComplete: false };
+const completeSizeIndex = { ...partialSizeIndex, state: 'complete-for-cache' };
+describe('synchronized-cache size coverage', () => {
+  test('shows partial coverage for empty results and clears it for a new query', async () => {
+    await mount(); await search('-larger:2M'); await settle();
+    await respond({ messages: [], sizeIndex: partialSizeIndex });
+    assert.deepEqual(useStore.getState().searchSizeIndex, partialSizeIndex);
+    assert.match(text(), /unknown sizes/);
+    assert.match(text(), /does not cover all mail on your provider/);
+    assert.match(text(), /No matches in the available indexed data/);
+    await search('subject:invoice');
+    assert.equal(useStore.getState().searchSizeIndex, null);
+    assert.doesNotMatch(text(), /unknown sizes/);
+    await settle(); await respond({ messages: [] });
+  });
+  test('updates coverage on later pages without accepting stale account responses', async () => {
+    await mount();
+    await React.act(async () => useStore.setState({ pageSize: 1 }));
+    await search('larger:2M'); await settle();
+    await respond({ messages: [hit('first')], sizeIndex: partialSizeIndex });
+    const more = [...container().querySelectorAll('button')].find(b => /messageList\.loadMore/.test(b.textContent));
+    await React.act(async () => more.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })));
+    await respond({ messages: [], sizeIndex: completeSizeIndex });
+    assert.deepEqual(useStore.getState().searchSizeIndex, completeSizeIndex);
+    assert.match(text(), /does not cover all mail on your provider/);
+    await search('smaller:2M'); await settle();
+    const stale = pending.shift();
+    await React.act(async () => useStore.setState({ selectedAccountId: null }));
+    await settle(); await respond({ messages: [], sizeIndex: partialSizeIndex });
+    await React.act(async () => { stale.resolve({ messages: [], sizeIndex: completeSizeIndex }); await new Promise(r => setTimeout(r, 0)); });
+    assert.deepEqual(useStore.getState().searchSizeIndex, partialSizeIndex);
+  });
+});
