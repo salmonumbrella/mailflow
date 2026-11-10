@@ -1,3 +1,5 @@
+import { hydrateCachedAttachmentMetadata } from '../services/messageAttachmentReadModel.js';
+import { assertAttachmentRequestSource, assertAttachmentSource, captureAttachmentSource } from '../services/attachmentReadScope.js';
 import { hydrateNativeLabels } from '../services/nativeLabelReadModel.js';
 import { LIVE_SNOOZE_SQL } from '../services/snoozeIdentity.js';
 import { STATUS_STALE_MS } from '../services/folderStatus.js';
@@ -246,7 +248,7 @@ router.get('/messages/:id', async (req, res) => {
       live: true,
     });
     if (!message) return res.status(404).json({ error: 'Message not found' });
-    res.json((await hydrateNativeLabels(req.session.userId, [message]))[0]);
+    res.json((await hydrateCachedAttachmentMetadata(req.session.userId, await hydrateNativeLabels(req.session.userId, [message])))[0]);
   } catch (err) {
     console.error('GET /messages/:id error:', err.message);
     res.status(500).json({ error: 'Failed to load message' });
@@ -304,7 +306,7 @@ router.get('/resolve-message', async (req, res) => {
       `, [ref, req.session.userId, accountId]);
     }
     if (result.rows.length === 0) return res.status(404).json({ error: 'Message not found' });
-    res.json((await hydrateNativeLabels(req.session.userId, [result.rows[0]]))[0]);
+    res.json((await hydrateCachedAttachmentMetadata(req.session.userId, await hydrateNativeLabels(req.session.userId, [result.rows[0]])))[0]);
   } catch (err) {
     console.error('GET /resolve-message error:', err.message);
     res.status(500).json({ error: 'Failed to resolve message' });
@@ -384,7 +386,7 @@ async function getThread(req, res, threadId) {
       SELECT * FROM deduped ORDER BY date ASC, account_id, id
     `, [accountIds, threadId]);
 
-    res.json({ messages: await hydrateNativeLabels(req.session.userId, result.rows) });
+    res.json({ messages: await hydrateCachedAttachmentMetadata(req.session.userId, await hydrateNativeLabels(req.session.userId, result.rows)) });
   } catch (err) {
     console.error('Thread fetch error:', err);
     res.status(500).json({ error: 'Failed to load thread' });
@@ -834,10 +836,11 @@ const ZIP_MAX_FILE_BYTES  =  50 * 1024 * 1024; //  50 MB per file
 
 // Download all attachments as a ZIP archive
 router.get('/messages/:id/attachments.zip', async (req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store');
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const message = await findOwnedMessage(req.session.userId, id, { columns: 'm.*, a.user_id' });
+  const message = await findOwnedMessage(req.session.userId, id, { columns: 'm.*, a.user_id', live: true, enabledAccount: true });
   if (!message) return res.status(404).json({ error: 'Message not found' });
 
   const attachments = typeof message.attachments === 'string'
@@ -857,11 +860,13 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
   if (eligible.length === 0) return res.status(413).json({ error: 'All attachments exceed the 50 MB per-file limit.' });
 
   try {
-    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
-    if (!accountResult.rows.length) return res.status(404).json({ error: 'Account not found' });
-    const account = accountResult.rows[0];
+    assertAttachmentRequestSource(req.get('X-Mailflow-Message-Source'), message);
+    const account = await findOwnedAccount(req.session.userId, message.account_id, { enabled: true });
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+    const proof = await captureAttachmentSource(account, message.folder, message.uid, message);
 
-    const bufferMap = await imapManager.fetchMultipleAttachments(account, message.uid, message.folder, eligible);
+    const bufferMap = await imapManager.fetchMultipleAttachments(account, message.uid, message.folder, eligible, { expectedSource: message });
+    await assertAttachmentSource(account, proof);
     if (bufferMap.size === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
 
     // Deduplicate filenames: invoice.pdf → invoice (2).pdf
@@ -884,6 +889,11 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
 
     if (entries.length === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
 
+    const totalBytes = entries.reduce((sum, entry) => sum + entry.buf.length, 0);
+    if (totalBytes > ZIP_MAX_TOTAL_BYTES || entries.some(entry => entry.buf.length > ZIP_MAX_FILE_BYTES)) {
+      return res.status(413).json({ error: 'Fetched attachments exceed the ZIP size limits.' });
+    }
+
     const zipName = truncateFilename(message.subject || 'attachments', 100) + '-attachments.zip';
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', attachmentDisposition(zipName));
@@ -900,12 +910,14 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
     archive.finalize();
   } catch (err) {
     console.error('ZIP fetch error:', err);
-    if (!res.headersSent) res.status(500).json({ error: 'Failed to create ZIP' });
+    if (!res.headersSent) res.status(err.status || (err.code?.startsWith('identity_') || err.code === 'storage_generation_conflict' ? 409 : 500))
+      .json({ error: err.status || err.code?.startsWith('identity_') || err.code === 'storage_generation_conflict' ? err.message : 'Failed to create ZIP' });
   }
 });
 
 // Download attachment
 router.get('/messages/:id/attachments/:part', async (req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store');
   const { id, part } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
   let partNum;
@@ -915,7 +927,7 @@ router.get('/messages/:id/attachments/:part', async (req, res) => {
     return res.status(400).json({ error: 'Invalid attachment part identifier' });
   }
 
-  const message = await findOwnedMessage(req.session.userId, id, { columns: 'm.*, a.user_id' });
+  const message = await findOwnedMessage(req.session.userId, id, { columns: 'm.*, a.user_id', live: true, enabledAccount: true });
   if (!message) return res.status(404).json({ error: 'Message not found' });
 
   // Find attachment metadata
@@ -934,11 +946,16 @@ router.get('/messages/:id/attachments/:part', async (req, res) => {
   }
 
   try {
-    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
-    if (!accountResult.rows.length) return res.status(404).json({ error: 'Account not found' });
-    const buffer = await imapManager.fetchAttachment(accountResult.rows[0], message.uid, message.folder, partNum);
+    assertAttachmentRequestSource(req.get('X-Mailflow-Message-Source'), message);
+    const account = await findOwnedAccount(req.session.userId, message.account_id, { enabled: true });
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+    const proof = await captureAttachmentSource(account, message.folder, message.uid, message);
+    const buffer = await imapManager.fetchAttachment(account, message.uid, message.folder, partNum, { expectedSource: message });
+    await assertAttachmentSource(account, proof);
 
     if (!buffer) return res.status(404).json({ error: 'Could not fetch attachment' });
+
+    if (buffer.length > ATTACHMENT_SIZE_LIMIT) return res.status(413).json({ error: 'Attachment exceeds the 50 MB download limit.' });
 
     res.setHeader('Content-Type', att.type || 'application/octet-stream');
     res.setHeader('Content-Disposition', attachmentDisposition(att.filename));
@@ -946,7 +963,8 @@ router.get('/messages/:id/attachments/:part', async (req, res) => {
     res.send(buffer);
   } catch (err) {
     console.error('Attachment fetch error:', err);
-    res.status(500).json({ error: 'Failed to fetch attachment' });
+    res.status(err.status || (err.code?.startsWith('identity_') || err.code === 'storage_generation_conflict' ? 409 : 500))
+      .json({ error: err.status || err.code?.startsWith('identity_') || err.code === 'storage_generation_conflict' ? err.message : 'Failed to fetch attachment' });
   }
 });
 

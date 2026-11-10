@@ -10,6 +10,7 @@ export const observeMailboxIdentity = vi.fn(async (snapshot, client) => ({ ...sn
   providerNamespace: client.capabilities?.has('OBJECTID') ? 'imap-objectid'
     : client.capabilities?.has('X-GM-EXT-1') ? 'gmail-x-gm-msgid' : null,
   epochChanged: false, purgedCount: 0 }));
+export const assertSelectedMailboxIdentity = vi.fn(() => {});
 export const assertMailboxIdentity = vi.fn(async () => {});
 export const writeObservedMessage = vi.fn(async (_context, _message, callback) => callback({ query }));
 export const writeUnverifiedMessage = vi.fn(async (_account, _folder, _uid, callback) => callback({ query }));

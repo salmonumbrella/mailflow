@@ -1,3 +1,4 @@
+import { hydrateCachedAttachmentMetadata } from '../services/messageAttachmentReadModel.js';
 import { hydrateNativeLabels } from '../services/nativeLabelReadModel.js';
 import { Router } from 'express';
 import { buildSearchConditions } from '../services/searchConditions.js';
@@ -162,7 +163,8 @@ router.get('/', searchLimiter, async (req, res) => {
           total, known, unavailable: total - known,
           accounts: nativeLabels.accounts, resolvedReferences: nativeLabels.resolvedReferences };
       }
-      const messages = await hydrateNativeLabels(req.session.userId, result.rows, execute);
+      const messages = await hydrateCachedAttachmentMetadata(req.session.userId,
+        await hydrateNativeLabels(req.session.userId, result.rows, execute), execute);
       return { messages, query: q, ...(sizeIndex ? { sizeIndex } : {}), ...(labelIndex ? { labelIndex } : {}) };
     };
     // Definition resolution, membership predicates, coverage, and hydration all

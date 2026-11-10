@@ -1045,6 +1045,36 @@ describe('i18n locale files', () => {
     }
   });
 
+  it('every Gmail attachment source key has a nonempty static translation in every locale', () => {
+    const sourceKeys = loadLiteralSourceTranslationKeys(['gmail.attachments.']);
+    for (const key of ['cachedDetails', 'someNotShown']) {
+      assert.ok(sourceKeys.includes(`gmail.attachments.${key}`), `Gmail attachment ${key} must be covered`);
+    }
+    for (const key of sourceKeys) {
+      assert.equal(typeof locales.en[key], 'string', `English translation missing: ${key}`);
+      for (const lang of langs) {
+        assert.equal(typeof locales[lang][key], 'string', `${lang} translation missing: ${key}`);
+        assert.ok(locales[lang][key].trim(), `${lang} translation empty: ${key}`);
+        assert.doesNotMatch(locales[lang][key], /{{|}}/, `${lang} attachment label must not interpolate counts: ${key}`);
+      }
+    }
+  });
+
+  it('Gmail attachment labels describe message-only cached details without interpolated file counts', () => {
+    const source = readFileSync(join(dir, '../components/GmailAttachmentChips.jsx'), 'utf8');
+    const expected = {
+      'gmail.attachments.cachedDetails': 'Cached attachments for this message only; details may be incomplete.',
+      'gmail.attachments.someNotShown': 'Additional cached attachment details are not shown.',
+    };
+    const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const [key, value] of Object.entries(expected)) {
+      assert.equal(locales.en[key], value, `${key} must preserve the cached, message-only scope`);
+      const staticCall = new RegExp(`\\bt\\(\\s*(['"])${escapeRegExp(key)}\\1(?:\\s*,\\s*(['"])${escapeRegExp(value)}\\2)?\\s*\\)`);
+      assert.match(source, staticCall, `${key} must use a static translation call without interpolation`);
+    }
+  });
+
+
   describe('key coverage — every key must appear in every locale', () => {
     for (const lang of langs) {
       it(`${lang} has no missing keys`, () => {

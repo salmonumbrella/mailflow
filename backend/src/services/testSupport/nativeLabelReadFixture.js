@@ -18,6 +18,7 @@ export const fixtureName = id => names.get(id) ?? id;
 export async function installNativeLabelReadFixture(database) {
   await database.query(`
     ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS storage_generation uuid DEFAULT gen_random_uuid();
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachments jsonb;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS entity_id uuid;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS storage_generation uuid;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS uid_validity bigint;

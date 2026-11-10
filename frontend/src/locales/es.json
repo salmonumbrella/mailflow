@@ -2661,6 +2661,10 @@
       "action_forward": "Reenviar a",
       "action_apply_native_label": "Aplicar etiqueta",
       "action_remove_native_label": "Quitar etiqueta"
+    },
+    "attachments": {
+      "cachedDetails": "Adjuntos en caché solo para este mensaje; los detalles pueden estar incompletos.",
+      "someNotShown": "No se muestran detalles adicionales de los adjuntos en caché."
     }
   },
   "nativeLabelRules": {

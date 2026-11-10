@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('./attachmentReadScope.js', async () => ({
+  captureAttachmentSource: (...args) => import('./testSupport/identityTestAdapter.js').then(module => module.captureMessageSource(...args)),
+  assertAttachmentSource: vi.fn(async () => {}),
+  attachmentSourceChanged: () => new Error('Attachment source changed'),
+}));
 vi.mock('./messageIdentity.js', () => import('./testSupport/identityTestAdapter.js'));
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('./db.js', () => ({ query: vi.fn() }));

@@ -1,7 +1,9 @@
+@import "./components/GmailAttachmentChips.css";
+
 /* Layout overrides are scoped so changing presentation never changes mail behavior.
    !important is needed only where the native components supply inline geometry. */
-/* Default and comfortable share ordinary rows until attachment chips are available.
-   Minima, rather than fixed heights, keep larger fonts and native metadata usable. */
+/* Default adds cached attachment details where available. Minima, rather than
+   fixed heights, keep larger fonts and native metadata usable in every density. */
 html[data-mailflow-layout="gmail"] {
   --gmail-row-min-height: 40px;
   --gmail-row-padding-y: 4px;

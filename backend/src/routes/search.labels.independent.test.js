@@ -26,7 +26,10 @@ describe('independent native search access policy', () => {
   });
   it('ordinary token search retains existing read-mail metadata enrichment', async () => {
     const response = await request('subject:invoice'); expect(response.status).toBe(200);
-    const body = await response.json(); expect(body.messages).toEqual([{ id: 'mail', subject: 'invoice', nativeLabels: [{ name: 'Local decision' }] }]);
+    const body = await response.json(); expect(body.messages).toEqual([{ id: 'mail', subject: 'invoice', nativeLabels: [{ name: 'Local decision' }],
+      attachmentMetadata: { state: 'unavailable', scope: 'message', source: null, items: [], omittedCount: null,
+        providerComplete: false, inlineClassification: 'partial', sizeIsExact: false } }]);
+    expect(h.query).toHaveBeenCalledTimes(2);
     expect(body).not.toHaveProperty('labelIndex'); expect(h.hydrate).toHaveBeenCalledOnce();
   });
   it('preserves browser hydration and treats a quoted literal label string as ordinary text', async () => {

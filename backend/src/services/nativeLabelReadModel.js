@@ -1,3 +1,4 @@
+import { hydrateCachedAttachmentMetadata } from './messageAttachmentReadModel.js';
 // Native metadata reads never contact IMAP or the legacy folder-backed label API.
 import { query, withTransaction } from './db.js';
 import { LabelError } from './nativeLabelDefinitions.js';
@@ -190,7 +191,8 @@ export async function listNativeLabelMessages(input) {
     const last = rows.at(-1);
     const nextCursor = page.rows.length > limit ? Buffer.from(JSON.stringify({ v: 1, ...cursorScope,
       date: last.native_label_sort_date, entityId: last.canonical_id })).toString('base64url') : null;
-    const hydrated = await hydrateNativeLabels(scope.userId, rows, client.query.bind(client));
+    const hydrated = await hydrateCachedAttachmentMetadata(scope.userId,
+      await hydrateNativeLabels(scope.userId, rows, client.query.bind(client)), client.query.bind(client));
     const messages = hydrated.map(row => {
       const message = { ...row, locator_is_read: row.is_read, is_read: !row.native_label_unread };
       delete message.canonical_id;

@@ -86,7 +86,10 @@ describe('GET /api/search unified account scope', () => {
     for (const field of ['reply_to', 'delivery_addresses', 'thread_id', 'entity_id', 'storage_generation', 'uid_validity']) expect(sql).toContain(`m.${field}`);
     const { messages } = await response.json();
     expect(messages).toEqual([{ ...row, entityId: null, storageGeneration: generation, metadataVersion: null,
-      nativeLabelState: 'unavailable', nativeLabelScope: 'message', nativeLabels: null }]);
+      nativeLabelState: 'unavailable', nativeLabelScope: 'message', nativeLabels: null,
+      attachmentMetadata: { state: 'unavailable', scope: 'message', source: null, items: [], omittedCount: null,
+        providerComplete: false, inlineClassification: 'partial', sizeIsExact: false } }]);
+    expect(query).toHaveBeenCalledTimes(3);
     expect(query.mock.calls[2][0]).toContain('WITH requested AS');
     expect(query.mock.calls[2][1][0]).toBe('user-1');
     expect(JSON.parse(query.mock.calls[2][1][1])).toEqual([{ request_index: 0, id: row.id, account_id: accountId }]);

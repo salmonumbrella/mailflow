@@ -231,7 +231,7 @@ describe('forwardRuleMessage', () => {
     };
     input = {
       ruleId: 'rule-1',
-      message: { id: messageRow.id },
+      message: { ...messageRow, entity_id: 'original-entity', storage_generation: 'original-generation', uid_validity: '10' },
       account,
       imapManager,
       recipient: 'recipient@example.com',
@@ -338,6 +338,23 @@ describe('forwardRuleMessage', () => {
     expect(query).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps the original event source through reservation and body waits', async () => {
+    const original = { ...input.message };
+    query.mockImplementationOnce(async () => {
+      input.message.entity_id = 'replacement-entity';
+      return { rows: [{ id: 'delivery-1' }] };
+    }).mockResolvedValueOnce({ rows: [{ ...messageRow, entity_id: 'replacement-entity', body_text: null, body_html: null, attachments: storedAttachments }] })
+      .mockResolvedValueOnce({ rows: [] });
+    imapManager.fetchMessageBody.mockResolvedValue({ text: 'Later body', html: null, attachments: [] });
+    imapManager.fetchMultipleAttachments.mockImplementation(async (_account, _uid, _folder, _parts, options) => {
+      expect(options.expectedSource).toEqual(original);
+      throw Object.assign(new Error('Source changed'), { code: 'identity_source_changed' });
+    });
+    await expect(forwardRuleMessage(input)).rejects.toMatchObject({ code: 'identity_source_changed' });
+    expect(transport.sendMail).not.toHaveBeenCalled();
+    expect(query.mock.calls.at(-1)[0]).toContain('DELETE FROM inbox_rule_forwards');
+  });
+
   it('fetches only stored attachment parts once and preserves their metadata', async () => {
     const pdf = Buffer.from('pdfdata');
     const notes = Buffer.from('notes');
@@ -362,7 +379,8 @@ describe('forwardRuleMessage', () => {
       account,
       messageRow.uid,
       messageRow.folder,
-      storedAttachments
+      storedAttachments,
+      { expectedSource: input.message }
     );
     expect(transport.sendMail).toHaveBeenCalledWith(expect.objectContaining({
       attachments: [
@@ -415,7 +433,8 @@ describe('forwardRuleMessage', () => {
         account,
         messageRow.uid,
         messageRow.folder,
-        [storedAttachments[0]]
+        [storedAttachments[0]],
+        { expectedSource: input.message }
       );
       const mail = transport.sendMail.mock.calls[0][0];
       expect(mail.html).not.toContain('<script');
@@ -481,7 +500,8 @@ describe('forwardRuleMessage', () => {
       account,
       messageRow.uid,
       messageRow.folder,
-      [fetchedAttachment]
+      [fetchedAttachment],
+      { expectedSource: input.message }
     );
     expect(transport.sendMail).toHaveBeenCalledWith(expect.objectContaining({
       attachments: [{
@@ -518,7 +538,7 @@ describe('forwardRuleMessage', () => {
     await expect(forwardRuleMessage(input)).resolves.toBe('sent');
 
     expect(imapManager.fetchMultipleAttachments).toHaveBeenCalledWith(
-      account, messageRow.uid, messageRow.folder, [storedAttachments[0]]);
+      account, messageRow.uid, messageRow.folder, [storedAttachments[0]], { expectedSource: input.message });
     const mail = transport.sendMail.mock.calls[0][0];
     expect(mail.attachments.map(a => a.filename)).toEqual(['image-0.png', 'invoice.pdf']);
   });
@@ -864,7 +884,7 @@ describe('forwarding a stored body', () => {
       .mockResolvedValueOnce({ rows: [{ ...messageRow, body_html: stored }] })
       .mockResolvedValueOnce({ rows: [] });
     await expect(forwardRuleMessage({
-      ruleId: 'rule-1', message: { id: messageRow.id }, account,
+      ruleId: 'rule-1', message: { ...messageRow, entity_id: 'original-entity', storage_generation: 'original-generation', uid_validity: '10' }, account,
       imapManager: { fetchMessageBody: vi.fn(), fetchMultipleAttachments: vi.fn().mockResolvedValue(new Map()) },
       recipient: 'recipient@example.com',
     })).resolves.toBe('sent');

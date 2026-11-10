@@ -63,6 +63,18 @@ describe('CORS for the app, not for CardDAV', () => {
     expect(res.headers.get('access-control-allow-credentials')).toBe('true');
   });
 
+  it('permits the attachment source proof header for the configured split-origin app', async () => {
+    const res = await fetch(`${base}/api/mail/messages/example/attachments/2`, {
+      method: 'OPTIONS',
+      headers: { Origin: APP, 'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Headers': 'x-mailflow-message-source' },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe(APP);
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('access-control-allow-headers')).toBe('x-mailflow-message-source');
+  });
+
   it('still adds CORS headers to API responses', async () => {
     const res = await fetch(`${base}/api/anything`, { headers: { Origin: APP } });
     expect(res.headers.get('access-control-allow-origin')).toBe(APP);

@@ -2680,6 +2680,10 @@
       "action_forward": "Přeposlat na",
       "action_apply_native_label": "Použít štítek",
       "action_remove_native_label": "Odebrat štítek"
+    },
+    "attachments": {
+      "cachedDetails": "Přílohy uložené v mezipaměti pouze pro tuto zprávu; údaje mohou být neúplné.",
+      "someNotShown": "Další údaje o přílohách uložených v mezipaměti nejsou zobrazeny."
     }
   },
   "nativeLabelRules": {

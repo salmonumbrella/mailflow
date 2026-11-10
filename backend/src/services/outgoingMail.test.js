@@ -147,6 +147,19 @@ describe('resolveForwarded', () => {
     expect(fwd.messages).toEqual([expect.objectContaining({ filename: 'Spam.eml', contentType: 'message/rfc822', contentDisposition: 'attachment' })]);
   });
 
+  it('passes the original verified row into queued forwarded attachment reads', async () => {
+    const source = { id: MSG_ID, account_id: 'a1', uid: 9, folder: 'INBOX', entity_id: 'original-entity', storage_generation: 'original-generation', uid_validity: '10',
+      attachments: [{ part: '2', filename: 'original.pdf', size: 3 }] };
+    findOwnedMessages.mockResolvedValue([source]);
+    query.mockResolvedValue({ rows: [account] });
+    imapManager.fetchAttachment.mockRejectedValue(Object.assign(new Error('Source changed'), { code: 'identity_source_changed', status: 409 }));
+    await expect(resolveForwarded('u1', valid({ forwardedAttachments: [{ messageId: MSG_ID, part: '2' }] }))).rejects.toMatchObject({ status: 409 });
+    expect(imapManager.fetchAttachment).toHaveBeenCalledWith(account, 9, 'INBOX', '2', { expectedSource: source });
+    expect(findOwnedMessages).toHaveBeenCalledWith('u1', [MSG_ID], {
+      columns: 'm.id, m.uid, m.folder, m.attachments, m.account_id, m.entity_id, m.storage_generation, m.uid_validity', live: true,
+    });
+  });
+
   it('turns any fetch failure into a SendError with its status, or 500', async () => {
     findOwnedMessages.mockResolvedValue([]);
     await expect(resolveForwarded('u1', valid({ forwardedMessages: [MSG_ID] })))

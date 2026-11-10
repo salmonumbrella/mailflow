@@ -5,6 +5,7 @@ import { listMessageIdentity, listActionScopeKey, listActionRowsCurrent, listAct
 import { createNativeLabelFeed } from '../utils/nativeLabelFeed.js';
 import { labelViewKey, NATIVE_LABELS_CHANGED, nativeLabelActionsBlocked } from '../utils/nativeLabelNavigation.js';
 import NativeLabelChips from './NativeLabelChips.jsx';
+import GmailAttachmentChips from './GmailAttachmentChips.jsx';
 import GmailToolbar from './GmailToolbar.jsx';
 import { openGmailSenderFilter } from '../utils/gmailSenderFilter.js';
 import { quoteSearch } from '../utils/gmailSearch.js';
@@ -5268,6 +5269,7 @@ function GmailRowControls({ message, checked, onToggleSelect, onRangeSelect, onS
 function ThreadRow({ keyboardProps = {}, childKeyboardProps = () => ({}), onChildSelect, message, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onModifierSelect, onLongPress, onExplainSpam }) {
   const { t } = useTranslation();
   const gmailLayout = useStore(s => s.layout === 'gmail');
+  const gmailDensity = useStore(s => s.gmailDensity);
   const checkboxRow = gmailLayout && !isMobile;
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
@@ -5516,6 +5518,7 @@ function ThreadRow({ keyboardProps = {}, childKeyboardProps = () => ({}), onChil
               {message.snippet || ''}
             </div>
           )}
+          {gmailLayout && <GmailAttachmentChips message={message} density={gmailDensity} />}
         </div>
         {(hovered || (gmailLayout && focusWithin)) && hoverQuickActions && (
           <RowHoverActions
@@ -5594,6 +5597,7 @@ function ThreadRow({ keyboardProps = {}, childKeyboardProps = () => ({}), onChil
                 }}>
                   {msg.snippet || ''}
                 </div>)}
+                {gmailLayout && <GmailAttachmentChips message={msg} density={gmailDensity} />}
               </div>
               {gmailLayout && hoverQuickActions && (focusedChildId === msg.id || hoveredChildId === msg.id) && (
                 <RowHoverActions message={msg} isRead={msg.is_read} background="var(--bg-secondary)"
@@ -5611,6 +5615,7 @@ function ThreadRow({ keyboardProps = {}, childKeyboardProps = () => ({}), onChil
 function MessageRow({ keyboardProps = {}, message, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onModifierSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress, onExplainSpam }) {
   const { t } = useTranslation();
   const gmailLayout = useStore(s => s.layout === 'gmail');
+  const gmailDensity = useStore(s => s.gmailDensity);
   const checkboxRow = gmailLayout && !isMobile;
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
@@ -5870,6 +5875,7 @@ function MessageRow({ keyboardProps = {}, message, selected, lastViewed, isCheck
             </span>
           </div>
         )}
+        {gmailLayout && <GmailAttachmentChips message={message} density={gmailDensity} />}
         </div>
       </div>
 

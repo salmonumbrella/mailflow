@@ -1,3 +1,4 @@
+import { hydrateCachedAttachmentMetadata } from './messageAttachmentReadModel.js';
 import { hydrateNativeLabels } from './nativeLabelReadModel.js';
 import { currentSnoozeMessageSql } from './snoozeIdentity.js';
 import { query } from './db.js';
@@ -270,7 +271,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
     `, filterValues);
 
     return {
-      messages: await hydrateNativeLabels(userId, threadResult.rows),
+      messages: await hydrateCachedAttachmentMetadata(userId, await hydrateNativeLabels(userId, threadResult.rows)),
       total: threadCountResult.rows[0]?.total ?? 0,
       threaded: true,
       resolvedAccountId,
@@ -311,7 +312,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
   `, values);
 
   return {
-    messages: await hydrateNativeLabels(userId, result.rows),
+    messages: await hydrateCachedAttachmentMetadata(userId, await hydrateNativeLabels(userId, result.rows)),
     total,
     resolvedAccountId,
   };

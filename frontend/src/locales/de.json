@@ -2661,6 +2661,10 @@
       "action_forward": "Weiterleiten an",
       "action_apply_native_label": "Label anwenden",
       "action_remove_native_label": "Label entfernen"
+    },
+    "attachments": {
+      "cachedDetails": "Zwischengespeicherte Anhänge nur für diese Nachricht; Angaben können unvollständig sein.",
+      "someNotShown": "Weitere Angaben zu zwischengespeicherten Anhängen werden nicht angezeigt."
     }
   },
   "nativeLabelRules": {

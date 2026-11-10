@@ -290,7 +290,8 @@ export async function resolveForwarded(userId, input) {
       // forwardedAttachments array can't fan out into one DB round-trip per entry.
       const distinctMsgIds = [...new Set(forwardedAttachments.map(fa => fa.messageId))];
       const msgRows = await findOwnedMessages(userId, distinctMsgIds, {
-        columns: 'm.id, m.uid, m.folder, m.attachments, m.account_id',
+        columns: 'm.id, m.uid, m.folder, m.attachments, m.account_id, m.entity_id, m.storage_generation, m.uid_validity',
+        live: true,
       });
       const msgById = new Map(msgRows.map(m => [m.id, m]));
 
@@ -316,7 +317,7 @@ export async function resolveForwarded(userId, input) {
       // Load the owning accounts once, then fetch bodies with bounded concurrency so we never
       // open a burst of fresh IMAP connections (fetchAttachment opens a connection per call).
       const distinctAcctIds = [...new Set(fetchPlan.map(p => p.msg.account_id))];
-      const acctRows = await query('SELECT * FROM email_accounts WHERE id = ANY($1::uuid[])', [distinctAcctIds]);
+      const acctRows = await query('SELECT * FROM email_accounts WHERE id = ANY($1::uuid[]) AND user_id = $2 AND enabled = true', [distinctAcctIds, userId]);
       const acctById = new Map(acctRows.rows.map(a => [a.id, a]));
 
       const FWD_FETCH_CONCURRENCY = 4;
@@ -325,7 +326,7 @@ export async function resolveForwarded(userId, input) {
         const fetched = await Promise.all(batch.map(async ({ msg, att }) => {
           const acct = acctById.get(msg.account_id);
           if (!acct) throw new SendError(404, 'Account not found');
-          const buffer = await imapManager.fetchAttachment(acct, msg.uid, msg.folder, att.part);
+          const buffer = await imapManager.fetchAttachment(acct, msg.uid, msg.folder, att.part, { expectedSource: msg });
           if (!buffer) throw new SendError(502, `Could not fetch attachment: ${att.filename}`);
           return {
             filename: sanitizeHeaderValue(att.filename || 'attachment'),

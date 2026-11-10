@@ -2661,6 +2661,10 @@
       "action_forward": "Forward to",
       "action_apply_native_label": "Apply label",
       "action_remove_native_label": "Remove label"
+    },
+    "attachments": {
+      "cachedDetails": "Cached attachments for this message only; details may be incomplete.",
+      "someNotShown": "Additional cached attachment details are not shown."
     }
   },
   "nativeLabelRules": {

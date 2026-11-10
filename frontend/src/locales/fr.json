@@ -2661,6 +2661,10 @@
       "action_forward": "Transférer à",
       "action_apply_native_label": "Appliquer le libellé",
       "action_remove_native_label": "Retirer le libellé"
+    },
+    "attachments": {
+      "cachedDetails": "Pièces jointes en cache pour ce message uniquement ; les détails peuvent être incomplets.",
+      "someNotShown": "Des détails supplémentaires sur les pièces jointes en cache ne sont pas affichés."
     }
   },
   "nativeLabelRules": {

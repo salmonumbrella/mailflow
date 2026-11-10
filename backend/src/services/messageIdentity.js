@@ -125,10 +125,14 @@ export async function withAccountIdentity(account, write) {
   });
 }
 
-export async function assertMailboxIdentity(context, imapClient) {
+export function assertSelectedMailboxIdentity(context, imapClient) {
   if (selectedEpoch(context, imapClient) !== context.uidValidity) {
     throw identityError('identity_epoch_changed', 'The server mailbox epoch changed during the operation');
   }
+}
+
+export async function assertMailboxIdentity(context, imapClient) {
+  assertSelectedMailboxIdentity(context, imapClient);
   return withTransaction(client => assertContext(client, context));
 }
 export const validateMailboxIdentity = assertMailboxIdentity;

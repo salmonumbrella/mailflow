@@ -2661,6 +2661,10 @@
       "action_forward": "Encaminhar para",
       "action_apply_native_label": "Aplicar marcador",
       "action_remove_native_label": "Remover marcador"
+    },
+    "attachments": {
+      "cachedDetails": "Anexos em cache apenas desta mensagem; os detalhes podem estar incompletos.",
+      "someNotShown": "Detalhes adicionais dos anexos em cache não são exibidos."
     }
   },
   "nativeLabelRules": {

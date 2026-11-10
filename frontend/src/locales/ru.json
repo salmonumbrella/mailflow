@@ -2661,6 +2661,10 @@
       "action_forward": "Переслать на",
       "action_apply_native_label": "Применить ярлык",
       "action_remove_native_label": "Снять ярлык"
+    },
+    "attachments": {
+      "cachedDetails": "Кэшированные вложения только для этого сообщения; сведения могут быть неполными.",
+      "someNotShown": "Дополнительные сведения о кэшированных вложениях не показаны."
     }
   },
   "nativeLabelRules": {

@@ -2661,6 +2661,10 @@
       "action_forward": "다음으로 전달",
       "action_apply_native_label": "라벨 적용",
       "action_remove_native_label": "라벨 제거"
+    },
+    "attachments": {
+      "cachedDetails": "이 메시지의 캐시된 첨부파일만 표시되며, 세부 정보가 불완전할 수 있습니다.",
+      "someNotShown": "캐시된 첨부파일의 추가 세부 정보는 표시되지 않습니다."
     }
   },
   "nativeLabelRules": {

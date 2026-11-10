@@ -2661,6 +2661,10 @@
       "action_forward": "Inoltra a",
       "action_apply_native_label": "Applica etichetta",
       "action_remove_native_label": "Rimuovi etichetta"
+    },
+    "attachments": {
+      "cachedDetails": "Allegati nella cache solo per questo messaggio; i dettagli potrebbero essere incompleti.",
+      "someNotShown": "Ulteriori dettagli sugli allegati nella cache non sono mostrati."
     }
   },
   "nativeLabelRules": {

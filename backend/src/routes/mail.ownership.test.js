@@ -15,7 +15,8 @@ const imap = vi.hoisted(() => {
   return { fns, manager };
 });
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
-vi.mock('../services/messageIdentity.js', async () => ({
+vi.mock('../services/messageIdentity.js', async original => ({
+  ...await original(),
   ...await import('../services/testSupport/identityTestAdapter.js'),
   resolveCanonicalEntity: vi.fn(async (_tx, _scope, entityId) => entityId),
 }));
@@ -200,8 +201,8 @@ const LOOKUPS = {
   'GET /messages/:id': message_({ columns: MESSAGE_VIEW, live: true }),
   'GET /messages/:id/headers': message_({ columns: 'm.*, a.user_id' }),
   'GET /messages/:id/bcc': message_({ columns: 'm.account_id, m.uid, m.folder, m.message_id, m.bcc_addresses' }),
-  'GET /messages/:id/attachments.zip': message_({ columns: 'm.*, a.user_id' }),
-  'GET /messages/:id/attachments/:part': message_({ columns: 'm.*, a.user_id' }),
+  'GET /messages/:id/attachments.zip': message_({ columns: 'm.*, a.user_id', live: true, enabledAccount: true }),
+  'GET /messages/:id/attachments/:part': message_({ columns: 'm.*, a.user_id', live: true, enabledAccount: true }),
   'GET /messages/:id/image': message_({ columns: 'm.body_html' }),
   'GET /messages/:id/raw.eml': message_({ columns: 'm.id, m.uid, m.folder, m.subject, m.account_id, a.user_id' }),
   'PATCH /messages/:id/read': message_({ columns: WITH_SIBLINGS }),

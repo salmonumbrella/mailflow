@@ -2661,6 +2661,10 @@
       "action_forward": "转发至",
       "action_apply_native_label": "应用标签",
       "action_remove_native_label": "移除标签"
+    },
+    "attachments": {
+      "cachedDetails": "仅限此邮件的缓存附件；详细信息可能不完整。",
+      "someNotShown": "其他缓存附件详细信息未显示。"
     }
   },
   "nativeLabelRules": {

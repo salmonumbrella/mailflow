@@ -197,7 +197,7 @@ function forwardableHtml(html) {
   return html ? withoutDarkScheme(sanitizeEmail(withoutDarkScheme(html))) : html;
 }
 
-async function loadForwardContent({ row, account, imapManager }) {
+async function loadForwardContent({ row, account, imapManager, expectedSource }) {
   let text = row.body_text;
   let html = row.body_html;
   let fetchedParts = [];
@@ -255,7 +255,8 @@ async function loadForwardContent({ row, account, imapManager }) {
       account,
       row.uid,
       row.folder,
-      storedParts
+      storedParts,
+      { expectedSource }
     );
     fetchedAttachments = storedParts.map(attachment => {
       const content = buffers.get(attachment.part);
@@ -293,6 +294,7 @@ export async function forwardRuleMessage({
   recipient,
   beforeDispatch,
 }) {
+  const expectedSource = { ...message };
   const loopTokens = receivedLoopTokens(message);
   if (loopTokens.includes(loopToken(account))) {
     console.warn(
@@ -324,7 +326,7 @@ export async function forwardRuleMessage({
   let claimed = false;
   try {
     const rowResult = await query(
-      `SELECT id, account_id, uid, folder, subject, from_name, from_email,
+      `SELECT id, account_id, uid, folder, entity_id, storage_generation, uid_validity, subject, from_name, from_email,
               to_addresses, cc_addresses, date, body_text, body_html, attachments
        FROM messages
        WHERE id = $1 AND account_id = $2`,
@@ -335,7 +337,7 @@ export async function forwardRuleMessage({
     }
     const row = rowResult.rows[0];
 
-    const content = await loadForwardContent({ row, account, imapManager });
+    const content = await loadForwardContent({ row, account, imapManager, expectedSource });
     const mailOptions = buildForwardMessage({
       row,
       account,

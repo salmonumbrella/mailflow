@@ -1,0 +1,69 @@
+/* These are static cached details, not preview/download controls. */
+html[data-mailflow-layout="gmail"] .mailflow-gmail-attachment-chips {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 0 2px;
+  margin: 0;
+  list-style: none;
+  font: inherit;
+  line-height: 1.4;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-attachment-chip {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: min(200px, 100%);
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  box-sizing: border-box;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-attachment-icon {
+  display: inline-flex;
+  flex: 0 0 16px;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-attachment-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-attachment-overflow {
+  color: var(--text-secondary);
+  padding: 0 4px;
+}
+
+@media (min-width: 701px) {
+  @container mailflow-list (min-width: 540px) {
+    html[data-mailflow-layout="gmail"] .mailflow-row-content > .mailflow-gmail-attachment-chips,
+    html[data-mailflow-layout="gmail"] .mailflow-thread-message-content > .mailflow-gmail-attachment-chips {
+      grid-column: 2 / -1;
+      grid-row: 2;
+    }
+
+    html[data-mailflow-layout="gmail"] .mailflow-thread-message-content:not(:has(.mailflow-thread-message-preview)) > .mailflow-gmail-attachment-chips {
+      grid-column: 1 / -1;
+    }
+  }
+}

@@ -1,3 +1,5 @@
+import { assertSelectedMailboxIdentity } from './messageIdentity.js';
+import { captureAttachmentSource, assertAttachmentSource, attachmentSourceChanged } from './attachmentReadScope.js';
 import { captureRuleMembershipSourceInTransaction } from './nativeLabelMemberships.js';
 import { currentSnoozeMessageSql } from './snoozeIdentity.js';
 import { applyConfirmedMoveCache } from './messageMoveCache.js';
@@ -7676,68 +7678,56 @@ export class ImapManager {
     });
   }
 
-  async fetchAttachment(account, uid, folder, partNum) {
-    return withFreshClient(account, async (client) => {
-      const lock = await client.getMailboxLock(folder);
-      try {
-        let buffer = null;
-        const uidStr = String(uid);
-
-        for await (const msg of client.fetch(uidStr, { uid: true, bodyStructure: true, bodyParts: [partNum] }, { uid: true })) {
-          let encoding = 'base64';
-          if (msg.bodyStructure) {
-            const r = { textParts: [], attachments: [] };
-            walkStructure(msg.bodyStructure, r);
-            // Inline images the body never shows are listed at body time, not by this walk.
-            const att = r.attachments.find(a => a.part === partNum) || findPart(msg.bodyStructure, partNum);
-            if (att?.encoding) encoding = att.encoding;
-          }
-          const buf = msg.bodyParts?.get(partNum);
-          if (buf) {
-            buffer = decodeAttachmentBuffer(buf, encoding);
-          }
-        }
-        return buffer;
-      } finally {
-        lock.release();
-      }
-    });
+  async fetchAttachment(account, uid, folder, partNum, options = {}) {
+    const buffers = await ImapManager.prototype._fetchAttachmentParts.call(this, account, uid, folder, [{ part: partNum }], { ...options, includeEmpty: true });
+    return buffers.get(partNum) ?? null;
   }
 
-  // Fetch multiple attachment parts in a single IMAP round trip.
-  // parts: array of { part, encoding } (metadata from messages.attachments).
-  // Returns Map<partNum, Buffer> — missing or empty parts are omitted.
-  async fetchMultipleAttachments(account, uid, folder, parts) {
-    return withFreshClient(account, async (client) => {
+  // Missing or empty parts are omitted. Every returned part must belong to the
+  // captured physical message and its live MIME structure.
+  async fetchMultipleAttachments(account, uid, folder, parts, options = {}) {
+    return ImapManager.prototype._fetchAttachmentParts.call(this, account, uid, folder, parts, options);
+  }
+
+  async _fetchAttachmentParts(account, uid, folder, parts, { expectedSource, includeEmpty = false } = {}) {
+    const capturedAccount = { ...account };
+    const capturedParts = parts.map(part => ({ ...part }));
+    if (!capturedParts.length || capturedParts.some(({ part }) => typeof part !== 'string' || part.length > 100 || !/^\d+(?:\.\d+)*$/.test(part))) {
+      throw Object.assign(new Error('Invalid attachment part identifier'), { status: 400 });
+    }
+    const proof = await captureAttachmentSource(capturedAccount, folder, uid, expectedSource);
+    capturedAccount.storage_generation = proof.context.storageGeneration;
+    return withFreshClient(capturedAccount, async client => {
+      const selectedBefore = client.mailbox;
       const lock = await client.getMailboxLock(folder);
       try {
-        const uidStr = String(uid);
-        const partNums = parts.map(p => p.part);
+        if (selectedBefore && selectedBefore === client.mailbox) await refreshSelectedMailbox(client);
+        await assertMailboxIdentity(proof.context, client);
+        await assertAttachmentSource(capturedAccount, proof);
+        assertSelectedMailboxIdentity(proof.context, client);
+        const partNums = [...new Set(capturedParts.map(part => part.part))];
         const buffers = new Map();
-
-        for await (const msg of client.fetch(
-          uidStr,
-          { uid: true, bodyStructure: true, bodyParts: partNums },
-          { uid: true }
-        )) {
-          // Build a live encoding map from BODYSTRUCTURE (more reliable than stored metadata)
-          const liveEncodings = new Map();
-          if (msg.bodyStructure) {
-            const r = { textParts: [], attachments: [] };
-            walkStructure(msg.bodyStructure, r);
-            for (const att of r.attachments) liveEncodings.set(att.part, att.encoding);
-          }
-
-          if (msg.bodyParts) {
-            for (const [partNum, buf] of msg.bodyParts) {
-              if (!buf || buf.length === 0) continue;
-              const inputPart = parts.find(p => p.part === partNum);
-              const encoding = liveEncodings.get(partNum) || inputPart?.encoding || 'base64';
-              buffers.set(partNum, decodeAttachmentBuffer(buf, encoding));
-            }
+        let seen = false;
+        for await (const msg of client.fetch(String(uid), { uid: true, bodyStructure: true, bodyParts: partNums }, { uid: true })) {
+          if (seen || String(msg.uid) !== String(proof.expectedSource.uid)) throw attachmentSourceChanged();
+          seen = true;
+          const liveParts = { textParts: [], attachments: [] };
+          if (msg.bodyStructure) walkStructure(msg.bodyStructure, liveParts);
+          for (const partNum of partNums) {
+            const buf = msg.bodyParts?.get(partNum);
+            if (!buf || (!includeEmpty && buf.length === 0)) continue;
+            const livePart = liveParts.attachments.find(part => part.part === partNum) || findPart(msg.bodyStructure, partNum)
+              || (partNum === '1' && !msg.bodyStructure?.part && !msg.bodyStructure?.childNodes?.length ? msg.bodyStructure : null);
+            if (!livePart) throw Object.assign(new Error('The attachment MIME part changed. Refresh the message and try again.'), {
+              code: 'identity_attachment_changed', status: 409,
+            });
+            const encoding = livePart.encoding || capturedParts.find(part => part.part === partNum)?.encoding || 'base64';
+            buffers.set(partNum, decodeAttachmentBuffer(buf, encoding));
           }
         }
-
+        await assertMailboxIdentity(proof.context, client);
+        await assertAttachmentSource(capturedAccount, proof);
+        assertSelectedMailboxIdentity(proof.context, client);
         return buffers;
       } finally {
         lock.release();

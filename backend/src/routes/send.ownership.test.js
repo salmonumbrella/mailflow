@@ -118,18 +118,31 @@ describe('POST /api/mail/send ownership', () => {
   it('sends from the owner\'s account with the owner\'s forwarded attachment and message', async () => {
     const res = await send(OWNER, { forwardedAttachments: [{ messageId: MESSAGE_ID, part: '2' }], forwardedMessages: [MESSAGE_ID] });
     expect(res.status).toBe(200);
-    expect(imapManager.fetchAttachment).toHaveBeenCalledWith(account, 9, 'INBOX', '2');
+    expect(imapManager.fetchAttachment).toHaveBeenCalledWith(account, 9, 'INBOX', '2', { expectedSource: expect.objectContaining({ id: MESSAGE_ID, account_id: ACCOUNT_ID, uid: 9, folder: 'INBOX' }) });
     expect(imapManager.fetchRawMessage).toHaveBeenCalledWith(account, 9, 'INBOX');
     expect(sendMail).toHaveBeenCalledTimes(1);
     expect(findOwnedAccount).toHaveBeenCalledWith(OWNER, ACCOUNT_ID);
-    expect(findOwnedMessages).toHaveBeenCalledWith(OWNER, [MESSAGE_ID], { columns: 'm.id, m.uid, m.folder, m.attachments, m.account_id' });
+    expect(findOwnedMessages).toHaveBeenCalledWith(OWNER, [MESSAGE_ID], { columns: 'm.id, m.uid, m.folder, m.attachments, m.account_id, m.entity_id, m.storage_generation, m.uid_validity', live: true });
     expect(findOwnedMessages).toHaveBeenCalledWith(OWNER, [MESSAGE_ID], { columns: 'm.id, m.uid, m.folder, m.subject, m.account_id', live: true });
   });
 
-  it('refuses to forward a deleted message, but still forwards a deleted message\'s attachment', async () => {
+  it('forwards attachments from a live Trash row', async () => {
+    const originalFolder = message.folder;
+    message.folder = 'Trash';
+    try {
+      expect((await send(OWNER, { forwardedAttachments: [{ messageId: MESSAGE_ID, part: '2' }] })).status).toBe(200);
+      expect(imapManager.fetchAttachment).toHaveBeenCalledWith(account, 9, 'Trash', '2', {
+        expectedSource: expect.objectContaining({ id: MESSAGE_ID, folder: 'Trash' }),
+      });
+      expect(sendMail).toHaveBeenCalledOnce();
+    } finally { message.folder = originalFolder; }
+  });
+
+  it('refuses to forward a deleted message or its attachment', async () => {
     expect(await send(OWNER, { forwardedMessages: [DELETED_MESSAGE_ID] }))
       .toEqual({ status: 404, json: { error: 'Forwarded message not found' } });
     nothingFetchedOrSent();
-    expect((await send(OWNER, { forwardedAttachments: [{ messageId: DELETED_MESSAGE_ID, part: '2' }] })).status).toBe(200);
+    expect((await send(OWNER, { forwardedAttachments: [{ messageId: DELETED_MESSAGE_ID, part: '2' }] })).status).toBe(404);
+    nothingFetchedOrSent();
   });
 });

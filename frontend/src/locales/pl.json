@@ -2680,6 +2680,10 @@
       "action_forward": "Przekaż dalej do",
       "action_apply_native_label": "Zastosuj etykietę",
       "action_remove_native_label": "Usuń etykietę"
+    },
+    "attachments": {
+      "cachedDetails": "Załączniki zapisane w pamięci podręcznej tylko dla tej wiadomości; szczegóły mogą być niepełne.",
+      "someNotShown": "Dodatkowe szczegóły załączników zapisanych w pamięci podręcznej nie są wyświetlane."
     }
   },
   "nativeLabelRules": {

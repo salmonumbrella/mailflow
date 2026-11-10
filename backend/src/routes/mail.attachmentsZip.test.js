@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 // "Download all" streams every attachment of a message as one ZIP named after the subject.
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/messageIdentity.js', async original => ({ ...await original(), ...await import('../services/testSupport/identityTestAdapter.js') }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
@@ -35,13 +36,13 @@ describe('GET /api/mail/messages/:id/attachments.zip', () => {
     query.mockReset();
     imapManager.fetchMultipleAttachments.mockReset().mockResolvedValue(new Map([['2', Buffer.from('pdf')]]));
     row = {
-      id: MSG_ID, uid: '42', folder: 'INBOX', subject: 'Quarterly report', account_id: ACCOUNT_ID, user_id: 'user-1',
+      id: MSG_ID, storage_generation: 'gen-1', entity_id: 'entity-1', uid_validity: '10', uid: '42', folder: 'INBOX', subject: 'Quarterly report', account_id: ACCOUNT_ID, user_id: 'user-1',
       attachments: [{ part: '2', filename: 'report.pdf', size: 3, type: 'application/pdf' }],
     };
     query.mockImplementation((sql) => {
       if (sql.includes('FROM messages m')) return Promise.resolve({ rows: [row] });
       if (sql.includes('SELECT * FROM email_accounts')) {
-        return Promise.resolve({ rows: [{ id: ACCOUNT_ID, imap_host: 'imap.example.com' }] });
+        return Promise.resolve({ rows: [{ id: ACCOUNT_ID, user_id: 'user-1', storage_generation: 'gen-1', imap_host: 'imap.example.com' }] });
       }
       return Promise.resolve({ rows: [] });
     });
