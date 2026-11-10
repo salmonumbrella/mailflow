@@ -1,5 +1,8 @@
+import { createPortal } from 'react-dom';
 import { Fragment, useEffect, useLayoutEffect, useRef, useCallback, useMemo, useState } from 'react';
 import AccountMark from './AccountMark.jsx';
+import SuperhumanMessageRow from './SuperhumanMessageRow.jsx';
+import SuperhumanListHeader from './SuperhumanListHeader.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
 import { api } from '../utils/api.js';
@@ -33,7 +36,7 @@ import { formatDate, formatDateTime, formatSnoozeUntil } from '../utils/formatDa
 import { SNOOZED_FOLDER, unsnooze, changeSnooze, refreshCounts } from '../utils/snoozeActions.js';
 import { advanceSelectionAfterRemoval, registerRowOpener } from '../utils/listSelection.js';
 import { pickMessageReplyAlias, resolveReplyRecipients, openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
-import { selectedMessage, markMessageUnread } from '../utils/messageHotkeys.js';
+import { topOpenMessageWindow, selectedMessage, markMessageUnread, focusedListMessage } from '../utils/messageHotkeys.js';
 import { cancelScheduledMarkRead, cancelScheduledMarkReadFor, scheduleMarkReadTimer } from '../utils/markRead.js';
 import { saveSenderCategory } from '../utils/senderCategory.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
@@ -65,6 +68,12 @@ import {
 } from '../utils/threadedArchive.js';
 import { createUndoableCommit, holdUndoable, releaseUndoable, UNDO_COMMIT_DELAY_MS } from '../utils/undoableAction.js';
 import { resolveConversationSelection, selectListedMessage } from '../utils/conversation.js';
+
+function ContextMenuSurface({ portal, children }) {
+  const { t } = useTranslation();
+  return portal ? createPortal(<div role="dialog" aria-modal="true"
+    aria-label={t('message.more', 'Message actions')} data-mailflow-menu="">{children}</div>, document.body) : children;
+}
 
 // Folder icon for move picker
 function FolderIcon({ specialUse, size = 13 }) {
@@ -166,7 +175,7 @@ function MailboxList() {
     folders, favoriteFolders, recentFolders, addFavoriteFolder, removeFavoriteFolder, setSelectedAccount,
     categorizationEnabled, categoryCounts, categoryTotals, setCategoryCounts, adjustCategoryCount,
     markReadBehavior, markReadDelay,
-    searchAllFolders,
+    searchAllFolders, activeSavedSplitId, user, isLocked,
     activeGtdTab, setActiveGtdTab, gtdSections, enabledPlugins,
     openMessageWindow,
   } = useStore();
@@ -179,6 +188,8 @@ function MailboxList() {
   const selectedAcct = useStore(selectSelectedMessageAccountId);
 
   const isMobile = useMobile();
+  const isSuperhuman = layout === 'superhuman' && !isMobile;
+  const listFocusedMessageId = useStore(s => s.listFocusedMessageId);
   // Auto-spam explain modal target (opened from the badge on a row).
   const [spamExplainMessageId, setSpamExplainMessageId] = useState(null);
   const isUnified = selectedAccountId === null;
@@ -200,7 +211,7 @@ function MailboxList() {
   // Search is scoped to the current folder unless we're in the unified view or the
   // user toggled "search all folders". An in: operator in the query overrides this
   // server-side. undefined = search all folders.
-  const searchFolder = (!isUnified && !searchAllFolders) ? selectedFolder : undefined;
+  const searchFolder = activeSavedSplitId ? 'INBOX' : (!isUnified && !searchAllFolders) ? selectedFolder : undefined;
   const searchPageSize = Math.max(1, Math.min(Number(pageSize) || 50, 200));
   const undoableNotifications = notifications.filter(n => n.onUndo);
 
@@ -222,6 +233,9 @@ function MailboxList() {
   }, []);
 
   const [unreadOnly, setUnreadOnly] = useState(false);
+  const [listLoadError, setListLoadError] = useState(null);
+  const [listReloadToken, setListReloadToken] = useState(0);
+  const listFocusIndexRef = useRef(0);
   const [activeCategory, setActiveCategory] = useState('primary');
   // The category tab and unread filter are this list's own state; the store keys an Undo by them
   // too, so a message goes back only into the tab it left (#630).
@@ -327,6 +341,7 @@ function MailboxList() {
     selectedAccountId,
     selectedFolder,
     searchQuery,
+    activeSavedSplitId,
     threadedView,
     unreadOnly,
     activeCategory,
@@ -465,6 +480,7 @@ function MailboxList() {
       if (!accountsReady) return;
       listGenRef.current += 1;
       setLoadingMessages(true);
+      setListLoadError(null);
       setMessagesOffset(0);
       setHasMoreMessages(true);
       setCurrentPage(1);
@@ -510,6 +526,7 @@ function MailboxList() {
         );
       } catch (err) {
         console.error('Failed to load messages:', err);
+        if (!cancelled) setListLoadError(err.message);
         setFolderSyncing(false);
       } finally {
         if (!cancelled) setLoadingMessages(false);
@@ -517,7 +534,7 @@ function MailboxList() {
     };
     run();
     return () => { cancelled = true; };
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, listReloadToken, threadedView, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Load next page (called by scroll or button)
   const loadMore = useCallback(async () => {
@@ -591,7 +608,13 @@ function MailboxList() {
     const handler = () => {
       // Search results are their own list. The refresh is held, not dropped: clearing the search
       // hands it over (below), or the folder would come back as it was before the search.
-      if (searchQuery.trim()) { trailingRefreshRef.current.request(true); return; }
+      if (searchQuery.trim()) {
+        trailingRefreshRef.current.request(true);
+        // A saved split is a live inbox, unlike a deliberate ad-hoc search snapshot.
+        // Refresh its rows as well as its count when synced mail changes.
+        if (useStore.getState().activeSavedSplitId) setSearchReloadToken(token => token + 1);
+        return;
+      }
       if (trailingRefreshRef.current.request(useStore.getState().loadingMessages)) {
         const delayMs = Math.max(0, recentMessageOpenUntilRef.current - Date.now());
         clearTimeout(deferredRefreshTimerRef.current);
@@ -602,9 +625,14 @@ function MailboxList() {
         }
       }
     };
+    const onCountsRefresh = () => {
+      if (useStore.getState().activeSavedSplitId) setSearchReloadToken(token => token + 1);
+    };
     window.addEventListener('mailflow:refresh', handler);
+    window.addEventListener('mailflow:counts_refresh', onCountsRefresh);
     return () => {
       window.removeEventListener('mailflow:refresh', handler);
+      window.removeEventListener('mailflow:counts_refresh', onCountsRefresh);
       clearTimeout(deferredRefreshTimerRef.current);
     };
   }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
@@ -638,7 +666,7 @@ function MailboxList() {
     searchTimer.current = setTimeout(async () => {
       try {
         const data = await api.search(searchQuery, selectedAccountId || undefined, { offset: 0, limit: searchPageSize, folder: searchFolder });
-        if (searchSeq.current !== seq) return;
+        if (searchSeq.current !== seq || useStore.getState().user?.id !== user?.id || useStore.getState().isLocked) return;
         searchFetchedOffsetRef.current = data.messages.length;
         setSearchResults(applyReadGuard(data.messages));
         setSearchHasMore(data.messages.length === searchPageSize);
@@ -656,8 +684,8 @@ function MailboxList() {
         if (searchSeq.current === seq) setIsSearching(false);
       }
     }, 300);
-    return () => clearTimeout(searchTimer.current);
-  }, [searchQuery, selectedAccountId, searchFolder, searchPageSize, searchReloadToken, unifiedInboxAccountKey, applyReadGuard, setIsSearching, setSearchResults]);
+    return () => { clearTimeout(searchTimer.current); searchSeq.current += 1; };
+  }, [searchQuery, user?.id, isLocked, activeSavedSplitId, selectedAccountId, searchFolder, searchPageSize, searchReloadToken, unifiedInboxAccountKey, applyReadGuard, setIsSearching, setSearchResults]);
 
   // Re-run an active search (and refresh the folder view) after inbox rules run, since
   // rules can move messages out of the searched folder and a search snapshot would
@@ -1459,6 +1487,10 @@ function MailboxList() {
     lastSelectIdxRef.current = -1;
   }, []);
 
+  useEffect(() => {
+    if (isSuperhuman && selectedMessageId) clearSelection();
+  }, [isSuperhuman, selectedMessageId, clearSelection]);
+
   // Derived from store — must be declared before callbacks that use it in dependency arrays
   const displayMessages = searchQuery.trim() ? searchResults : messages;
 
@@ -1484,6 +1516,17 @@ function MailboxList() {
   })();
   // Keep scRef in sync so scheduleDelete can read displayMessages without a stale closure
   scRef.current.displayMessages = displayMessages;
+  scRef.current.isSuperhuman = isSuperhuman;
+  useEffect(() => {
+    if (!isSuperhuman || selectedMessageId || loadingMessages) return;
+    const index = displayMessages.findIndex(message => message.id === listFocusedMessageId);
+    if (index >= 0) listFocusIndexRef.current = index;
+    else {
+      const nextIndex = listFocusedMessageId == null ? 0 : Math.min(listFocusIndexRef.current, displayMessages.length - 1);
+      const nextId = displayMessages[nextIndex]?.id ?? null;
+      if (nextId !== listFocusedMessageId) useStore.setState({ listFocusedMessageId: nextId });
+    }
+  }, [isSuperhuman, selectedMessageId, loadingMessages, displayMessages, listFocusedMessageId]);
   // Same reason for the drag source: dragstart is synchronous and handleRowDragStart is
   // registered once ([] deps), so it reads the thread predicate and the fetch context from
   // here rather than closing over values that would be stale the moment the folder changes.
@@ -2012,10 +2055,36 @@ function MailboxList() {
   useEffect(() => { archiveVisibleMessageRef.current = archiveVisibleMessage; }, [archiveVisibleMessage]);
   useEffect(() => { scheduleDeleteRef.current = scheduleDelete;   }, [scheduleDelete]);
 
+  scRef.current.toggleRead = (message) => (isThreadListRow(message) ? handleThreadMarkRead : handleMarkRead)({ stopPropagation() {} }, message);
+  scRef.current.toggleStar = message => handleStar({ stopPropagation() {} }, message);
+
   // Subscribe to keyboard shortcut actions that belong to the message list.
   // Registered once ([] deps); all live state is read through scRef/bulkDeleteRef/bulkArchiveRef.
   useEffect(() => {
     const getState = () => useStore.getState();
+    let mounted = true;
+    let composeRequest = 0;
+    const pendingComposes = new Set();
+    const startCompose = (state, message, build) => {
+      const request = ++composeRequest;
+      let cancelled = false;
+      const valid = live => mounted && request === composeRequest && !live.isLocked
+        && live.user?.id === state.user?.id
+        && live.selectedAccountId === state.selectedAccountId && live.selectedFolder === state.selectedFolder
+        && live.searchQuery === state.searchQuery && live.messagesRefreshToken === state.messagesRefreshToken
+        && live.layout === state.layout && live.composeSession === state.composeSession
+        && live.composing === state.composing && live.showContacts === state.showContacts && live.showAdmin === state.showAdmin
+        && live.selectedMessageId === state.selectedMessageId && live.listFocusedMessageId === state.listFocusedMessageId
+        && selectedMessage(live)?.id === message.id;
+      const unsubscribe = useStore.subscribe(live => { if (!valid(live)) cancelled = true; });
+      pendingComposes.add(unsubscribe);
+      void Promise.resolve(build(data => {
+        if (!cancelled && valid(getState())) return state.openCompose(data);
+        return false;
+      })).catch(error => {
+        console.error('Failed to prepare message composer:', error);
+      }).finally(() => { unsubscribe(); pendingComposes.delete(unsubscribe); });
+    };
 
     const markRead = (msg) => {
       if (msg.is_read) return;
@@ -2045,7 +2114,21 @@ function MailboxList() {
       }
     };
 
+    const focusRow = direction => {
+      const state = getState();
+      if (!scRef.current.isSuperhuman || state.selectedMessageId) return false;
+      const rows = scRef.current.displayMessages;
+      if (!rows.length) return true;
+      const index = rows.findIndex(row => row.id === state.listFocusedMessageId);
+      const next = index < 0 ? (direction > 0 ? 0 : rows.length - 1) : (index + direction + rows.length) % rows.length;
+      useStore.setState({ listFocusedMessageId: rows[next].id });
+      const row = [...(listRef.current?.querySelectorAll('[data-msgid]') || [])].find(el => el.dataset.msgid === String(rows[next].id));
+      row?.scrollIntoView({ block: 'nearest' });
+      return true;
+    };
+
     const onNext = () => {
+      if (focusRow(1)) return;
       const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       if (!pool.length) return;
@@ -2056,6 +2139,7 @@ function MailboxList() {
     };
 
     const onPrev = () => {
+      if (focusRow(-1)) return;
       const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       if (!pool.length) return;
@@ -2066,13 +2150,23 @@ function MailboxList() {
     };
 
     const onOpen = () => {
+      if (scRef.current.isSuperhuman) {
+        const state = getState();
+        if (state.selectedMessageId) shortcutBus.emit('reply');
+        else {
+          const focused = focusedListMessage(state);
+          if (focused) rowOpenerRef.current?.(focused);
+        }
+        return;
+      }
       const { messages, selectedMessageId } = getState();
       if (selectedMessageId || !messages.length) return;
       selectListedMessage(useStore, messages[0].id);
     };
 
     const onSelect = () => {
-      const { selectedMessageId } = getState();
+      const state = getState();
+      const selectedMessageId = state.selectedMessageId ?? focusedListMessage(state)?.id;
       if (!selectedMessageId) return;
       scRef.current.setSelectedIds(prev => {
         const next = new Set(prev);
@@ -2085,10 +2179,12 @@ function MailboxList() {
     const onArchive = () => {
       const { messages, searchResults, searchQuery, selectedMessageId, threadMessages, selectedAccountId, addNotification } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
-      const ids = [...scRef.current.selectedIds];
+      const ids = scRef.current.isSuperhuman && selectedMessageId ? [] : [...scRef.current.selectedIds];
       if (ids.length > 0) {
         const msgs = pool.filter(m => ids.includes(m.id));
         bulkArchiveRef.current(ids, msgs);
+      } else if (focusedListMessage(getState())) {
+        contextActionRef.current('archive', focusedListMessage(getState()));
       } else if (selectedMessageId) {
         const msg = findVisibleArchiveMessage(pool, selectedMessageId, threadMessages);
         if (!msg) return;
@@ -2115,10 +2211,12 @@ function MailboxList() {
     const onDelete = () => {
       const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
-      const ids = [...scRef.current.selectedIds];
+      const ids = scRef.current.isSuperhuman && selectedMessageId ? [] : [...scRef.current.selectedIds];
       if (ids.length > 0) {
         const msgs = pool.filter(m => ids.includes(m.id));
         bulkDeleteRef.current(ids, msgs);
+      } else if (focusedListMessage(getState())) {
+        scheduleDeleteRef.current(focusedListMessage(getState()));
       } else if (selectedMessageId) {
         const msg = pool.find(m => m.id === selectedMessageId);
         if (!msg) return;
@@ -2127,9 +2225,12 @@ function MailboxList() {
     };
 
     const onToggleRead = () => {
-      const { messages, selectedMessageId, updateMessage, decrementUnread, incrementUnread, adjustCategoryCount } = getState();
-      if (!selectedMessageId) return;
-      const msg = messages.find(m => m.id === selectedMessageId);
+      const focused = focusedListMessage(getState());
+      if (focused) { scRef.current.toggleRead(focused); return; }
+      const state = getState();
+      const { selectedMessageId, updateMessage, decrementUnread, incrementUnread, adjustCategoryCount } = state;
+      if (!selectedMessageId || topOpenMessageWindow(state)) return;
+      const msg = selectedMessage(state);
       if (!msg) return;
       cancelScheduledMarkReadFor(msg.id);
       const newRead = !msg.is_read;
@@ -2178,23 +2279,53 @@ function MailboxList() {
     const onForward = () => {
       const state = getState();
       const message = selectedMessage(state);
-      if (message) void openForwardFromMessage(message, {
-        openCompose: state.openCompose, getMessageBody: api.getMessageBody,
-      });
+      if (message) startCompose(state, message, openCompose => openForwardFromMessage(message, {
+        openCompose, getMessageBody: api.getMessageBody,
+      }));
     };
 
     const onReplyAllFromSelection = () => {
       const state = getState();
       const message = selectedMessage(state);
-      if (message) void openReplyFromMessage(message, {
-        accounts: state.accounts, folders: state.folders, openCompose: state.openCompose,
+      if (message) startCompose(state, message, openCompose => openReplyFromMessage(message, {
+        accounts: state.accounts, folders: state.folders, openCompose,
         getMessageBody: api.getMessageBody, replyAll: true,
-      });
+      }));
     };
 
+    const onFocusedReply = replyAll => {
+      const state = getState();
+      const message = focusedListMessage(state);
+      if (message) startCompose(state, message, openCompose => openReplyFromMessage(message, {
+        accounts: state.accounts, folders: state.folders, openCompose,
+        getMessageBody: api.getMessageBody, replyAll,
+      }));
+    };
+    const onReply = () => onFocusedReply(false);
+    const onReplyAll = () => onFocusedReply(true);
+    const onToggleStar = () => {
+      const message = focusedListMessage(getState());
+      if (message) scRef.current.toggleStar(message);
+    };
+    const openRowPicker = kind => {
+      const state = getState();
+      const message = selectedMessage(state);
+      if (!message || (!state.selectedMessageId && !focusedListMessage(state))) return;
+      const rect = listRef.current?.getBoundingClientRect();
+      setContextMenu({ x: rect?.left + 44 || 160, y: 100, message, [kind]: true });
+    };
+    const onSnooze = () => openRowPicker('defaultSnoozeView');
+    const onMoveMessage = () => openRowPicker('defaultMoveView');
+
     const onFocusSearch = () => {
+      // MailApp owns leaving the full reader and its history entry, then re-emits this action.
+      if (scRef.current.isSuperhuman && getState().selectedMessageId) return;
       searchInputRef.current?.focus();
       searchInputRef.current?.select();
+    };
+    const onClearBulkSelection = () => {
+      scRef.current.selectedIds = new Set();
+      clearSelection();
     };
 
     // #449: Ctrl/Cmd+Z fires the newest still-pending undo — the same onUndo the visible
@@ -2224,10 +2355,19 @@ function MailboxList() {
     shortcutBus.on('markUnread',    onMarkUnread);
     shortcutBus.on('forward',       onForward);
     shortcutBus.on('replyAllFromSelection', onReplyAllFromSelection);
+    shortcutBus.on('reply', onReply);
+    shortcutBus.on('replyAll', onReplyAll);
+    shortcutBus.on('toggleStar', onToggleStar);
+    shortcutBus.on('snooze', onSnooze);
+    shortcutBus.on('moveMessage', onMoveMessage);
+    shortcutBus.on('clearBulkSelection', onClearBulkSelection);
     shortcutBus.on('focusSearch',   onFocusSearch);
     shortcutBus.on('undoAction',    onUndoAction);
 
     return () => {
+      mounted = false;
+      pendingComposes.forEach(unsubscribe => unsubscribe());
+      pendingComposes.clear();
       shortcutBus.off('nextMessage',   onNext);
       shortcutBus.off('prevMessage',   onPrev);
       shortcutBus.off('openMessage',   onOpen);
@@ -2238,10 +2378,16 @@ function MailboxList() {
       shortcutBus.off('markUnread',    onMarkUnread);
       shortcutBus.off('forward',       onForward);
       shortcutBus.off('replyAllFromSelection', onReplyAllFromSelection);
+      shortcutBus.off('reply', onReply);
+      shortcutBus.off('replyAll', onReplyAll);
+      shortcutBus.off('toggleStar', onToggleStar);
+      shortcutBus.off('snooze', onSnooze);
+      shortcutBus.off('moveMessage', onMoveMessage);
+      shortcutBus.off('clearBulkSelection', onClearBulkSelection);
       shortcutBus.off('focusSearch',   onFocusSearch);
       shortcutBus.off('undoAction',    onUndoAction);
     };
-  }, []);
+  }, [clearSelection]);
 
   // Scroll the selected message row into view whenever selection changes.
   // block:'nearest' is a no-op when the row is already visible, so mouse clicks don't cause jumps.
@@ -2806,8 +2952,12 @@ function MailboxList() {
   const bulkMoveFoldersEmpty = movePickerFoldersEmpty(bulkMoveSections, pickerFolders);
   const closeBulkPickerAfterAction = () => { setShowFolderPicker(false); clearSelection(); };
 
+  const ThreadListRow = isSuperhuman ? SuperhumanMessageRow : ThreadRow;
+  const FlatListRow = isSuperhuman ? SuperhumanMessageRow : MessageRow;
+  const highlightedId = isSuperhuman && !selectedMessageId ? listFocusedMessageId : selectedMessageId;
+
   return (
-    <div style={{
+    <div className={isSuperhuman ? 'sh-mail-list' : undefined} style={{
       width: isMobile || isColumn || listFirst ? '100%' : 'var(--list-width)',
       minWidth: isMobile ? undefined : (isColumn ? undefined : 180),
       flex: isMobile ? 1 : (isColumn ? '0 0 42%' : undefined),
@@ -2978,8 +3128,25 @@ function MailboxList() {
         </div>
       )}
 
+      {isSuperhuman && <SuperhumanListHeader
+        label={label}
+        count={searchQuery.trim() ? `${searchResults.length}${searchHasMore ? '+' : ''}` : filteredCount || (isSnoozedView && isUnified) ? messagesTotal : !headerCountKnown ? '—' : `${headerCountStale ? '~' : ''}${headerServerTotal}`}
+        countTitle={searchQuery.trim() ? 'Loaded matching messages; more may be available' : filteredCount ? 'Cached results matching this filter' : !headerCountKnown ? 'Mailbox count not yet available' : headerCountStale ? 'Last observed mailbox count; awaiting server refresh' : 'Messages reported by the mail server'}
+        categories={categorizationActive && selectedFolder === 'INBOX' ? ['primary', 'newsletter', 'promotion', 'automated', 'social'].map(key => ({
+          key, label: t(`messageList.categories.${key}`), unread: categoryCounts[key] || 0,
+          total: Object.keys(categoryTotals).length ? categoryTotals[key] || 0 : null,
+        })) : []}
+        activeCategory={activeGtdTab ? null : activeCategory}
+        onCategory={category => { setSearchQuery(''); setActiveGtdTab(null); setActiveCategory(category); }}
+        searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchInputRef={searchInputRef}
+        syncing={syncing} onSync={handleSync} syncTitle={selectedAccountId ? t('messageList.syncAccount') : t('messageList.syncAll')}
+        unreadOnly={unreadOnly} onToggleUnread={() => setUnreadOnly(value => !value)}
+        selectionMode={selectionMode} onToggleSelection={() => selectionMode ? clearSelection() : setSelectionModeActive(true)}
+        layout={layout} onLayout={setLayout} pageSize={pageSize} onPageSize={setPageSize}
+        sortable={sortable} accountId={selectedAccountId} folder={selectedFolder}
+      />}
       {/* ── Desktop header ──────────────────────────────────────────────── */}
-      {!isMobile && <div style={{
+      {!isMobile && !isSuperhuman && <div style={{
         padding: '14px 16px 10px', borderBottom: '1px solid var(--border-subtle)',
         boxShadow: listScrolled ? '0 1px 10px rgba(0,0,0,0.2)' : 'none',
         transition: 'box-shadow 0.2s ease',
@@ -3450,7 +3617,7 @@ function MailboxList() {
       )}
 
       {/* Category + GTD tabs — shown in INBOX when categorization and/or GTD is active */}
-      {(categorizationActive || gtdActive) && selectedFolder === 'INBOX' && !searchQuery.trim() && (
+      {((categorizationActive && !isSuperhuman) || gtdActive) && selectedFolder === 'INBOX' && !searchQuery.trim() && (
         <div style={{ position: 'relative', flexShrink: 0, borderBottom: '1px solid var(--border-subtle)' }}>
           {!isMobile && catScrollEdges.left && (
             <button
@@ -3474,7 +3641,7 @@ function MailboxList() {
               background: 'var(--bg-secondary)',
             }}
           >
-            {categorizationActive && ['primary', 'newsletter', 'promotion', 'automated', 'social'].map(cat => {
+            {categorizationActive && !isSuperhuman && ['primary', 'newsletter', 'promotion', 'automated', 'social'].map(cat => {
               const unread = categoryCounts[cat] || 0;
               const total = categoryTotals[cat] || 0;
               const isActive = activeCategory === cat && !activeGtdTab;
@@ -3613,6 +3780,9 @@ function MailboxList() {
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
         <div
           ref={listRef}
+          className={isSuperhuman ? 'sh-mail-scroll' : undefined}
+          role={isSuperhuman ? 'list' : undefined}
+          aria-label={isSuperhuman ? label : undefined}
           onScroll={(e) => { hoverPrefetch.onScroll(); handleScroll(e); }}
           onKeyDown={handleListKeyDown}
           onPointerMove={hoverPrefetch.onPointerMove}
@@ -3729,7 +3899,15 @@ function MailboxList() {
           </div>
         )}
 
-        {loadingMessages && displayMessages.length === 0 && (
+        {isSuperhuman && listLoadError && !searchQuery.trim() && <div role="alert" className="sh-list-error">
+          <span>{t('messageList.loadFailed', 'Could not load messages.')} {listLoadError}</span>
+          <button type="button" onClick={() => setListReloadToken(token => token + 1)}>{t('common.retry')}</button>
+        </div>}
+        {loadingMessages && displayMessages.length === 0 && (isSuperhuman ? <div className="sh-list-loading" role="status" aria-label={t('common.loading')}>
+          {Array.from({ length: 9 }, (_, index) => <div className="sh-list-loading-row" key={index} aria-hidden="true" style={{ opacity: 1 - index * .08 }}>
+            <div className="skeleton-line" /><div className="skeleton-line" /><div className="skeleton-line" />
+          </div>)}
+        </div> : (
           <div>
             {Array.from({ length: 7 }).map((_, i) => (
               <div key={i} style={{
@@ -3746,9 +3924,9 @@ function MailboxList() {
               </div>
             ))}
           </div>
-        )}
+        ))}
 
-        {!loadingMessages && displayMessages.length === 0 && (
+        {!loadingMessages && displayMessages.length === 0 && !(isSuperhuman && listLoadError && !searchQuery.trim()) && (
           <EmptyState
             folderSyncing={folderSyncing}
             searchQuery={searchQuery}
@@ -3768,7 +3946,7 @@ function MailboxList() {
 
         {/* ── Bulk-action toolbar ───────────────────────────── */}
         {selectionMode && (
-          <div style={{
+          <div className={isSuperhuman ? 'sh-list-bulk' : undefined} style={{
             position: 'sticky', top: 0, zIndex: 10,
             display: 'flex', alignItems: 'center', gap: 6,
             padding: '7px 10px',
@@ -4087,13 +4265,14 @@ function MailboxList() {
             const swipeLeftAction = swipeActions?.left || 'archive';
             const swipeRightAction = swipeActions?.right || 'markRead';
             return (
-              <ThreadRow
+              <ThreadListRow
                 key={tid}
+                onHighlight={isSuperhuman ? id => useStore.setState({ listFocusedMessageId: id }) : undefined}
                 message={message}
                 isExpanded={expandedThreadId === tid}
                 threadMsgs={threadMessages[tid] || null}
                 isLoadingThread={loadingThread === tid}
-                selectedMessageId={selectedMessageId}
+                selectedMessageId={highlightedId}
                 selectedMid={selectedMid}
                 selectedAcct={selectedAcct}
                 lastViewedMessageId={lastViewedMessageId}
@@ -4138,10 +4317,11 @@ function MailboxList() {
             const swipeLeftAction = swipeActions?.left || 'archive';
             const swipeRightAction = swipeActions?.right || 'markRead';
             return (
-              <MessageRow
+              <FlatListRow
                 key={message.id}
+                onHighlight={isSuperhuman ? id => useStore.setState({ listFocusedMessageId: id }) : undefined}
                 message={message}
-                selected={isSelectedRow(message, selectedMessageId, selectedMid, selectedAcct)}
+                selected={isSelectedRow(message, highlightedId, selectedMid, selectedAcct)}
                 lastViewed={lastViewedMessageId === message.id && selectedMessageId !== message.id}
                 isChecked={selectedIds.has(message.id)}
                 selectionMode={selectionMode}
@@ -4181,7 +4361,10 @@ function MailboxList() {
         )}
 
         {contextMenu && (
+          <ContextMenuSurface portal={isSuperhuman}>
           <ContextMenu
+            key={isSuperhuman ? `${contextMenu.message.id}:${contextMenu.defaultMoveView ? 'move' : contextMenu.defaultSnoozeView ? 'snooze' : 'main'}` : undefined}
+            keyboardNavigation={isSuperhuman}
             x={contextMenu.x}
             y={contextMenu.y}
             message={contextMenu.message}
@@ -4190,6 +4373,7 @@ function MailboxList() {
             onClose={() => setContextMenu(null)}
             onAction={(action, data) => handleContextAction(action, contextMenu.message, data)}
           />
+          </ContextMenuSurface>
         )}
 
         {spamExplainMessageId && (

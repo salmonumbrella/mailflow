@@ -1,12 +1,13 @@
+import { selectedMuteMessage } from './mutedThreads.js';
 import { canDispatchHoveredGtdShortcut } from './gtdHoveredRow.js';
 import { resolveGtdHotkeyTarget } from './gtdHotkeys.js';
 import { selectedPickerMessage } from './labelPicker.js';
-import { topOpenMessageWindow } from './messageHotkeys.js';
+import { topOpenMessageWindow, focusedListMessage } from './messageHotkeys.js';
 
 const SELECTED_ACTIONS = new Set([
   'markUnread', 'forward', 'replyAllFromSelection', 'unsubscribe',
   'loadRemoteImages', 'openLabelPicker', 'reply', 'replyAll',
-  'toggleStar', 'printMessage', 'toggleRead', 'selectMessage',
+  'toggleStar', 'printMessage', 'toggleRead', 'selectMessage', 'snooze', 'moveMessage',
 ]);
 
 const WINDOW_ACTIONS = new Set([
@@ -19,12 +20,15 @@ export function canRunGlobalAction(action, { rightSidebarApplicable }) {
 }
 
 export function canRunSelectedAction(action, state) {
+  if (action === 'toggleThreadMute') return Boolean(selectedMuteMessage(state));
   if (canDispatchHoveredGtdShortcut(action, state)) return true;
   if (['gtdTodo', 'gtdWatch', 'gtdDelegated', 'gtdReference', 'gtdSomeday', 'gtdDone'].includes(action)) {
     return Boolean(resolveGtdHotkeyTarget(state));
   }
   if (!SELECTED_ACTIONS.has(action)) return true;
-  if (!state?.selectedMessageId && !WINDOW_ACTIONS.has(action)) return false;
+  const focused = focusedListMessage(state);
+  if (focused && ['printMessage', 'unsubscribe', 'loadRemoteImages'].includes(action)) return false;
+  if (!state?.selectedMessageId && !focused && !WINDOW_ACTIONS.has(action)) return false;
   return Boolean(selectedPickerMessage(state));
 }
 

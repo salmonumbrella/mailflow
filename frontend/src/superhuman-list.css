@@ -1,0 +1,105 @@
+/* Only the desktop Superhuman layout opts into these list surfaces. */
+.sh-mail-list {
+  --sh-row-active: var(--bg-hover);
+  min-width: 0;
+}
+.sh-list-header { flex-shrink: 0; padding: 16px 22px 15px 34px; }
+.sh-list-heading { display: flex; align-items: center; gap: 18px; min-height: 32px; }
+.sh-list-title { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 16px; font-weight: 500; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-list-title > span { font-size: 12px; font-weight: 400; color: var(--text-tertiary); }
+.sh-list-tabs { display: flex; gap: 23px; min-width: 0; overflow-x: auto; scrollbar-width: none; align-items: center; }
+.sh-list-tab { display: inline-flex; align-items: baseline; gap: 5px; flex-shrink: 0; border: 0; background: none; color: var(--text-tertiary); padding: 7px 0; font: inherit; font-size: 16px; cursor: pointer; white-space: nowrap; }
+.sh-list-tab[aria-pressed="true"] { color: var(--text-primary); }
+.sh-list-tab > span { font-size: 12px; }
+.sh-list-tab .sh-category-unread { align-self: center; width: 6px; height: 6px; font-size: 0; background: var(--accent); border-radius: 50%; }
+.sh-list-controls { display: flex; align-items: center; gap: 7px; margin-left: auto; flex-shrink: 0; }
+.sh-icon-button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 4px; color: var(--text-tertiary); background: none; cursor: pointer; }
+.sh-icon-button:hover, .sh-icon-button:focus-visible { color: var(--text-primary); background: var(--bg-hover); }
+.sh-icon-button:disabled { cursor: wait; opacity: .5; }
+.sh-list-search { display: flex; align-items: center; gap: 7px; color: var(--text-tertiary); border-bottom: 1px solid transparent; cursor: text; }
+.sh-list-search:focus-within { color: var(--text-primary); border-bottom-color: var(--accent); }
+.sh-list-search input { width: 106px; padding: 6px 0; font: inherit; font-size: 12px; border: 0; outline: 0; background: none; color: var(--text-primary); }
+.sh-list-search input::placeholder { color: var(--text-tertiary); }
+.sh-list-options { position: relative; }
+.sh-list-options > summary { list-style: none; }
+.sh-list-options > summary::-webkit-details-marker { display: none; }
+.sh-list-options-panel { position: absolute; top: calc(100% + 8px); right: 0; z-index: 50; width: 236px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elevated); box-shadow: var(--shadow-popover); color: var(--text-secondary); font-size: 12px; }
+.sh-list-options-panel > button { padding: 8px; text-align: left; border: 0; border-radius: 4px; color: inherit; font: inherit; background: none; cursor: pointer; }
+.sh-list-options-panel > button:hover, .sh-list-options-panel > button[aria-pressed="true"] { color: var(--text-primary); background: var(--bg-hover); }
+.sh-list-options-panel > label { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 8px; }
+.sh-list-options-panel select { max-width: 130px; border: 1px solid var(--border); border-radius: 4px; padding: 4px; background: var(--bg-tertiary); color: var(--text-secondary); font: inherit; }
+.sh-list-filter { margin-top: 7px; }
+.sh-list-filter button { display: inline-flex; align-items: center; gap: 12px; background: var(--accent-dim); color: var(--accent); border: 0; border-radius: 4px; padding: 5px 8px; cursor: pointer; font-size: 11px; }
+.sh-syncing { animation: spin .8s linear infinite; }
+.sh-mail-scroll { padding: 0 6px 18px; box-sizing: border-box; }
+.sh-mail-row { position: relative; border-radius: 4px; color: var(--text-secondary); }
+.sh-mail-row-content { position: relative; display: grid; grid-template-columns: 30px minmax(120px, 22%) minmax(0, 1fr) max-content; align-items: center; column-gap: 12px; min-height: 36px; padding: 0 21px 0 8px; border-radius: 4px; cursor: pointer; outline: none; font-size: 13px; }
+.sh-mail-row-content:hover, .sh-mail-row-content:focus-within { background: var(--sh-row-active); }
+.sh-mail-row[data-last-viewed="true"] > .sh-mail-row-content { background: var(--accent-glow); }
+.sh-mail-row[data-selected="true"] > .sh-mail-row-content,
+.sh-mail-row[data-checked="true"] > .sh-mail-row-content { background: var(--sh-row-active); }
+.sh-mail-row[data-selected="true"] > .sh-mail-row-content::before,
+.sh-mail-row[data-checked="true"] > .sh-mail-row-content::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; border-radius: 4px 0 0 4px; background: var(--accent); }
+.sh-mail-row-content:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.sh-mail-indicator { display: flex; align-items: center; justify-content: center; position: relative; width: 30px; height: 30px; }
+.sh-mail-unread { width: 6px; height: 6px; border-radius: 50%; background: var(--unread-dot, #7ed3ef); }
+.sh-mail-checkbox { position: absolute; width: 14px; height: 14px; margin: 0; accent-color: var(--accent); opacity: 0; cursor: pointer; }
+.sh-mail-row-content:hover .sh-mail-checkbox,
+.sh-mail-row-content:focus-within .sh-mail-checkbox,
+.sh-mail-row[data-selection-mode="true"] .sh-mail-checkbox { opacity: 1; }
+.sh-mail-row:not(.sh-mail-row--nested) > .sh-mail-row-content:hover .sh-mail-unread,
+.sh-mail-row:not(.sh-mail-row--nested) > .sh-mail-row-content:focus-within .sh-mail-unread,
+.sh-mail-row[data-selection-mode="true"] > .sh-mail-row-content .sh-mail-unread { visibility: hidden; }
+.sh-mail-sender-cell { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.sh-mail-sender { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-mail-row[data-unread="true"] > .sh-mail-row-content .sh-mail-sender,
+.sh-mail-row[data-unread="true"] > .sh-mail-row-content .sh-mail-subject { font-weight: 500; color: var(--text-primary); }
+.sh-mail-thread-count { display: inline-flex; align-items: center; gap: 3px; padding: 3px; border: 0; border-radius: 3px; background: none; color: var(--text-tertiary); cursor: pointer; font-size: 11px; }
+.sh-mail-thread-count:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+.sh-mail-summary { display: flex; align-items: center; gap: 10px; min-width: 0; white-space: nowrap; }
+.sh-mail-subject { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; color: var(--text-secondary); }
+.sh-mail-snippet { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-tertiary); flex: 1 2 160px; }
+.sh-mail-meta { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.sh-mail-meta:empty { display: none; }
+.sh-mail-tail { display: flex; gap: 8px; align-items: center; color: var(--text-tertiary); font-size: 12px; white-space: nowrap; }
+.sh-mail-date { display: inline-flex; align-items: center; gap: 4px; }
+.sh-mail-star { display: inline-flex; align-items: center; padding: 2px; border: 0; background: none; color: var(--amber); cursor: pointer; }
+.sh-mail-actions { visibility: hidden; }
+.sh-mail-row-content:hover > .sh-mail-actions,
+.sh-mail-row-content:focus-within > .sh-mail-actions { visibility: visible; }
+.sh-mail-thread-children { margin: 2px 0 4px 30px; border-left: 1px solid var(--border-subtle); }
+.sh-mail-row--nested .sh-mail-row-content { grid-template-columns: 18px minmax(110px, 22%) minmax(0, 1fr) max-content; min-height: 34px; }
+.sh-mail-row--nested .sh-mail-indicator { width: 18px; }
+.sh-mail-thread-loading { padding: 13px 30px; font-size: 12px; color: var(--text-tertiary); }
+.sh-list-loading { padding-top: 4px; }
+.sh-list-loading-row { display: grid; grid-template-columns: 22% 1fr 50px; gap: 24px; padding: 12px 24px 12px 50px; }
+.sh-list-loading-row .skeleton-line { height: 12px; border-radius: 3px; }
+.sh-list-error { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 24px; color: var(--red); font-size: 13px; }
+.sh-list-error button { padding: 6px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-tertiary); color: var(--text-primary); cursor: pointer; }
+.sh-list-bulk { border-radius: 4px; margin-bottom: 6px; }
+@media (max-width: 1050px) {
+  .sh-list-header { padding-left: 20px; padding-right: 12px; }
+  .sh-list-tabs { gap: 16px; }
+  .sh-list-tab { font-size: 14px; }
+  .sh-list-search input { width: 74px; }
+  .sh-mail-row-content { grid-template-columns: 24px minmax(100px, 23%) minmax(0, 1fr) max-content; gap: 8px; padding-right: 12px; }
+  .sh-mail-indicator { width: 24px; }
+}
+
+.sh-saved-splits { padding-top: 8px; min-width: 0; }
+.sh-splits-error { color: var(--text-secondary); font-size: 12px; padding-top: 8px; }
+.sh-splits-backdrop { position: fixed; inset: 0; z-index: 1200; background: rgba(0,0,0,.62); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.sh-splits-dialog { box-sizing: border-box; width: min(720px, 100%); max-height: 90vh; overflow-y: auto; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 14px; padding: 24px; box-shadow: 0 20px 80px #0008; }
+.sh-splits-dialog h2 { margin: 0 0 12px; font-size: 20px; }
+.sh-splits-dialog p { font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
+.sh-splits-dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.sh-splits-editor { list-style: none; padding: 0; display: grid; gap: 16px; }
+.sh-splits-editor li { border-bottom: 1px solid var(--border); padding-bottom: 12px; display: grid; gap: 8px; }
+.sh-splits-editor label { display: grid; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+.sh-splits-editor input { width: 100%; box-sizing: border-box; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; padding: 8px; color: var(--text-primary); }
+.sh-splits-dialog button, .sh-splits-error button { border: 1px solid var(--border); border-radius: 6px; padding: 7px 11px; background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
+.sh-splits-dialog button:disabled { opacity: .45; cursor: default; }
+.sh-splits-actions, .sh-splits-footer { display: flex; flex-wrap: wrap; gap: 8px; }
+.sh-splits-hide { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 16px 0; }
+.sh-splits-footer { justify-content: flex-end; margin-top: 20px; }
+.sh-splits-dialog :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

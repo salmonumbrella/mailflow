@@ -9,6 +9,10 @@ import mailRoutes from '../routes/mail.js';
 import sendRoutes from '../routes/send.js';
 import draftRoutes from '../routes/draft.js';
 import scheduledRoutes from '../routes/scheduled.js';
+import invitationsRoutes from '../routes/invitations.js';
+import mutedThreadsRoutes from '../routes/mutedThreads.js';
+import snippetsRoutes from '../routes/snippets.js';
+import openActivityRoutes from '../routes/openActivity.js';
 import accountRoutes from '../routes/accounts.js';
 import { accountSpamRouter } from '../routes/spam.js';
 import searchRoutes from '../routes/search.js';
@@ -24,7 +28,7 @@ import { API_TOKEN_ROUTES, matchApiTokenRoute } from './apiTokenAllowlist.js';
 // entry: a token may draft, never send; nor has the OIDC API, link-confirm included: a token
 // cannot vouch for anyone); ai and categories sit under /api ahead of the inline routes, so a
 // request walks through them too.
-const ROUTERS = { mailRoutes, sendRoutes, draftRoutes, scheduledRoutes, accountRoutes, accountSpamRouter, searchRoutes, apiTokenRoutes, aiRoutes, categoriesRoutes, oidcApiRouter };
+const ROUTERS = { mailRoutes, sendRoutes, draftRoutes, scheduledRoutes, invitationsRoutes, mutedThreadsRoutes, snippetsRoutes, openActivityRoutes, accountRoutes, accountSpamRouter, searchRoutes, apiTokenRoutes, aiRoutes, categoriesRoutes, oidcApiRouter };
 const REVIEWED = new Set(['mailRoutes', 'sendRoutes', 'draftRoutes', 'scheduledRoutes', 'accountRoutes', 'accountSpamRouter', 'searchRoutes', 'apiTokenRoutes', 'oidcApiRouter']);
 // Routes index.js defines itself, reviewed for any valid token.
 const INLINE = ['/api/health', '/api/version'];

@@ -1,3 +1,5 @@
+import { verifyMutedArchive } from '../services/mutedThreads.js';
+import { selectSendArchiveTargets } from '../services/sendArchive.js';
 import { STATUS_STALE_MS } from '../services/folderStatus.js';
 import { Router } from 'express';
 import { createRequire } from 'module';
@@ -2065,7 +2067,15 @@ router.post('/messages/bulk-archive', async (req, res) => {
 
   const moveGuards = [];
   try {
-    const owned = await findOwnedMessages(req.session.userId, ids, { columns: 'm.*, a.user_id, a.folder_mappings' });
+    let owned = await findOwnedMessages(req.session.userId, ids, { columns: 'm.*, a.user_id, a.folder_mappings' });
+    if (req.body.afterSend !== undefined) {
+      try { owned = await selectSendArchiveTargets(req.session.userId, req.body.afterSend, owned); }
+      catch (err) { if (err.status) return res.status(err.status).json({ error: err.message }); throw err; }
+    }
+    if (req.body.muteGuard !== undefined) {
+      try { await verifyMutedArchive(req.session.userId, ids, req.body.muteGuard); }
+      catch (err) { if (err.status) return res.status(err.status).json({ error: err.message }); throw err; }
+    }
     if (!owned.length) return res.json({ ok: true, archived: [], noArchiveFolder: [] });
 
     // Guard source UIDs for the whole operation so reconcileDeletes can't delete a source

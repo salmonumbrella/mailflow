@@ -47,3 +47,28 @@ describe('selected message hotkeys', () => {
     assert.deepEqual(calls.slice(1), ['cancel', ['update', 'inbox', { is_read: false }], 'increment', 'category', ['patch', ['inbox'], false]]);
   });
 });
+
+describe('Superhuman focused list target', () => {
+  it('resolves only a real visible desktop row, without stealing reader/window actions', () => {
+    const previousWindow = globalThis.window;
+    globalThis.window = { innerWidth: 1200 };
+    try {
+      const row = { id: 'focus', account_id: 'acct' };
+      const reader = { id: 'reader', account_id: 'acct' };
+      const state = { layout: 'superhuman', listFocusedMessageId: row.id, messages: [row, reader] };
+      assert.equal(hotkeys.focusedListMessage(state), row);
+      assert.equal(selectedMessage(state), row);
+      assert.equal(selectedMessage({ ...state, selectedMessageId: reader.id }), reader);
+      assert.equal(hotkeys.focusedListMessage({ ...state, selectedMessageId: reader.id }), null);
+      assert.equal(hotkeys.focusedListMessage({ ...state, messageWindows: [{ messageId: reader.id, z: 1 }] }), null);
+      for (const override of [{ layout: 'comfortable' }, { composing: true }, { showContacts: true }, { showAdmin: true }, { listFocusedMessageId: 'stale' }, { searchQuery: 'q', searchResults: [] }]) {
+        assert.equal(hotkeys.focusedListMessage({ ...state, ...override }), null);
+      }
+      globalThis.window.innerWidth = 390;
+      assert.equal(hotkeys.focusedListMessage(state), null);
+    } finally {
+      if (previousWindow === undefined) delete globalThis.window;
+      else globalThis.window = previousWindow;
+    }
+  });
+});

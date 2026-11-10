@@ -84,3 +84,14 @@ describe('system theme & dynamic OS resolution', () => {
     }
   });
 });
+
+
+describe('Superhuman theme', () => {
+  it('is explicit graphite and lavender, without changing the default theme', () => {
+    assert.equal(getInitialTheme(), 'system');
+    assert.equal(THEMES.superhuman.label, 'Superhuman');
+    assert.equal(THEMES.superhuman.vars['--bg-primary'], '#282726');
+    assert.equal(THEMES.superhuman.vars['--accent'], '#c1a0e8');
+    assert.equal(resolveEffectiveTheme('superhuman'), 'superhuman');
+  });
+});

@@ -119,3 +119,59 @@ one user's own browser (never the server or other users), so it's reviewed light
 - Work inside `plugins/<name>/`. Keep `npm run lint:plugins` at 0 violations.
 - Need a new capability? Open an issue/PR describing it — core adds it to `api.js`.
 - GTD is per-user opt-in (Settings → Plugins), off by default.
+
+### Private revisioned storage
+
+New owner-private records use `storage.getOwned(pluginId, ownerId, key)`,
+`putOwned(pluginId, ownerId, key, value, { expectedRevision })` and
+`deleteOwned(pluginId, ownerId, key, { expectedRevision })`. Keys remain plugin-wide, so include
+an owner-derived prefix. Every SQL operation checks ownership. `expectedRevision: null` means
+create-only; updates and deletes require the last opaque revision. A failed condition returns
+`null` for a write or `false` for deletion. Reads return `{ key, value, revision }` or `null`.
+Revisions are random UUIDs stored alongside data in a private JSON envelope; legacy KV/blob
+methods retain their existing format. Do not mix the two APIs on a record.
+
+`listOwned(pluginId, ownerId, { prefix, after, limit, filters })` returns `{ items, nextCursor }`.
+It supports keyset pagination (1–200 records, default 100), literal prefixes, and up to eight
+flat string-field filters `{ field, op, value }`. Operators are `eq`, `lt`, `lte`, `gt`, `gte`;
+comparisons are lexicographic with C collation, suitable for canonical ISO dates, not numbers.
+Filters are applied in SQL before limiting. Queries never return another owner's records.
+`putOwned` optionally accepts `guard: { key, revision }`, locking and verifying an owner-scoped
+parent record in the same transaction before the write. This prevents child creation against
+stale or removed parents. It exposes no database handle to plugins.
+
+### MailFlow calendar
+
+The opt-in `local-calendar` plugin provides owner-private calendars, timed/all-day events and
+reusable event templates. It has no provider integration, invitations, attendees, public booking
+links, grants or background sync. Its catalog and events live in revisioned plugin storage.
+Event queries require a start/end range of at most 100 days and return 200-record cursor pages.
+The UI loads at most 60 pages per view and reports an overflow instead of silently truncating.
+Calendar removal records a tombstone and deletes its events in bounded batches of up to 1,000
+per request. Pending cleanup is durable and surfaced in the UI with an explicit retry action;
+removed calendar IDs cannot be reused. Individual event deletion removes the event record. User deletion cascades all plugin records.
+
+Frontend metadata may declare `navigation: { label, symbol }`. Superhuman's neutral navigation
+seam lists those entries, opening Plugins settings when not activated. Activated plugins
+render the `auxiliary-view` slot with `{ view, userId, onBack }`. Core keeps mail mounted behind
+it, suspends mail shortcuts and preserves Back navigation. Activation remains an explicit user
+choice in native Plugins settings.
+
+`deleteOwnedBatch(pluginId, ownerId, [{ key, revision }])` conditionally deletes at most 200
+records in one SQL statement and returns the number removed. Ownership and every revision must
+match; records edited or moved after listing are retained. No unbounded delete or raw filter SQL
+is exposed. Calendar cleanup uses this capability on pages filtered by tombstoned calendar ID.
+
+### Atomic private indexes and values
+
+Revisioned `putOwned`, `deleteOwned`, `deleteOwnedBatch` and `putOwnedBatch` serialize writes per
+owner/plugin in a transaction, including creation of previously absent keys. `putOwned` also
+accepts `guards: [{ key, revision }]` (1–200 unique keys), where a null revision asserts absence.
+`putOwnedBatch(pluginId, ownerId, changes, { guards })` atomically writes 1–20 changes shaped as
+`{ key, value, expectedRevision }`. Every guard and change is preflighted before writing. Any
+conflict returns null; an error rolls back the whole batch. Values are limited to 256 KiB each
+and 512 KiB per batch, with at most 200 distinct scoped keys. Legacy blob/KV methods remain
+separate and must not be mixed with revisioned records.
+
+The opt-in private-notes plugin uses this to persist immutable message anchors with durable
+thread-root discovery links. See [its identity contract and bounds](private-notes/README.md).

@@ -1,7 +1,7 @@
 // Run with: node --test src/utils/defaultShortcuts.test.js
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildKeyMap, buildModKeyMap, getShortcutConflicts, resolveShortcutAction, shortcutBindingFromEvent } from './defaultShortcuts.js';
+import { buildKeyMap, buildModKeyMap, getShortcutConflicts, getEffectiveShortcuts, resolveShortcutAction, shortcutBindingFromEvent, shortcutActionText } from './defaultShortcuts.js';
 
 const keyEvent = (key, modifiers = {}) => ({ key, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...modifiers });
 
@@ -135,5 +135,76 @@ describe('modifier shortcuts', () => {
     assert.deepEqual(getShortcutConflicts({ toggleStar: 'shift+ctrl+U' }), [
       { key: 'ctrl+shift+u', loser: 'unsubscribe', winner: 'toggleStar' },
     ]);
+  });
+});
+
+describe('Superhuman keyboard preset', () => {
+  it('uses opt-in workspace bindings without changing other layouts', () => {
+    assert.equal(resolveShortcutAction(keyEvent('Enter'), {}, 'superhuman'), 'openMessage');
+    assert.equal(resolveShortcutAction(keyEvent('R', { shiftKey: true }), {}, 'superhuman'), 'replyAll');
+    assert.equal(resolveShortcutAction(keyEvent('z'), {}, 'superhuman'), 'undoAction');
+    assert.equal(resolveShortcutAction(keyEvent('h'), {}, 'superhuman'), 'snooze');
+    for (const layout of [undefined, 'comfortable', 'list']) {
+      assert.equal(resolveShortcutAction(keyEvent('Enter'), {}, layout), null);
+      assert.equal(resolveShortcutAction(keyEvent('h'), {}, layout), null);
+      assert.equal(resolveShortcutAction(keyEvent('a'), {}, layout), 'replyAll');
+      assert.equal(resolveShortcutAction(keyEvent('z', { ctrlKey: true }), {}, layout), 'undoAction');
+    }
+    assert.equal(buildKeyMap({}, 'superhuman').Enter, 'openMessage');
+    assert.deepEqual(getShortcutConflicts({}, 'superhuman'), []);
+  });
+
+  it('preserves custom actions, disabled actions, and keys claimed by another override', () => {
+    const overrides = { openMessage: 'q', replyAll: null, forward: 'h', toggleStar: 'z' };
+    assert.equal(resolveShortcutAction(keyEvent('q'), overrides, 'superhuman'), 'openMessage');
+    assert.equal(resolveShortcutAction(keyEvent('Enter'), overrides, 'superhuman'), null);
+    assert.equal(resolveShortcutAction(keyEvent('R', { shiftKey: true }), overrides, 'superhuman'), null);
+    assert.equal(resolveShortcutAction(keyEvent('h'), overrides, 'superhuman'), 'forward');
+    assert.equal(resolveShortcutAction(keyEvent('z'), overrides, 'superhuman'), 'toggleStar');
+    assert.equal(resolveShortcutAction(keyEvent('z', { ctrlKey: true }), overrides, 'superhuman'), 'undoAction');
+    assert.deepEqual(getShortcutConflicts(overrides, 'superhuman'), []);
+    assert.deepEqual(overrides, { openMessage: 'q', replyAll: null, forward: 'h', toggleStar: 'z' });
+  });
+});
+
+
+describe('untranslated command help', () => {
+  it('provides human-readable labels and descriptions for new native actions', () => {
+    const translateFallback = (_key, options) => options?.defaultValue;
+    assert.equal(shortcutActionText(translateFallback, 'snooze', 'label'), 'Snooze');
+    assert.equal(shortcutActionText(translateFallback, 'moveMessage', 'label'), 'Move to folder');
+    assert.equal(shortcutActionText(translateFallback, 'snooze'), 'Choose when the selected message returns');
+    assert.equal(shortcutActionText(translateFallback, 'moveMessage'), 'Move the selected message to another folder');
+  });
+});
+
+
+describe('Superhuman reference action bindings', () => {
+  it('resolves split, message, folder and note actions without collisions', () => {
+    const bindings = { l: 'openLabelPicker', v: 'moveMessage', u: 'toggleRead', m: 'focusPrivateNote', n: 'nextConversationMessage', p: 'prevConversationMessage', Tab: 'nextSavedSplit' };
+    for (const [key, action] of Object.entries(bindings)) assert.equal(resolveShortcutAction(keyEvent(key), {}, 'superhuman'), action);
+    assert.equal(resolveShortcutAction(keyEvent('Tab', { shiftKey: true }), {}, 'superhuman'), 'prevSavedSplit');
+    assert.equal(resolveShortcutAction(keyEvent('M', { shiftKey: true }), {}, 'superhuman'), 'toggleThreadMute');
+    assert.equal(resolveShortcutAction(keyEvent('M', { shiftKey: true }), { forward: 'shift+m' }, 'superhuman'), 'forward');
+    assert.equal(resolveShortcutAction(keyEvent('M', { shiftKey: true })), null);
+    assert.equal(resolveShortcutAction(keyEvent('j'), {}, 'superhuman'), 'nextMessage');
+    assert.equal(resolveShortcutAction(keyEvent('k'), {}, 'superhuman'), 'prevMessage');
+    assert.deepEqual(getShortcutConflicts({}, 'superhuman'), []);
+    assert.equal(resolveShortcutAction(keyEvent('m')), 'toggleRead');
+    assert.equal(resolveShortcutAction(keyEvent('u')), 'markUnread');
+    assert.equal(resolveShortcutAction(keyEvent('v')), 'gtdReference');
+    for (const key of ['l', 'n', 'p', 'Tab']) assert.equal(resolveShortcutAction(keyEvent(key)), null);
+  });
+
+  it('preserves explicit inherited bindings without reviving displaced defaults', () => {
+    for (const overrides of [{ markUnread: 'u' }, { toggleRead: 'm' }, { gtdReference: 'v' }, { forward: 'm' }, { archive: 'Tab' }]) {
+      const [action, key] = Object.entries(overrides)[0];
+      assert.equal(resolveShortcutAction(keyEvent(key), overrides, 'superhuman'), action);
+      assert.deepEqual(getShortcutConflicts(overrides, 'superhuman'), []);
+    }
+    const keys = getEffectiveShortcuts({ toggleRead: 'm' }, 'superhuman');
+    assert.equal(keys.markUnread, null);
+    assert.equal(keys.focusPrivateNote, null);
+    assert.equal(keys.toggleRead, 'm');
   });
 });

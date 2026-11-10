@@ -68,3 +68,8 @@ export function registerCollector(name, contribution) {
 export function getCollectors(name) {
   return collectors.get(name) || [];
 }
+
+// Static entries remain discoverable before activation; opening them must not enable a plugin.
+export function getPluginNavigation() {
+  return [...pluginMeta.entries()].filter(([, meta]) => meta.navigation).map(([pluginId, meta]) => ({ pluginId, ...meta.navigation }));
+}

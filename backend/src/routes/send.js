@@ -7,6 +7,8 @@ import {
   resolveIdentity, resolveForwarded, prepareDelivery, deliverAndRecord,
 } from '../services/outgoingMail.js';
 
+import { noteOpenActivityStatus } from '../services/openActivity.js';
+
 const router = Router();
 router.use(requireAuth);
 
@@ -73,9 +75,10 @@ router.post('/send', async (req, res) => {
 
   let reservationAcquired = false;
   try {
-    const delivery = await prepareDelivery(input, identity, forwarded);
-
-    // Reserve the idempotency key atomically right before delivery so a concurrent
+    // Keep ordinary sends' preparation ordering. An opted-in send reserves first so a
+    // duplicate request cannot create an orphan activity record.
+    let delivery = input.trackOpens ? null : await prepareDelivery(input, identity, forwarded);
+    // Reserve the idempotency key atomically before delivery so a concurrent
     // same-key submit cannot also send (the post-send cache alone can't stop concurrent
     // duplicates). Overwritten with the result on success; released in the catch only if
     // delivery never happened, so a genuine retry after a pre-send failure can proceed.
@@ -89,6 +92,7 @@ router.post('/send', async (req, res) => {
       reservationAcquired = true;
     }
 
+    if (!delivery) delivery = await prepareDelivery(input, identity, forwarded);
     const message = { userId, input, identity, delivery, sentDraft };
     const hooks = {
       // Overwrite the in-flight reservation with the final result so a retry after a lost
@@ -108,7 +112,10 @@ router.post('/send', async (req, res) => {
         delayMs: holdMs,
         run: onDelivered => deliverAndRecord(message, { ...hooks, onDelivered }),
         // An undone send frees its idempotency key, so the reopened message can be sent again.
-        onCancel: async () => { if (idemStoreKey) await kv.del(idemStoreKey); },
+        onCancel: async () => {
+          await noteOpenActivityStatus(delivery.openActivity, 'cancelled');
+          if (idemStoreKey) await kv.del(idemStoreKey);
+        },
       });
       const pendingResult = { ok: true, pending: true, pendingId: id, sendAt, remainingMs: remainingUntil(sendAt) };
       // A retry of this same request (lost response) gets the held send back, not a second one.
@@ -120,8 +127,7 @@ router.post('/send', async (req, res) => {
   } catch (err) {
     if (err.publicMessage) return res.status(500).json({ error: err.publicMessage, ...(err.publicCode ? { code: err.publicCode } : {}) });
     if (err instanceof SendError) {
-      // An SMTP configuration the account cannot send with (prepareDelivery). It comes before the
-      // reservation today, but a reservation this request holds must never outlive its answer.
+      // Preparation failed before SMTP. Free only this request's idempotency reservation.
       if (idemStoreKey && reservationAcquired) kv.del(idemStoreKey).catch(() => {});
       return res.status(err.status).json({ error: err.message });
     }

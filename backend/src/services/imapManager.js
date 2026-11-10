@@ -1,3 +1,4 @@
+import { mutedAlertIds } from './mutedThreads.js';
 import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
 import { extractImapError } from './imapError.js';
 import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
@@ -1389,6 +1390,12 @@ function walkNode(node, results, inRelated) {
       part: node.part || '1',
       encoding: node.encoding || '',
       charset: node.parameters?.charset || 'utf-8',
+    });
+    // Keep inline meeting requests discoverable beside an HTML alternative too.
+    // This is download metadata only; response validation reads the original MIME.
+    results.attachments.push({
+      part: node.part || '1', filename: filename || 'invite.ics', type: 'text/calendar',
+      encoding: node.encoding || '', size: node.size || 0, disposition: 'inline',
     });
   } else if (imageType && node.id && disposition !== 'attachment') {
     // Inline image referenced via cid: in the HTML body. One the HTML never
@@ -5495,6 +5502,17 @@ export class ImapManager {
           }
           // alertMessages: remaining messages not silenced by a mark_read rule, and mail a "Notify
           // me" rule filed elsewhere. A push for one of those opens it by id, in its new folder.
+          try {
+            const threadMuted = await mutedAlertIds(account.id, [...new Set([...newMessages, ...notifyMessages].map(message => message.id))]);
+            for (const id of threadMuted) mutedIds.add(id);
+            notifyMessages = notifyMessages.filter(message => !threadMuted.has(message.id));
+          } catch (error) {
+            // A mute lookup outage must not unexpectedly notify about a silenced conversation.
+            // Keep cache refreshes, but suppress this batch's sound/push; alerts are not replayed.
+            console.warn('Muted thread alert lookup failed:', error.message);
+            for (const message of newMessages) mutedIds.add(message.id);
+            notifyMessages = [];
+          }
           const { alertMessages, alertCount, send } = newMailAlerts({ remaining: newMessages, mutedIds, notifyMessages });
           if (send) this.broadcast({
             type: 'new_messages', accountId: account.id,
@@ -7456,12 +7474,23 @@ export class ImapManager {
   // Full RFC 822 source, for the .eml download (#381). Pool client like fetchHeaders;
   // imapflow buffers the source the same way attachment fetches buffer their part.
   // Returns a Buffer, or null when the server has nothing for the UID.
-  async fetchRawMessage(account, uid, folder) {
+  async fetchRawMessage(account, uid, folder, { maximumBytes } = {}) {
+    if (maximumBytes !== undefined && (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1)) throw new TypeError('maximumBytes must be a positive integer');
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
-        for await (const msg of client.fetch(String(uid), { uid: true, source: true }, { uid: true })) {
-          if (msg.source) return Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
+        if (maximumBytes !== undefined) {
+          for await (const msg of client.fetch(String(uid), { uid: true, size: true }, { uid: true })) {
+            if (msg.size > maximumBytes) throw Object.assign(new Error('Message exceeds the source size limit'), { code: 'MESSAGE_TOO_LARGE' });
+          }
+        }
+        const source = maximumBytes === undefined ? true : { start: 0, maxLength: maximumBytes + 1 };
+        for await (const msg of client.fetch(String(uid), { uid: true, source }, { uid: true })) {
+          if (msg.source) {
+            const bytes = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
+            if (maximumBytes !== undefined && bytes.length > maximumBytes) throw Object.assign(new Error('Message exceeds the source size limit'), { code: 'MESSAGE_TOO_LARGE' });
+            return bytes;
+          }
         }
         return null;
       } finally {

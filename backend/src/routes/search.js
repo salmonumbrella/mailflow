@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { savedSplitPreferences } from '../utils/savedSplits.js';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
@@ -129,24 +130,11 @@ export function freeTextTermCondition(likeIdx, ftsIdx) {
       )`;
 }
 
-router.get('/', searchLimiter, async (req, res) => {
-  const { q, accountId, limit = 50, offset = 0 } = req.query;
-  const trimmed = (q || '').trim();
-  if (!trimmed) return res.json({ messages: [] });
-  if (trimmed.length > 500) return res.status(400).json({ error: 'Search query too long' });
-
-  const accountsResult = await query(
-    'SELECT id, include_in_unified_inbox FROM email_accounts WHERE user_id = $1 AND enabled = true',
-    [req.session.userId]
-  );
-  const { accountIds: targetIds } = resolveAccountScope(accountsResult.rows, accountId);
-  if (!targetIds.length) return res.json({ messages: [] });
-
-  const cap = Math.max(1, Math.min(parseInt(limit) || 50, 200));
+export function buildSearchConditions(trimmed, accountIds, folder = '') {
   const { filters, terms } = parseSearchQuery(trimmed);
 
   const conditions = [];
-  const params = [targetIds];
+  const params = [accountIds];
   let p = 2;
 
   // Folder scope. `in:` in the query wins; otherwise the client-supplied `folder`
@@ -215,10 +203,10 @@ router.get('/', searchLimiter, async (req, res) => {
 
   // Require at least one real search condition before applying folder scope, so a
   // bare `in:inbox` (or a lone folder param) never dumps an entire folder.
-  if (!conditions.length) return res.json({ messages: [], query: q });
+  if (!conditions.length) return null;
 
   // Resolve folder scope: in: operator wins; otherwise use the param.
-  const { folderScope, folderFuzzy } = resolveSearchFolderScope(filters, req.query.folder || '');
+  const { folderScope, folderFuzzy } = resolveSearchFolderScope(filters, folder);
   if (folderScope) {
     if (folderFuzzy) {
       // in:<name> — case-insensitive match on a folder named exactly that, or a
@@ -238,6 +226,27 @@ router.get('/', searchLimiter, async (req, res) => {
     // resurfacing freshly-deleted messages after the optimistic UI guard expires.
     conditions.push(trashFolderExclusionCondition());
   }
+
+  return { conditions, params, p };
+}
+
+router.get('/', searchLimiter, async (req, res) => {
+  const { q, accountId, limit = 50, offset = 0 } = req.query;
+  const trimmed = (q || '').trim();
+  if (!trimmed) return res.json({ messages: [] });
+  if (trimmed.length > 500) return res.status(400).json({ error: 'Search query too long' });
+
+  const accountsResult = await query(
+    'SELECT id, include_in_unified_inbox FROM email_accounts WHERE user_id = $1 AND enabled = true',
+    [req.session.userId]
+  );
+  const { accountIds: targetIds } = resolveAccountScope(accountsResult.rows, accountId);
+  if (!targetIds.length) return res.json({ messages: [] });
+
+  const cap = Math.max(1, Math.min(parseInt(limit) || 50, 200));
+  const compiled = buildSearchConditions(trimmed, targetIds, req.query.folder || '');
+  if (!compiled) return res.json({ messages: [], query: q });
+  const { conditions, params, p } = compiled;
 
   const off = Math.max(0, parseInt(offset) || 0);
   params.push(cap);
@@ -264,6 +273,36 @@ router.get('/', searchLimiter, async (req, res) => {
   } catch (err) {
     console.error('Search error:', err);
     res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+// Saved query counts use exactly the same compiler and account scope as search.
+// They describe the synced local read model, never provider STATUS or invented totals.
+router.get('/splits', searchLimiter, async (req, res) => {
+  try {
+    const prefs = await query('SELECT preferences FROM users WHERE id = $1', [req.session.userId]);
+    const { savedSplits, savedSplitsRevision } = savedSplitPreferences(prefs.rows[0]?.preferences);
+    const accounts = await query('SELECT id, include_in_unified_inbox FROM email_accounts WHERE user_id = $1 AND enabled = true', [req.session.userId]);
+    const { accountIds } = resolveAccountScope(accounts.rows, req.query.accountId);
+    const counts = {};
+    // Sequential bounded queries avoid monopolizing the pool when several clients refresh.
+    for (const split of savedSplits) {
+      const compiled = buildSearchConditions(split.query, accountIds, 'INBOX');
+      if (!compiled) {
+        counts[split.id] = { error: 'This query has no supported search conditions. Use from:, to:, subject:, has:attachment, is:unread, is:read, is:starred, dates, or text.' };
+        continue;
+      }
+      if (!accountIds.length) { counts[split.id] = { total: 0, unread: 0 }; continue; }
+      const result = await query(`SELECT COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE m.is_read = false)::int AS unread
+        FROM messages m WHERE m.account_id = ANY($1) AND m.is_deleted = false
+        AND ${compiled.conditions.join(' AND ')}`, compiled.params);
+      counts[split.id] = { total: result.rows[0].total, unread: result.rows[0].unread };
+    }
+    res.json({ counts, savedSplitsRevision, source: 'synced-cache' });
+  } catch (err) {
+    console.error('Split count error:', err);
+    res.status(500).json({ error: 'Split counts could not be loaded. Try again.' });
   }
 });
 

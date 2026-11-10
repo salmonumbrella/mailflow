@@ -39,6 +39,8 @@ export const SETUP_TABLES = [
   // User content that exists nowhere else, so even a setup-only backup carries it.
   'scheduled_message_attachments',
   'scheduled_messages',
+  'invitation_response_state',
+  'muted_threads',
   'snoozed_messages',
   'spam_models',
   'spam_training_deletions',
@@ -51,11 +53,12 @@ export const SETUP_TABLES = [
 ];
 // The local copy of the mail on the IMAP servers. Synced again after a restore that leaves it out.
 export const MAIL_CACHE_TABLES = ['folders', 'messages', 'unfetchable_uids'];
-// Sessions, rate limits and other short-lived keys, tokens that are worthless minutes later,
+// Sessions, rate limits, expiring open-activity tokens/counters and other short-lived keys,
+// tokens that are worthless minutes later,
 // and API tokens: a restore signs everyone out, and must never
 // bring back a token revoked after the backup was taken. A restore also truncates users with
 // CASCADE, so it deletes every API token there is, and their owners have to create new ones.
-export const TRANSIENT_TABLES = ['ai_codex_device_flows', 'api_tokens', 'email_otp_tokens', 'kv_store', 'password_reset_tokens', 'sessions'];
+export const TRANSIENT_TABLES = ['ai_codex_device_flows', 'api_tokens', 'email_otp_tokens', 'kv_store', 'outgoing_open_activity', 'password_reset_tokens', 'sessions'];
 // The record of which migrations shaped the schema the rows are written back into.
 export const SCHEMA_TABLES = ['schema_migrations'];
 
@@ -519,6 +522,13 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
         `UPDATE scheduled_messages SET status = 'paused', pause_reason = 'restored', status_before = NULL, ${released}
           WHERE status IN ('scheduled', 'editing') OR (status = 'sending' AND smtp_accepted_at IS NULL)`,
       );
+    }
+    // The original server may have continued a response after this snapshot. Never turn a
+    // restored pending/preparation/failed attempt into permission to send it again.
+    if (present.has('invitation_response_state')) {
+      await client.query(`UPDATE invitation_response_state
+        SET value = (value::jsonb || jsonb_build_object('status', 'uncertain', 'code', 'restored', 'updatedAt', NOW()))::text
+        WHERE value::jsonb->>'status' IN ('pending', 'failed')`);
     }
     await client.query('COMMIT');
   } catch (err) {

@@ -1,0 +1,22 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Example//Calendar//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:planning-2026@example.test
+SEQUENCE:3
+DTSTAMP:20261110T120000Z
+DTSTART:20261112T140000Z
+DTEND:20261112T143000Z
+ORGANIZER;CN="Project lead":mailto:lead@example.test
+ATTENDEE;CN="Mailbox owner";PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@example.test
+ATTENDEE;CN="Colleague":mailto:colleague@example.test
+SUMMARY:Planning\, next steps
+DESCRIPTION:This description and the other attendees must not be echoed into a response.
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Reminder
+TRIGGER:-PT15M
+END:VALARM
+END:VEVENT
+END:VCALENDAR

@@ -50,3 +50,23 @@ test('GTD shortcuts only capture keys for an active plugin and eligible live sel
     assert.equal(canRunSelectedAction(action, { ...active, selectedMessageId: 'removed-rail' }), false, action);
   }
 });
+
+test('Superhuman focus enables native list actions but not reader-only actions', () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { innerWidth: 1200 };
+  try {
+    const focused = { ...selected, selectedMessageId: null, listFocusedMessageId: 'm1', layout: 'superhuman' };
+    for (const action of ['reply', 'replyAll', 'forward', 'toggleRead', 'toggleStar', 'markUnread', 'openLabelPicker', 'selectMessage', 'snooze', 'moveMessage']) {
+      assert.equal(canRunSelectedAction(action, focused), true, action);
+      assert.equal(canRunSelectedAction(action, { ...focused, listFocusedMessageId: 'missing' }), false, action);
+    }
+    for (const action of ['printMessage', 'unsubscribe', 'loadRemoteImages']) {
+      assert.equal(canRunSelectedAction(action, focused), false, action);
+    }
+    globalThis.window.innerWidth = 390;
+    assert.equal(canRunSelectedAction('reply', focused), false, 'touch UI never uses desktop focus');
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});

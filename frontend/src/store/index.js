@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { createSavedSplitsState, resetSavedSplitsState } from './savedSplits.js';
 import { resolveConversationMode, groupsMessageList, conversationModeTransition, isConversationMode } from '../utils/conversationMode.js';
 import { applyMessageUpdate } from '../utils/readState.js';
 import { api } from '../utils/api.js';
@@ -120,7 +121,7 @@ function expirePendingCounts() {
 // the list they left is still the one showing; otherwise that list loads them again when reopened.
 const removedFromView = new Map();
 const listViewOf = state => JSON.stringify([state.selectedAccountId ?? null, state.selectedFolder ?? null,
-  String(state.searchQuery || '').trim(), Boolean(state.searchAllFolders), state.activeGtdTab ?? null, Boolean(state.threadedView),
+  String(state.searchQuery || '').trim(), state.activeSavedSplitId ?? null, Boolean(state.searchAllFolders), state.activeGtdTab ?? null, Boolean(state.threadedView),
   listOrderFor(state.listSort, state.selectedAccountId, state.selectedFolder), state.listFilter ?? null]);
 function noteRemoved(state, ids) {
   if (removedFromView.size > 5000) removedFromView.clear();
@@ -129,6 +130,7 @@ function noteRemoved(state, ids) {
 }
 
 export const useStore = create((set, get) => ({
+  ...createSavedSplitsState(set, get, api),
   // Auth
   user: null,
   setUser: (user) => {
@@ -148,6 +150,8 @@ export const useStore = create((set, get) => ({
     set(state => ({
       user,
       ...(state.user?.id !== user?.id ? {
+        ...resetSavedSplitsState(state.savedSplitsEpoch),
+        listFocusedMessageId: null,
         serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
         unreadCounts: { total: 0, byAccount: {}, snapshots: {}, complete: false },
         snoozedCount: 0,
@@ -243,9 +247,10 @@ export const useStore = create((set, get) => ({
       set({
         serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
         isLocked: true,
+        ...resetSavedSplitsState(get().savedSplitsEpoch),
         messages: [], searchResults: [], searchQuery: '',
         accounts: [], accountsReady: false,
-        folders: {}, selectedMessageId: null,
+        folders: {}, selectedMessageId: null, listFocusedMessageId: null,
         unreadCounts: { total: 0, byAccount: {} },
         snoozedCount: 0,
         ...SCHEDULED_RESET,
@@ -300,7 +305,7 @@ export const useStore = create((set, get) => ({
     }
     set(state => ({
       accounts, accountsReady: true, selectedAccountId,
-      ...(reselected ? { selectedFolder: 'INBOX' } : {}),
+      ...(reselected ? { selectedFolder: 'INBOX', ...(state.activeSavedSplitId ? { activeSavedSplitId: null, searchQuery: '', searchResults: [] } : {}) } : {}),
       folders: pruneFolders(state.folders, accounts),
       unreadCounts: displayCountSnapshot(state.serverUnreadCounts, state.pendingCounts, accounts),
     }));
@@ -330,6 +335,7 @@ export const useStore = create((set, get) => ({
         selectedAccountId: accountId,
         selectedFolder: folder,
         selectedMessageId: null,
+        listFocusedMessageId: null,
         messages: [],
         messagesOffset: 0,
         hasMoreMessages: true,
@@ -338,7 +344,7 @@ export const useStore = create((set, get) => ({
         expandedThreadId: null,
         threadMessages: {},
         showContacts: false,
-        ...(navChanged && wasScopedSearch ? { searchQuery: '' } : {}),
+        ...(navChanged && (wasScopedSearch || state.activeSavedSplitId) ? { searchQuery: '', activeSavedSplitId: null } : {}),
       };
     });
   },
@@ -438,6 +444,7 @@ export const useStore = create((set, get) => ({
 
   // Selected message
   selectedMessageId: null,
+  listFocusedMessageId: null,
   lastViewedMessageId: null,
   setSelectedMessage: (id) => set(id ? { selectedMessageId: id, lastViewedMessageId: id } : { selectedMessageId: null }),
 
@@ -697,7 +704,7 @@ export const useStore = create((set, get) => ({
   })),
   closeAllMessageWindows: () => set({ messageWindows: [] }),
   searchQuery: '',
-  setSearchQuery: (q) => set(state => q === state.searchQuery ? {} : { searchQuery: q,
+  setSearchQuery: (q) => set(state => q === state.searchQuery && !state.activeSavedSplitId ? {} : { searchQuery: q, activeSavedSplitId: null,
     replyDrafts: {}, replyDraftRevision: state.replyDraftRevision + 1 }),
   isSearching: false,
   setIsSearching: (v) => set({ isSearching: v }),
@@ -1105,7 +1112,7 @@ export const useStore = create((set, get) => ({
     const clean = normalizeLayout(layout);
     localStorage.setItem('mailflow_layout', clean);
     localStorage.removeItem('mailflow_list_width');
-    set({ layout: clean });
+    set(state => ({ layout: clean, ...(clean !== 'superhuman' && state.activeSavedSplitId ? { activeSavedSplitId: null, searchQuery: '', searchResults: [] } : {}) }));
     applyLayout(clean);
     schedulePrefSave({ layout: clean });
   },
@@ -1306,9 +1313,11 @@ export const useStore = create((set, get) => ({
   loadPreferences: async () => {
     const userId = get().user?.id;
     const faviconEpoch = get().senderFaviconsEpoch;
+    const savedSplitsEpoch = get().savedSplitsEpoch;
     try {
       const prefs = await api.getPreferences();
       if (get().user?.id !== userId) return;
+      get().hydrateSavedSplits(prefs, savedSplitsEpoch);
       // Per-user plugin activation. Absent = nothing activated (new users start with GTD off);
       // existing GTD users were grandfathered into ['gtd'] by migration 0042.
       set({ enabledPlugins: Array.isArray(prefs.enabledPlugins) ? prefs.enabledPlugins : [] });

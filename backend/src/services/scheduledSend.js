@@ -1,3 +1,4 @@
+import { prepareOpenActivity, noteScheduledOpenActivityStatus } from './openActivity.js';
 import { createHash, randomUUID } from 'crypto';
 import { pool, query } from './db.js';
 import { decryptBytes, encryptBytes } from './encryption.js';
@@ -555,7 +556,7 @@ export class ScheduledSender {
     try {
       built = await this.build(row, account);
       delivery = await prepareDelivery(built.input, built.identity, built.forwarded, {
-        messageId: built.payload.messageId, date, smtp: { trackStage: true },
+        messageId: built.payload.messageId, date, smtp: { trackStage: true }, scheduledId: row.id,
       });
     } catch (err) {
       return this.afterError(row, err, 'prepare');
@@ -628,6 +629,7 @@ export class ScheduledSender {
       inReplyTo: payload.inReplyTo,
       references: payload.references,
       priority: payload.priority,
+      trackOpens: payload.trackOpens === undefined ? false : payload.trackOpens,
     });
     const identity = await this.identityFor(account, payload);
     const attachments = await loadAttachments(this.db, row);
@@ -661,8 +663,13 @@ export class ScheduledSender {
     };
   }
 
+  activityIdentity(row) {
+    const payload = openJson(row.payload_enc, aad.payload(row));
+    return { accountId: row.account_id, messageId: payload?.messageId, trackOpens: payload?.trackOpens === true };
+  }
+
   afterError(row, err, phase) {
-    const decision = afterFailure(classifySendError(err, { phase }), row.attempts);
+    const decision = afterFailure(classifySendError(err, { phase: err?.smtpNotStarted ? 'prepare' : phase }), row.attempts);
     const smtp = err?.cause ?? err;
     const detail = {
       code: decision.code,
@@ -695,6 +702,7 @@ export class ScheduledSender {
     }[decision.outcome];
     const ok = await this.settle(row, fields);
     if (ok) {
+      await noteScheduledOpenActivityStatus(row.user_id, row.id, fields.status === 'uncertain' ? 'uncertain' : 'failed', this.activityIdentity(row));
       this.changed(row, fields.status);
       await this.notify(row, fields.status, { failureCode: decision.code, pauseReason: decision.pauseReason, offline: detail.offline === true });
     }
@@ -727,6 +735,7 @@ export class ScheduledSender {
     }
     if (ok) {
       this.leases.delete(row.claim_token);
+      await noteScheduledOpenActivityStatus(row.user_id, row.id, 'sent', this.activityIdentity(row));
       this.changed(row, 'sent');
     }
     return ok;
@@ -844,6 +853,10 @@ export class ScheduledSender {
         const mailOptions = buildMailOptions(built.input, built.identity, built.forwarded, {
           messageId: built.payload.messageId, date: new Date(row.smtp_started_at),
         });
+        if (built.input.trackOpens === true && typeof mailOptions.html === 'string') {
+          const activity = await prepareOpenActivity({ userId: row.user_id, accountId: row.account_id, messageId: built.payload.messageId, scheduledId: row.id });
+          mailOptions.html += activity.pixel;
+        }
         const raw = await renderRawMessage(mailOptions);
         // Not ours any more (taken over after a long wait): the new claimant makes the copy.
         if (!(await this.stillClaimed(row))) {

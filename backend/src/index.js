@@ -8,6 +8,7 @@ import { readFileSync } from 'fs';
 import 'dotenv/config';
 import { PgSessionStore } from './services/sessionStore.js';
 import { startExpirySweep, stopExpirySweep } from './services/kvStore.js';
+import { startOpenActivitySweep, stopOpenActivitySweep } from './services/openActivity.js';
 import { parseTrustProxyHops } from './utils/trustProxy.js';
 import { buildSessionOptions } from './utils/sessionConfig.js';
 import { mountApiAuth } from './middleware/apiChain.js';
@@ -21,6 +22,10 @@ import authRoutes from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
 import mailRoutes from './routes/mail.js';
 import searchRoutes from './routes/search.js';
+import snippetsRoutes from './routes/snippets.js';
+import invitationsRoutes from './routes/invitations.js';
+import mutedThreadsRoutes from './routes/mutedThreads.js';
+import openActivityRoutes, { publicOpenActivity } from './routes/openActivity.js';
 import adminRoutes from './routes/admin.js';
 import totpRoutes from './routes/totp.js';
 import oidcApiRouter, { oidcBrowserRouter } from './routes/oidc.js';
@@ -98,6 +103,10 @@ if (process.env.NODE_ENV === 'production' && !process.env.APP_URL) {
   process.exit(1);
 }
 
+// Public pixels neither create a session nor collect request identity. The handler
+// supplies its own fixed security/cache headers and always returns the same image.
+app.use('/api/open-activity/pixel', publicOpenActivity);
+
 // Session — options live in utils/sessionConfig.js so they can be exercised by tests.
 const sessionMiddleware = session(
   buildSessionOptions(new PgSessionStore(), process.env.SESSION_SECRET)
@@ -157,9 +166,13 @@ app.use('/api/accounts', accountSpamRouter);
 app.use('/api/spam', spamRoutes);
 app.use('/api/mail', mailRoutes);
 app.use('/api/mail', sendRoutes);
+app.use('/api/mail', invitationsRoutes);
+app.use('/api/mail', mutedThreadsRoutes);
 app.use('/api/mail', draftRoutes);
 app.use('/api/mail', scheduledRoutes);
 app.use('/api/search', searchRoutes);
+app.use('/api/snippets', snippetsRoutes);
+app.use('/api/open-activity', openActivityRoutes);
 app.use('/api/admin/backup', backupRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/totp', totpRoutes);
@@ -214,6 +227,7 @@ setupWebSocket(wss, sessionMiddleware, imapManager);
 // Run pending schema migrations then start
 await runMigrations();
 startExpirySweep();
+startOpenActivitySweep();
 
 // One-time backfill: populate photo_data from existing vcard column for contacts
 // that were synced before CardDAV PUT started persisting photo_data.
@@ -291,7 +305,7 @@ function exitAfterClose(code, { wsCode = 1001, wsReason = 'Shutting down' } = {}
     code,
     httpServer,
     closeClients: () => closeWebSocketClients(wss, wsCode, wsReason),
-    quit: () => stopExpirySweep(),
+    quit: () => { stopExpirySweep(); stopOpenActivitySweep(); },
     exit: c => process.exit(c),
   });
 }

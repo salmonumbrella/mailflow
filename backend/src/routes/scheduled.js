@@ -1,3 +1,5 @@
+import { requireOpenActivityAvailable, OpenActivityError } from '../services/openActivityRules.js';
+import { noteScheduledOpenActivityStatus } from '../services/openActivity.js';
 import { randomBytes, randomUUID } from 'crypto';
 import { Router } from 'express';
 import { query, withTransaction } from '../services/db.js';
@@ -145,6 +147,8 @@ async function buildSpec(userId, body, { messageId } = {}) {
     throw new SendError(404, 'Alias not found');
   }
   const identity = await resolveIdentity(userId, input);
+  try { requireOpenActivityAvailable(input, identity); }
+  catch (err) { if (err instanceof OpenActivityError) throw new SendError(err.status, err.message); throw err; }
   const forwarded = await resolveForwarded(userId, input);
   const domain = identity.fromEmail.split('@')[1] || 'mailflow.local';
   const keepId = typeof messageId === 'string' && messageId.endsWith(`@${domain}>`);
@@ -165,6 +169,7 @@ async function buildSpec(userId, body, { messageId } = {}) {
     inReplyTo: input.inReplyTo ?? null,
     references: input.references ?? null,
     priority: input.priority,
+    trackOpens: input.trackOpens,
     ...(body.compose && typeof body.compose === 'object' && !Array.isArray(body.compose) ? { compose: body.compose } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > LIMITS.payloadBytes) {
@@ -795,6 +800,7 @@ router.post('/scheduled/:id/cancel', validId, async (req, res) => {
     if (current.status === 'cancelled') return res.json({ status: 'cancelled', undoUntil: current.purge_after });
     return fail(res, 409, stateMessage(current.status), { status: current.status });
   }
+  await noteScheduledOpenActivityStatus(userId, row.id, 'cancelled');
   changed(userId, row.id, 'cancelled');
   res.json({ status: 'cancelled', undoUntil: row.purge_after });
 });

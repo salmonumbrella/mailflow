@@ -115,6 +115,35 @@ const dir = dirname(fileURLToPath(import.meta.url));
 // Two locales sharing a value is only allowed if both appear in the same group.
 // Any unlisted pair will still fail.
 const SAME_VALUE_ALLOWED = {
+  // Superhuman workspace: technical examples and genuinely identical localized words.
+  'compose.availability.zoneExample': 'any', // IANA zone identifier: Europe/London
+  'savedSplits.queryExample': 'any', // Native query syntax: from:alice is:unread
+  'localCalendar.minutes': [['cs', 'de', 'en', 'es', 'fr', 'it', 'pl', 'ptBR']], // Standard min unit
+  'localCalendar.color': [['en', 'es']], // Color
+  'localCalendar.description': [['en', 'fr']], // Description
+  'snippets.bodyLabel': [['en', 'fr']], // Message
+  'localCalendar.end': [['es', 'fr']], // Fin
+  'localCalendar.calendarLabel': [['es', 'it']], // Calendario
+  'localCalendar.saturday': [['es', 'ptBR'], ['cs', 'pl']], // Sábado / Sobota
+  'localCalendar.sunday': [['es', 'ptBR']], // Domingo
+  'localCalendar.week': [['es', 'ptBR']], // Semana
+  'localCalendar.titleLabel': [['es', 'ptBR']], // Título
+  'snippets.titleLabel': [['es', 'ptBR']], // Título
+  'localCalendar.editEvent': [['es', 'ptBR']], // Editar evento
+  'localCalendar.editNamedCalendar': [['es', 'ptBR']], // Editar {{name}}
+  'localCalendar.timeFormat': [['es', 'ptBR']], // Formato de hora
+  'localCalendar.timeFormat12': [['es', 'ptBR']], // 12 horas
+  'localCalendar.timeFormat24': [['es', 'ptBR']], // 24 horas
+  'snippets.uses': [['es', 'ptBR']], // Usos
+  'snippets.lastUsed': [['es', 'ptBR']], // Último uso
+  'snippets.modified': [['es', 'ptBR']], // Modificado
+  'snippets.never': [['es', 'ptBR']], // Nunca
+  'commandPalette.title': [['es', 'ptBR']], // Paleta de comandos
+  'commandPalette.searchLabel': [['es', 'ptBR']], // Buscar comandos
+  'commandPalette.results': [['es', 'ptBR']], // Comandos
+  'superhuman.commands': [['es', 'ptBR']], // Comandos
+  'invitation.sending': [['es', 'ptBR']], // Enviando…
+  'privateNotes.title': [['es', 'ptBR']], // Notas privadas
   // ── List sort menu (#528) ───────────────────────────────────────────────────
   'messageList.sortSummary':                'any', // "{{sort}}, {{dir}}": only the placeholders and a comma
   'messageList.sortDate':                   [['en', 'fr'], ['it', 'ptBR', 'pl'], ['cs', 'de']], // Date / Data / Datum

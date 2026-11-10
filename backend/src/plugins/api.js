@@ -91,6 +91,7 @@ export { resolveAllDraftsPaths, resolveAllTrashPaths, resolveAllSpamPaths } from
 // reads mail/account data only through these — never raw SQL, never across users.
 export {
   loadOwnedMessage,
+  getOwnedThreadIdentities,
   getOwnedAccount,
   listUserAccounts,
   getAccountAddresses,

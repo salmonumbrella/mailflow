@@ -17,4 +17,11 @@ describe('loadBundledPlugins', () => {
     expect(gtd.router.base).toBe('/api/gtd');
     expect(typeof gtd.router.handler).toBe('function');
   });
+  it('registers the private local calendar and notes without background sync hooks', () => {
+    const registry = loadBundledPlugins(createPluginRegistry());
+    expect(registry.get('local-calendar')).toMatchObject({ name: 'MailFlow calendar', tier: 1, router: { base: '/api/local-calendar' } });
+    expect(registry.get('local-calendar').sync).toBeUndefined();
+    expect(registry.get('private-notes')).toBeTruthy();
+  });
+
 });

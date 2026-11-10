@@ -16,6 +16,27 @@ export async function loadOwnedMessage(userId, messageId) {
   return findOwnedMessage(userId, messageId);
 }
 
+// A bounded identity view of the selected owned conversation. Include deleted cache members:
+// their immutable Message-IDs can still anchor private data after a move or root healing.
+export async function getOwnedThreadIdentities(userId, messageId, { limit = 100 } = {}) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Thread identity limit must be between 1 and 100');
+  const { rows } = await query(`WITH target AS (
+      SELECT m.account_id, m.thread_key, m.message_id
+      FROM messages m JOIN email_accounts a ON a.id = m.account_id
+      WHERE m.id = $2 AND a.user_id = $1 AND m.is_deleted = false
+    )
+    SELECT DISTINCT left(m.message_id, 4097) AS message_id, left(m.thread_id, 4097) AS thread_id,
+      left(m.in_reply_to, 4097) AS in_reply_to, left(m.thread_references, 16385) AS thread_references
+    FROM messages m JOIN target t ON m.account_id = t.account_id
+      AND (m.thread_key = t.thread_key OR m.message_id = t.message_id)
+    LIMIT $3`, [userId, messageId, limit + 1]);
+  if (rows.length > limit || rows.some(row => ['message_id', 'thread_id', 'in_reply_to'].some(field => row[field]?.length > 4096)
+    || row.thread_references?.length > 16384)) {
+    throw Object.assign(new Error('This conversation is too large to load private data safely.'), { status: 413 });
+  }
+  return rows;
+}
+
 // One of the user's accounts by id (ownership enforced), or null. Full row.
 export async function getOwnedAccount(userId, accountId) {
   return findOwnedAccount(userId, accountId);
