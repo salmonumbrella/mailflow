@@ -53,9 +53,9 @@ const change = (el, value) => act(async () => {
 });
 const submit = () => act(async () => { host.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
 const key = name => act(async () => { document.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true })); });
-async function mount(id = accountId) {
+async function mount(id = accountId, initialCreate = false) {
   root = createRoot(host);
-  await act(async () => { root.render(React.createElement(GmailLabelManager, { key: id, accountId: id, onLockChange: value => locks.push(value) })); });
+  await act(async () => { root.render(React.createElement(GmailLabelManager, { key: id, accountId: id, initialCreate, onLockChange: value => locks.push(value) })); });
 }
 beforeEach(() => {
   calls = []; locks = []; labels = [{ ...base }, { ...base, id: 'child', name: 'Child', path: 'Work/Child', parentId: 'work' }, { ...base, id: 'other', name: 'Other', path: 'Other' }];
@@ -69,9 +69,9 @@ beforeEach(() => {
 });
 afterEach(async () => { if (root) await act(async () => root.unmount()); root = null; });
 
-test('real definitions render hierarchy and honest unavailable membership, without manufactured counts', async () => {
+test('real definitions render hierarchy and honest synchronized-cache scope, without manufactured counts', async () => {
   await mount();
-  assert.match(host.textContent, /Applying labels to messages, message counts/);
+  assert.match(host.textContent, /counts cover synchronized mail only/);
   assert.match(host.textContent, /do not sync to Google/);
   assert.equal(host.querySelectorAll('.mf-native-labels-tree > li').length, 3);
   assert.equal(host.querySelectorAll('.mf-native-labels-tree > li')[2].style.getPropertyValue('--label-depth'), '1');
@@ -217,4 +217,30 @@ test('auth, screen-lock and rate-limit refusals during recovery keep the origina
   api.createNativeLabel = async data => { calls.push(['create', structuredClone(data)]); return {}; };
   await click(button('Retry pending label request'));
   assert.deepEqual(calls.filter(c => c[0] === 'create')[1][1], original); assert.equal(window.sessionStorage.length, 0);
+});
+
+test('deletion preview discloses current and retained-generation associations without implying mail deletion', async () => {
+  api.previewNativeLabelDelete = async () => ({ label: labels[0], descendants: [labels[1]], treeRevision: '42', associations: [
+    { storageGeneration: 'current', currentGeneration: true, memberships: 4, entities: 3 },
+    { storageGeneration: 'old', currentGeneration: false, memberships: 2, entities: 2 },
+  ] });
+  await mount(); await click(host.querySelector('[aria-label="Remove MailFlow label Work"]'));
+  const associations = host.querySelector('[aria-label="Message associations to remove"]');
+  assert.match(associations.textContent, /Current mailbox: Associations: 4; message entities: 3/);
+  assert.match(associations.textContent, /Retained earlier mailbox: Associations: 2; message entities: 2/);
+  assert.match(host.textContent, /No messages or IMAP folders will be deleted/);
+  assert.equal(calls.some(call => call[0] === 'delete'), false);
+});
+
+test('Create shortcut opens the real definition editor but cannot bypass pending recovery', async () => {
+  await mount(accountId, true);
+  assert.ok(host.querySelector('form'));
+  assert.equal(document.activeElement, field('Label name'));
+  assert.equal(calls.some(call => call[0] === 'create'), false);
+  await act(async () => root.unmount()); root = null;
+  window.sessionStorage.setItem(`mailflow:pending-native-label:${accountId}`, JSON.stringify({ kind: 'create', payload: { accountId, mutationId: 'pending', name: 'Earlier' } }));
+  await mount(accountId, true);
+  assert.equal(host.querySelector('form'), null);
+  assert.ok(button('Retry pending label request'));
+  assert.equal(calls.some(call => call[0] === 'create'), false);
 });

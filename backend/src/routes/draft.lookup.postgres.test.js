@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { installNativeLabelReadFixture } from '../services/testSupport/nativeLabelReadFixture.js';
 import express from 'express';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
@@ -38,6 +39,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('cached reply indicator
         ADD list_unsubscribe_post text, ADD delivery_addresses jsonb, ADD spam_verdict text,
         ADD spam_user_override text, ADD spam_score_ml real;
       CREATE TEMP TABLE contacts (id uuid, user_id text, primary_email text, photo_data text)`);
+    await installNativeLabelReadFixture(database);
     query.mockImplementation((sql, values) => database.query(sql, values));
     const app = express();
     app.use(express.json());
@@ -61,10 +63,12 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('cached reply indicator
       VALUES ($1,$2,'Drafts','<reply@test>','<parent@test>','<root@test> <parent@test>','<root@test>','<root@test>',now())`, [selected, account]);
     const result = await listMessages({ userId: 'owner', accountId: account, folder: 'Drafts', threaded });
     expect(result.messages).toHaveLength(1);
-    expect(result.messages[0]).toMatchObject({ in_reply_to: '<parent@test>', thread_references: '<root@test> <parent@test>' });
+    expect(result.messages[0]).toMatchObject({ in_reply_to: '<parent@test>', thread_references: '<root@test> <parent@test>',
+      nativeLabelState: 'unavailable', entityId: null, metadataVersion: null, nativeLabels: null, storageGeneration: expect.any(String) });
     const response = await fetch(`${base}/api/search?q=is:unread%20in:Drafts&accountId=${account}`);
     expect(response.status).toBe(200);
-    expect((await response.json()).messages[0]).toMatchObject({ in_reply_to: '<parent@test>', thread_references: '<root@test> <parent@test>' });
+    expect((await response.json()).messages[0]).toMatchObject({ in_reply_to: '<parent@test>', thread_references: '<root@test> <parent@test>',
+      nativeLabelState: 'unavailable', entityId: null, metadataVersion: null, nativeLabels: null, storageGeneration: expect.any(String) });
   });
 
   it('finds late exact-header bridges across more than 5000 UUID-ordered drafts', async () => {

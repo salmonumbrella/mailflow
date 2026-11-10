@@ -1,3 +1,4 @@
+import { installLabelHistory } from '../utils/nativeLabelNavigation.js';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { REPAIR_FLAG, signInResultNotice, trustedWrongAccount } from '../utils/accountErrors.js';
@@ -20,6 +21,7 @@ import { applyMarkRead } from '../utils/markRead.js';
 import { buildKeyMap, resolveShortcutAction, shortcutActionText, getEffectiveShortcuts, getGroupedActions, parseModKey, modLabel, SPECIAL_KEYS, SPECIAL_KEY_LABELS } from '../utils/defaultShortcuts.js';
 import Sidebar from './Sidebar.jsx';
 import GmailHeader from './GmailHeader.jsx';
+import GmailSettingsHost from './GmailSettingsHost.jsx';
 import MessageList from './MessageList.jsx';
 import ReadingPane from './ReadingPane.jsx';
 import NotificationToasts from './NotificationToasts.jsx';
@@ -68,6 +70,7 @@ export default function MailApp() {
     accounts, rightSidebarWidth, setRightSidebarWidth, isRightSidebarResizing, setIsRightSidebarResizing,
     rightSidebarHidden, toggleRightSidebarHidden,
   } = useStore();
+  useEffect(() => installLabelHistory(useStore), []);
   const syncInterval = useStore(s => s.syncInterval);
   const autoLockMinutes = useStore(s => s.autoLockMinutes);
   const lockScreen = useStore(s => s.lockScreen);
@@ -275,7 +278,7 @@ export default function MailApp() {
     prevMessageIdRef.current = selectedMessageId;
     if (!singleView) return;
     if (selectedMessageId && !prev) {
-      history.pushState({ mailflow: 'message' }, '', '/');
+      history.pushState({ ...history.state, mailflow: 'message' }, '', window.location.href);
     }
   }, [singleView, selectedMessageId]);
 
@@ -286,15 +289,15 @@ export default function MailApp() {
     // The handler re-pushes it after every popstate so back swipes always land
     // inside the app rather than exiting the PWA and showing a blank Safari page.
     if (window.navigator.standalone && history.state?.mailflow !== 'guard') {
-      history.pushState({ mailflow: 'guard' }, '', '/');
+      history.pushState({ ...history.state, mailflow: 'guard' }, '', window.location.href);
     }
     const handler = (event) => {
       if (selectedMessageIdRef.current) setSelectedMessage(null);
       // Backing out of a message lands on the existing guard entry. Re-pushing
       // during that popstate can make iOS PWA history gestures temporarily stop
       // delivering taps, so only re-arm when the user has backed past the guard.
-      if (window.navigator.standalone && event.state?.mailflow !== 'guard') {
-        history.pushState({ mailflow: 'guard' }, '', '/');
+      if (window.navigator.standalone && !event.state?.nativeMailView && event.state?.mailflow !== 'guard') {
+        history.pushState({ ...history.state, mailflow: 'guard' }, '', window.location.href);
       }
     };
     window.addEventListener('popstate', handler);
@@ -858,8 +861,9 @@ export default function MailApp() {
       overflow: 'hidden',
       background: 'var(--bg-primary)',
     }}>
+      {layout === 'gmail' && <GmailSettingsHost />}
       {layout === 'gmail' && !isMobile && (
-        <GmailHeader searchTargetRef={setGmailSearchTarget} onShowShortcutHelp={() => setShowShortcutHelp(true)} />
+        <GmailHeader settingsHosted searchTargetRef={setGmailSearchTarget} onShowShortcutHelp={() => setShowShortcutHelp(true)} />
       )}
       <div className="mailflow-mail-body" style={{ display: 'flex', width: '100%', height: '100%', minHeight: 0, flex: 1 }}>
       {isMobile ? (

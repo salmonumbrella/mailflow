@@ -1,6 +1,8 @@
+import { nativeLabelActionsBlocked } from './nativeLabelNavigation.js';
 // Resolve the selected row across the ordinary list, search, deep-link stash,
 // and GTD rail. GTD copies may not exist in the current mailbox's messages.
 export function selectedMessage(state) {
+  if (nativeLabelActionsBlocked(state)) return null;
   const id = state?.selectedMessageId ?? topOpenMessageWindow(state)?.messageId;
   if (id == null) return null;
   const pool = state.searchQuery?.trim() ? state.searchResults : state.messages;

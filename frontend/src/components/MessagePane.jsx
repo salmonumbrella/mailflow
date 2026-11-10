@@ -1,3 +1,6 @@
+import { useNativeLabelReaderGuard } from '../hooks/useNativeLabelReaderGuard.js';
+import { nativeLabelActionsBlocked } from '../utils/nativeLabelNavigation.js';
+import NativeLabelChips from './NativeLabelChips.jsx';
 import { Fragment, useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
 import GmailReplyTarget from './GmailReplyTarget.jsx';
 import GmailMessageDetails from './GmailMessageDetails.jsx';
@@ -20,7 +23,7 @@ import { useSwipeBack } from '../hooks/useSwipeBack.js';
 import SwipePager from './SwipePager.jsx';
 import { clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete } from '../utils/pendingDeletes.js';
 import { clearReadGuard } from '../utils/pendingReads.js';
-import { applyMarkRead, scheduleMarkRead, cancelScheduledMarkRead, cancelScheduledMarkReadFor } from '../utils/markRead.js';
+import { applyMarkRead, scheduleMarkRead, verifiedNativeLabelReadTarget, cancelScheduledMarkRead, cancelScheduledMarkReadFor } from '../utils/markRead.js';
 import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../utils/listSelection.js';
 import { selectListedMessage } from '../utils/conversation.js';
 import { bodyCache, prefetchBody as prefetchCachedBody } from '../utils/bodyCache.js';
@@ -85,6 +88,7 @@ function linkifyText(text) {
 
 export default function MessagePane({ windowMessageId = null, onWindowClose = null, onReplyDockTarget } = {}) {
   const { t } = useTranslation();
+  const nativeLabelGuard = useNativeLabelReaderGuard();
   const gmailLayout = useStore(s => s.layout === 'gmail');
   const quoteLabel = t('gmailReader.quotedContent', { defaultValue: 'Quoted content' });
   const {
@@ -150,6 +154,21 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   useEffect(() => {
     setResolvedSubject(null);
   }, [message?.id]);
+  const pausedNativeRead = useRef(null);
+  useEffect(() => {
+    if (nativeLabelGuard.blocked) {
+      if (pausedNativeRead.current?.id !== message?.id) pausedNativeRead.current = message;
+      cancelScheduledMarkRead(autoMarkReadTimerRef.current);
+      autoMarkReadTimerRef.current = null;
+      return;
+    }
+    const previous = pausedNativeRead.current;
+    pausedNativeRead.current = null;
+    if (!previous || previous.id !== message?.id) return;
+    const current = verifiedNativeLabelReadTarget(previous);
+    if (current) autoMarkReadTimerRef.current = scheduleMarkRead(current);
+  }, [nativeLabelGuard.blocked, message]);
+
 
   // In window mode, if the message leaves the store (archived/moved from another view,
   // a background sync, or an action taken here), close the window rather than showing an
@@ -186,6 +205,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // Mirrors MessageList.performSpamLabel (single-message variant). Kept inline
   // here so the MessagePane doesn't need to reach into MessageList internals.
   const performSingleSpamLabel = useCallback(async (label) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message) return;
     const wasUnread = !message.is_read;
     advanceSelectionAfterRemoval(message.id);
@@ -243,6 +263,10 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // Bumped to close the toolbar's menus, which are remounted under a new key.
   const [menuEpoch, setMenuEpoch] = useState(0);
   const [contextMenu, setContextMenu] = useState(null);
+  useEffect(() => {
+    if (!nativeLabelGuard.blocked) return;
+    setShowMovePicker(false); setContextMenu(null); setConfirmDeleteId(null);
+  }, [nativeLabelGuard.blocked]);
   const [spamExplainMessageId, setSpamExplainMessageId] = useState(null);
   const [findDialogOpen, setFindDialogOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
@@ -307,6 +331,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }, [isSelectionContextTarget]);
 
   const openPaneContextMenu = useCallback((x, y, options = {}) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message) return;
     setShowMovePicker(false);
     setMenuEpoch(e => e + 1);
@@ -615,11 +640,13 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const loadedBody = async () => body;
 
   const handleReply = (replyAll = false, { aiReply = false } = {}) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message) return;
     openReplyFromMessage(message, { accounts, folders: useStore.getState().folders, openCompose, getMessageBody: loadedBody, replyAll, aiReply });
   };
 
   const handleForward = () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message) return;
     openForwardFromMessage(message, { openCompose, getMessageBody: loadedBody });
   };
@@ -627,6 +654,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // The star fills at once, as in the list: the server answers only once the mail server has
   // the flag, which takes seconds on Gmail. Put back, with a notice, if that fails.
   const handleStarToggle = async () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message) return;
     const { id } = message;
     const newVal = !message.is_starred;
@@ -710,6 +738,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }, []);
 
   const handleOpenMovePicker = useCallback(async () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message) return;
     if (showMovePicker) { setShowMovePicker(false); return; }
     setShowMovePicker(true);
@@ -726,6 +755,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }, [showMovePicker, message?.account_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleMarkUnread = useCallback(() => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (markMessageUnread(message, {
       cancel: () => {
         cancelScheduledMarkRead(autoMarkReadTimerRef.current);
@@ -747,6 +777,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // moment "Mark as unread" worked and the message could not be marked read again from here
   // (#683). Explicit "mark read" ignores markReadBehavior, as the context menu's does.
   const handleMarkRead = useCallback(() => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message || message.is_read) return;
     // A delayed auto-read still pending would mark it read a second time and count it twice.
     cancelScheduledMarkRead(autoMarkReadTimerRef.current);
@@ -863,6 +894,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }, [findDialogOpen]);
 
   const handleMoveToFolder = useCallback((folder) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message) return;
     setShowMovePicker(false);
     const moved = message;
@@ -984,6 +1016,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }
 
   const handleDelete = () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const deleted = message;
     setPendingDelete(deleted.id);
     advanceSelectionAfterRemoval(deleted.id);
@@ -1021,6 +1054,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const requestDelete = () => gmailLayout && deleteMode !== 'trash' ? setConfirmDeleteId(message.id) : handleDelete();
 
   const handleArchive = () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const archived = message;
     advanceSelectionAfterRemoval(archived.id);
     removeMessage(archived.id);
@@ -1054,6 +1088,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   };
 
   const handlePaneContextAction = async (action, data) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message) return;
 
     switch (action) {
@@ -1205,6 +1240,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   };
 
   const handleAllowSender = async () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const senderEmail = message.from_email?.toLowerCase();
     if (!senderEmail) return;
     setSavingAllow(true);
@@ -1221,6 +1257,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   };
 
   const handleUnsubscribe = async () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message) return;
     setUnsubscribeStatus('loading');
     const msg = message;
@@ -1252,6 +1289,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   };
 
   const handleAiClassify = async () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message || aiClassifying) return;
     setAiClassifying(true);
     try {
@@ -1274,6 +1312,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   };
 
   const handleAllowDomain = async () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const senderEmail = message.from_email?.toLowerCase() || '';
     const senderDomain = senderEmail.includes('@') ? senderEmail.split('@')[1] : '';
     if (!senderDomain) return;
@@ -1357,6 +1396,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   return (
     <div
       ref={paneRef}
+      {...nativeLabelGuard.props}
       className="mailflow-message-pane"
       style={{
         flex: 1, display: 'flex', flexDirection: 'column',
@@ -1366,6 +1406,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     >
       {isMobile && <style>{`@keyframes mobileSlideIn { from { transform: translateX(100%) } to { transform: translateX(0) } }`}</style>}
 
+      {nativeLabelGuard.blocked && <p role="status" style={{ padding: 12 }}>{t('gmail.memberships.readerPaused', 'Message actions are paused until this label view is verified. Refresh the label view to try again.')}</p>}
       {/* Back bar: on a phone, and in List first (#596) */}
       {(isMobile || listFirst) && !windowMode && (
         <div style={{
@@ -1378,7 +1419,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
           transition: 'box-shadow 0.2s ease',
         }}>
           <button
-            onClick={closeOpenMessage}
+            data-native-label-safe onClick={closeOpenMessage}
             style={{
               background: 'none', border: 'none', color: 'var(--accent)',
               cursor: 'pointer', display: 'flex', alignItems: 'center',
@@ -1610,6 +1651,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                 })()}
               </span>
               <SpamBadge message={message} onClick={(m) => setSpamExplainMessageId(m.id)} />
+              {gmailLayout && <NativeLabelChips message={message} editable />}
               <PluginSlot name="message-header-meta" ctx={{ message, account }} />
             </div>
           </div>

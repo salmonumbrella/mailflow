@@ -1,3 +1,4 @@
+import { hydrateNativeLabels } from './nativeLabelReadModel.js';
 import { currentSnoozeMessageSql } from './snoozeIdentity.js';
 import { query } from './db.js';
 import { resolveAccountScope } from './unifiedInbox.js';
@@ -179,7 +180,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
       ),
       deduped AS MATERIALIZED (
         SELECT DISTINCT ON (m.account_id, m.thread_key, m.message_id)
-               m.id, m.uid, m.folder, m.message_id,
+               m.id, m.uid, m.folder, m.entity_id, m.storage_generation, m.uid_validity, m.message_id,
                m.thread_key AS thread_id,
                m.subject, m.from_name, m.from_email,
                m.to_addresses, m.cc_addresses, m.reply_to, m.in_reply_to, m.thread_references,
@@ -243,7 +244,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
         FROM deduped d
         LEFT JOIN thread_totals tt ON tt.thread_id = d.thread_id
       )
-      SELECT id, uid, folder, message_id, thread_id, thread_subject AS subject,
+      SELECT id, uid, folder, entity_id, storage_generation, uid_validity, message_id, thread_id, thread_subject AS subject,
              thread_from_name AS from_name, thread_from_email AS from_email,
              from_name AS reply_from_name, from_email AS reply_from_email, subject AS reply_subject,
              to_addresses, cc_addresses, reply_to, in_reply_to, thread_references,
@@ -269,7 +270,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
     `, filterValues);
 
     return {
-      messages: threadResult.rows,
+      messages: await hydrateNativeLabels(userId, threadResult.rows),
       total: threadCountResult.rows[0]?.total ?? 0,
       threaded: true,
       resolvedAccountId,
@@ -281,7 +282,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
   values.push(safeLimit, safeOffset);
 
   const result = await query(`
-    SELECT m.id, m.uid, m.folder, m.message_id, m.subject, m.from_name, m.from_email,
+    SELECT m.id, m.uid, m.folder, m.entity_id, m.storage_generation, m.uid_validity, m.message_id, m.subject, m.from_name, m.from_email,
            m.to_addresses, m.cc_addresses, m.reply_to, m.in_reply_to, m.thread_references,
            m.date, m.snippet, m.is_read, m.is_starred,
            m.has_attachments, m.account_id, m.category,
@@ -310,7 +311,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
   `, values);
 
   return {
-    messages: result.rows,
+    messages: await hydrateNativeLabels(userId, result.rows),
     total,
     resolvedAccountId,
   };

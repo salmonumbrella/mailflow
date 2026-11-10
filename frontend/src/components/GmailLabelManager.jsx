@@ -1,10 +1,12 @@
+import { useStore } from '../store/index.js';
+import { NATIVE_LABELS_CHANGED } from '../utils/nativeLabelNavigation.js';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { definitiveLabelFailure, labelDraft, labelParentOptions, labelTree, readPendingLabelMutation, savePendingLabelMutation } from '../utils/nativeLabels.js';
 import './GmailLabelManager.css';
 
-export default function GmailLabelManager({ accountId, onLockChange }) {
+export default function GmailLabelManager({ accountId, onLockChange, initialCreate = false }) {
   const { t } = useTranslation();
   const uid = useId();
   const translate = useRef(t);
@@ -13,9 +15,11 @@ export default function GmailLabelManager({ accountId, onLockChange }) {
   const opener = useRef(null);
   const restoreFocus = useRef(false);
   const inFlight = useRef(false);
+  const initialCreateConsumed = useRef(false);
   const mounted = useRef(false);
   const readVersion = useRef(0);
   const [snapshot, setSnapshot] = useState(null);
+  const [counts, setCounts] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -32,7 +36,13 @@ export default function GmailLabelManager({ accountId, onLockChange }) {
     try {
       const data = await api.getNativeLabels(accountId);
       if (!Array.isArray(data.labels) || typeof data.treeRevision !== 'string') throw new Error(translate.current('gmail.nativeLabels.invalidResponse', 'The label list could not be verified. Retry loading it.'));
-      if (mounted.current && version === readVersion.current) setSnapshot(data);
+      if (mounted.current && version === readVersion.current) {
+        setSnapshot(data); setCounts(null);
+        // Count failure never blocks definition recovery or turns an acknowledged save into failure.
+        if (data.storageGeneration) api.getNativeLabelCounts(accountId, data.storageGeneration).then(result => {
+          if (mounted.current && version === readVersion.current && result.accountId === accountId && result.storageGeneration === data.storageGeneration && Array.isArray(result.counts)) setCounts(result.counts);
+        }).catch(() => {});
+      }
     } catch (err) {
       if (mounted.current && version === readVersion.current) {
         setSnapshot(null); setError(err.message || translate.current('gmail.nativeLabels.loadFailed', 'Labels could not be loaded. Retry.'));
@@ -45,11 +55,20 @@ export default function GmailLabelManager({ accountId, onLockChange }) {
     const generation = readVersion;
     refresh();
     const onFocus = () => { if (!inFlight.current) refresh(); };
+    const changed = event => { if ((!event.detail?.accountId || event.detail.accountId === accountId) && !inFlight.current) refresh(); };
+    window.addEventListener(NATIVE_LABELS_CHANGED, changed);
     window.addEventListener('focus', onFocus);
     const interval = window.setInterval(() => { if (document.visibilityState !== 'hidden' && !inFlight.current) refresh(); }, 30000);
-    return () => { mounted.current = false; ++generation.current; window.removeEventListener('focus', onFocus); window.clearInterval(interval); };
-  }, [refresh]);
+    return () => { mounted.current = false; ++generation.current; window.removeEventListener(NATIVE_LABELS_CHANGED, changed); window.removeEventListener('focus', onFocus); window.clearInterval(interval); };
+  }, [refresh, accountId]);
   useEffect(() => { onLockChange?.(locked); return () => onLockChange?.(false); }, [locked, onLockChange]);
+  useEffect(() => {
+    if (!initialCreate || initialCreateConsumed.current || !snapshot || loading) return;
+    initialCreateConsumed.current = true;
+    if (locked) return; // A pending request must be settled before offering a different mutation.
+    opener.current = region.current?.querySelector('[data-create-label]');
+    setEditor({ draft: labelDraft() });
+  }, [initialCreate, snapshot, loading, locked]);
   const editing = !!editor;
   const confirming = !!preview;
   const editingId = editor?.id;
@@ -94,9 +113,10 @@ export default function GmailLabelManager({ accountId, onLockChange }) {
       else if (operation.kind === 'update') await api.updateNativeLabel(operation.id, operation.payload);
       else await api.deleteNativeLabel(operation.id, operation.payload);
       savePendingLabelMutation(accountId, null);
+      useStore.getState().invalidateNativeLabels({ accountId, storageGeneration: snapshot?.storageGeneration });
       if (!mounted.current) return;
       restoreFocus.current = true; setPending(null); setEditor(null); setPreview(null);
-      setNotice(t('gmail.nativeLabels.saved', 'Label changes saved in MailFlow. No messages or mail-server folders were changed.'));
+      setNotice(t('gmail.nativeLabels.saved', 'Label changes saved in MailFlow. No messages or mail-server folders were deleted.'));
       await refresh();
     } catch (err) {
       if (!mounted.current) return;
@@ -134,7 +154,7 @@ export default function GmailLabelManager({ accountId, onLockChange }) {
   }}>
     <h2 id={`${uid}-title`}>{t('gmail.nativeLabels.title', 'MailFlow labels')}</h2>
     <p>{t('gmail.nativeLabels.scope', 'These labels are saved in MailFlow for this account. They are separate from IMAP folders and do not sync to Google or other mail apps.')}</p>
-    <p>{t('gmail.nativeLabels.definitionsOnly', 'Label definitions are available now. Applying labels to messages, message counts, unread-based display and message-list chips are not available yet. Visibility preferences below are saved for those features.')}</p>
+    <p>{t('gmail.nativeLabels.cacheScope', 'Apply labels to verified individual messages. Label lists and counts cover synchronized mail only, excluding Spam and Trash. Search, filter rules and compose-time assignments are not supported yet.')}</p>
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     {pending && <div role="status" data-label-editor className="mf-native-labels-recovery"><p>{t('gmail.nativeLabels.pending', 'A label request is pending verification. Other label changes are paused.')}</p><button type="button" disabled={busy} onClick={() => mutate(pending)}>{t('gmail.nativeLabels.retryMutation', 'Retry pending label request')}</button></div>}
@@ -146,7 +166,7 @@ export default function GmailLabelManager({ accountId, onLockChange }) {
     {snapshot && !labels.length && <p>{t('gmail.nativeLabels.empty', 'No MailFlow labels yet.')}</p>}
     {!!labels.length && <ul className="mf-native-labels-tree" aria-label={t('gmail.nativeLabels.tree', 'MailFlow label hierarchy')}>
       {labelTree(labels).map(label => <li key={label.id} style={{ '--label-depth': label.depth }}>
-        <div className="mf-native-labels-definition"><span className="mf-native-labels-chip" style={{ backgroundColor: label.color || undefined, color: label.textColor || undefined }}>{label.name}</span><small>{label.path}</small>
+        <div className="mf-native-labels-definition"><span className="mf-native-labels-chip" style={{ backgroundColor: label.color || undefined, color: label.textColor || undefined }}>{label.name}</span><small>{label.path}</small><small>{counts ? (() => { const count = counts.find(item => item.labelId === label.id); return count ? `${t('gmail.labelNavigation.counts', 'Synchronized messages: {{total}}; unread: {{unread}}', { total: count.total, unread: count.unread })}${count.unresolvedMemberships ? ` · ${t('gmail.labelNavigation.awaitingLocations', 'Memberships awaiting verified locations: {{memberships}}', { memberships: count.unresolvedMemberships })}` : ''}` : t('gmail.labelNavigation.countsUnavailable', "Counts unavailable"); })() : t('gmail.labelNavigation.countsUnavailable', "Counts unavailable")}</small>
           <small>{t('gmail.nativeLabels.sidebar', 'Sidebar visibility')}: {visibilityText(label.visibility)} · {t('gmail.nativeLabels.messages', 'Message-list visibility')}: {label.messageVisible ? t('gmail.nativeLabels.show', 'Show') : t('gmail.nativeLabels.hide', 'Hide')}</small></div>
         <div><button type="button" disabled={locked || !!editor || !!preview} aria-label={t('gmail.nativeLabels.editNamed', 'Edit MailFlow label {{name}}', { name: label.path })} onClick={event => edit(label, event.currentTarget)}>{t('gmail.nativeLabels.edit', 'Edit label')}</button><button type="button" disabled={locked || !!editor || !!preview} aria-label={t('gmail.nativeLabels.removeNamed', 'Remove MailFlow label {{name}}', { name: label.path })} onClick={event => openPreview(label, event.currentTarget)}>{t('gmail.nativeLabels.remove', 'Remove label')}</button></div>
       </li>)}
@@ -169,7 +189,8 @@ export default function GmailLabelManager({ accountId, onLockChange }) {
     </form>}
     {preview && <section data-label-editor className="mf-native-labels-editor" role="region" aria-labelledby={`${uid}-delete-title`}>
       <h3 id={`${uid}-delete-title`}>{t('gmail.nativeLabels.confirmTitle', 'Remove this label and its nested labels?')}</h3>
-      <p>{t('gmail.nativeLabels.deleteScope', 'Only the labels listed below will be removed from MailFlow. No messages or IMAP folders will be deleted.')}</p>
+      <p>{t('gmail.nativeLabels.deleteScope', 'The listed labels and their message associations will be removed from MailFlow, including retained associations from earlier mailbox generations. No messages or IMAP folders will be deleted.')}</p>
+      {Array.isArray(preview.associations) && <ul aria-label={t('gmail.nativeLabels.associationsToRemove', "Message associations to remove")}>{preview.associations.map(association => <li key={association.storageGeneration}>{association.currentGeneration ? t('gmail.nativeLabels.currentMailbox', "Current mailbox") : t('gmail.nativeLabels.retainedMailbox', "Retained earlier mailbox")}: {t('gmail.nativeLabels.associationCounts', 'Associations: {{memberships}}; message entities: {{entities}}.', { memberships: association.memberships, entities: association.entities })}</li>)}</ul>}
       <ul>{[preview.label, ...preview.descendants].map(label => <li key={label.id}>{label.path}</li>)}</ul>
       <div className="mf-native-labels-toolbar"><button type="button" disabled={locked} onClick={() => mutate({ kind: 'delete', id: preview.label.id, payload: { accountId, expectedTreeRevision: preview.treeRevision, confirmSubtree: true, mutationId: crypto.randomUUID() } })}>{t('gmail.nativeLabels.confirmDelete', 'Remove listed labels')}</button><button type="button" data-keep-labels disabled={locked} onClick={closeEditor}>{t('gmail.nativeLabels.cancelDelete', 'Keep labels')}</button></div>
     </section>}

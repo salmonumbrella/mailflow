@@ -1,9 +1,12 @@
+import { useNativeLabelReaderGuard } from '../hooks/useNativeLabelReaderGuard.js';
+import { nativeLabelActionsBlocked } from '../utils/nativeLabelNavigation.js';
+import NativeLabelChips from './NativeLabelChips.jsx';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../utils/api.js';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { fetchMessageBodyWithRetry } from '../utils/messageBody.js';
-import { applyMarkRead, scheduleMarkRead, cancelScheduledMarkRead, cancelScheduledMarkReadFor, shownReadInStore } from '../utils/markRead.js';
+import { applyMarkRead, scheduleMarkRead, verifiedNativeLabelReadTarget, cancelScheduledMarkRead, cancelScheduledMarkReadFor, shownReadInStore } from '../utils/markRead.js';
 import { clearReadGuard } from '../utils/pendingReads.js';
 import { markMessageUnread } from '../utils/messageHotkeys.js';
 import { downloadEml } from '../utils/downloadEml.js';
@@ -44,6 +47,7 @@ import {
 // the list's, since the pane holds the thread apart from the list.
 export default function ConversationMessageCard({ message, expanded, onToggle, onUpdate, onDelete, aiEnabled = false, aiReplyEnabled = false, selected = false }) {
   const { t } = useTranslation();
+  const nativeLabelGuard = useNativeLabelReaderGuard();
   const gmailLayout = useStore(s => s.layout === 'gmail');
   const accounts = useStore(s => s.accounts);
   const openCompose = useStore(s => s.openCompose);
@@ -57,6 +61,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   const isMobile = useMobile();
   const [showHeaderModal, setShowHeaderModal] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  useEffect(() => { if (nativeLabelGuard.blocked) setConfirmDeleteId(null); }, [nativeLabelGuard.blocked]);
   const [showTodoistModal, setShowTodoistModal] = useState(false);
   const [savingAllow, setSavingAllow] = useState(false);
   // null | 'loading' | 'done' | 'error', as the reading pane's unsubscribe notice.
@@ -91,17 +96,26 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   // Which message id this card has already scheduled a mark-read for, so a
   // re-render cannot decrement the unread badge twice for one open.
   const markScheduledRef = useRef(null);
+  const pausedNativeRead = useRef(null);
 
   // Expanding a message marks it read, the same as opening one in the reading pane
   // and the same as Gmail. It goes through the shared protocol so the optimistic
   // flag, the unread badge and the category count stay in step, and it honors the
   // user's markReadBehavior/markReadDelay preferences.
   useEffect(() => {
+    if (nativeLabelGuard.blocked) {
+      if (pausedNativeRead.current?.id !== message.id) pausedNativeRead.current = messageRef.current;
+      markScheduledRef.current = null; return;
+    }
     if (!expanded || markScheduledRef.current === message.id) return;
+    const previous = pausedNativeRead.current || messageRef.current;
+    pausedNativeRead.current = null;
+    const current = useStore.getState().activeLabel ? verifiedNativeLabelReadTarget(previous) : messageRef.current;
+    if (!current) return;
     markScheduledRef.current = message.id;
     // The card's copy of the message follows the read, so its read toggle offers the right thing.
     const id = message.id;
-    const timer = scheduleMarkRead(messageRef.current, { onChange: read => onUpdateRef.current?.(id, { is_read: read }) });
+    const timer = scheduleMarkRead(current, { onChange: read => onUpdateRef.current?.(id, { is_read: read }) });
     // A null timer means it was applied already, or there was nothing to do. Only a
     // deferred mark needs cancelling, and cancelling it un-books the card so that
     // reopening starts the delay again instead of never marking it at all.
@@ -110,7 +124,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
       cancelScheduledMarkRead(timer);
       markScheduledRef.current = null;
     };
-  }, [expanded, message.id]);
+  }, [expanded, message.id, nativeLabelGuard.blocked]);
 
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
@@ -158,6 +172,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
 
   // Fills at once, as in the list and the reading pane; put back if the server refuses it.
   const handleStar = async () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const starred = !message.is_starred;
     onUpdate?.(message.id, { is_starred: starred });
     try {
@@ -171,6 +186,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   // Explicit unread wins over the automatic read this card scheduled when it opened. Clearing
   // markScheduledRef lets the next open mark it read again, as reopening a message does.
   const handleMarkUnread = () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     markMessageUnread(message, {
       cancel: () => {
         cancelScheduledMarkReadFor(message.id);
@@ -191,6 +207,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   // expired. Then the card only catches up; marking it read again would take it off the unread
   // count a second time.
   const handleMarkRead = () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (message.is_read) return;
     cancelScheduledMarkReadFor(message.id);
     if (shownReadInStore(message.id)) {
@@ -220,6 +237,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
 
   // Always load them from this sender, or its domain: the server lets them through from now on.
   const allowImagesFrom = async (entry) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!entry.value) return;
     setSavingAllow(true);
     try {
@@ -239,6 +257,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   const senderDomain = senderEmail.includes('@') ? senderEmail.split('@')[1] : '';
 
   const handleUnsubscribe = async () => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message.list_unsubscribe || message.unsubscribed_at || unsubscribingRef.current) return;
     unsubscribingRef.current = true;
     setUnsubscribeStatus('loading');
@@ -276,10 +295,10 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   shortcutRef.current = { loadRemoteImages, handleUnsubscribe, print: handlePrint };
   useEffect(() => {
     if (!selected) return;
-    const onLoadImages = () => { if (expanded) shortcutRef.current.loadRemoteImages(); };
-    const onUnsubscribe = () => shortcutRef.current.handleUnsubscribe();
+    const onLoadImages = () => { if (!nativeLabelActionsBlocked(useStore.getState()) && expanded) shortcutRef.current.loadRemoteImages(); };
+    const onUnsubscribe = () => { if (!nativeLabelActionsBlocked(useStore.getState())) shortcutRef.current.handleUnsubscribe(); };
     // Print the selected message, as the print shortcut does in the single-message pane.
-    const onPrint = () => { if (expanded) shortcutRef.current.print(); };
+    const onPrint = () => { if (!nativeLabelActionsBlocked(useStore.getState()) && expanded) shortcutRef.current.print(); };
     shortcutBus.on('loadRemoteImages', onLoadImages);
     shortcutBus.on('unsubscribe', onUnsubscribe);
     shortcutBus.on('printMessage', onPrint);
@@ -321,6 +340,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   return (
     <div
       // The pane scrolls to this when the reader picks this message in the list.
+      {...nativeLabelGuard.props}
       data-message-id={message.id}
       className="mailflow-conversation-card"
       data-expanded={expanded}
@@ -350,6 +370,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
       {expanded && (
         <div style={{ padding: '0 12px 12px' }}>
           {gmailLayout && <GmailMessageDetails message={message} body={body} />}
+          {gmailLayout && <NativeLabelChips message={message} editable />}
           {/* The reading pane's toolbar, from the same buttons in the same order (#650), less what the
               conversation's own bar does for all of it. Reply and forward are per message, not per
               thread: replying to a conversation means replying to one message in it, and which one

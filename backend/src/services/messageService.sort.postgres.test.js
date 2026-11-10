@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { installNativeLabelReadFixture } from './testSupport/nativeLabelReadFixture.js';
 
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'owner' }; next(); } }));
@@ -38,6 +39,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('list sort PostgreSQL',
           lower(trim(regexp_replace(coalesce(subject, ''), '^(re|fw|fwd)[[:space:]]*:[[:space:]]*', '', 'i')))
         ) STORED);
       CREATE TEMP TABLE contacts (id uuid, user_id text, primary_email text, photo_data text)`);
+    await installNativeLabelReadFixture(database);
     query.mockImplementation((sql, values) => database.query(sql, values));
     const app = express();
     app.use('/api/mail', mailRoutes);
@@ -63,8 +65,13 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('list sort PostgreSQL',
        VALUES ($1,$2,$3,$4,$5,$5,$6::timestamptz,$7,$8,$9,$10)`,
       [id(), account, folder, `<${nextId}@t>`, thread ?? `<t${nextId}@t>`, date, subject, fromName, fromEmail, starred],
     );
-  const subjects = async (opts) => (await listMessages({ userId: 'owner', accountId: account, folder: 'INBOX', ...opts }))
-    .messages.map(m => m.subject);
+  const subjects = async (opts) => {
+    const { messages } = await listMessages({ userId: 'owner', accountId: account, folder: 'INBOX', ...opts });
+    for (const row of messages) expect(row).toMatchObject({
+      nativeLabelState: 'unavailable', entityId: null, metadataVersion: null, nativeLabels: null,
+    });
+    return messages.map(m => m.subject);
+  };
 
   const seedFlat = async () => {
     await insert({ subject: 'Re: banana', fromName: 'Carol', date: '2026-10-03T10:00Z' });

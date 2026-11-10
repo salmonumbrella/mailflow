@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { installNativeLabelReadFixture } from '../services/testSupport/nativeLabelReadFixture.js';
 
 // The ownership lookups whose filters and columns decide more than who owns the row, run through
 // the real routes against PostgreSQL: a CardDAV contact stays read-only, a deleted message or one
@@ -62,6 +63,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('ownership lookups thro
         display_name text, first_name text, last_name text, primary_email text, emails jsonb, phones jsonb,
         organization text, notes text, photo_data text, is_auto boolean DEFAULT false, send_count int DEFAULT 0,
         last_sent timestamptz, etag text, vcard text, created_at timestamptz DEFAULT NOW(), updated_at timestamptz)`);
+    await installNativeLabelReadFixture(database.client);
     const app = express();
     app.use(express.json());
     app.use('/api/mail', mailRoutes);
@@ -107,7 +109,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('ownership lookups thro
   const readOnly = { status: 403, json: { error: 'This contact is synced from CardDAV and is read-only' } };
 
   it('serves a message, but not a deleted one', async () => {
-    expect((await call('GET', `/mail/messages/${LIVE}`)).json).toMatchObject({ id: LIVE, subject: 'Live', account_name: 'Mine' });
+    expect((await call('GET', `/mail/messages/${LIVE}`)).json).toMatchObject({ id: LIVE, subject: 'Live', account_name: 'Mine', nativeLabelState: 'unavailable',
+      entityId: null, metadataVersion: null, nativeLabels: null, storageGeneration: expect.any(String) });
     expect(await call('GET', `/mail/messages/${DELETED}`)).toEqual(notFound);
   });
 

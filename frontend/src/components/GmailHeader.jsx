@@ -4,10 +4,10 @@ import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import LogoMark from './LogoMark.jsx';
 import GmailSupport from './GmailSupport.jsx';
+import GmailSettingsHost from './GmailSettingsHost.jsx';
 import '../gmail-header-surfaces.css';
 
 const ProfileModal = lazy(() => import('./ProfileModal.jsx'));
-const GmailSettings = lazy(() => import('./GmailSettings.jsx'));
 const statuses = ['Active', 'Do not disturb', 'Away'];
 
 function HeaderIcon({ name }) {
@@ -51,14 +51,13 @@ function HeaderContacts({ onBack, onOpenContacts, onSearch }) {
 }
 
 // MailFlow search remains mounted in this portal host while switching views.
-export default function GmailHeader({ searchTargetRef, onShowShortcutHelp }) {
+export default function GmailHeader({ searchTargetRef, onShowShortcutHelp, settingsHosted = false }) {
   const { t } = useTranslation();
   const {
     user, accounts = [], sidebarWidth, sidebarCollapsed, toggleSidebar,
     setSelectedAccount, selectedAccountId, setSearchQuery, setSearchAllFolders, setShowContacts, showContacts,
   } = useStore();
   const [showProfile, setShowProfile] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [supportTopic, setSupportTopic] = useState(null);
   const [popover, setPopover] = useState(null);
   const [status, setStatus] = useState('Active');
@@ -111,7 +110,7 @@ export default function GmailHeader({ searchTargetRef, onShowShortcutHelp }) {
     <div className="mailflow-gmail-header-controls" ref={controls} onBlur={event => { if (popover && event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) close(false); }}>
       <button type="button" className="mailflow-gmail-status-button" aria-label={t('gmail.header.status_label', { defaultValue: 'Status: {{status}}', status: statusLabel(status) })} {...menuProps('status')}><span className="mailflow-gmail-status-dot" data-status={status} /><span>{statusLabel(status)}</span><span aria-hidden="true">⌄</span></button>
       <button type="button" className="mailflow-gmail-icon-button" aria-label={t('gmail.header.support', "Support")} title={t('gmail.header.support', "Support")} {...menuProps('support')}><HeaderIcon name="support" /></button>
-      <button type="button" className="mailflow-gmail-icon-button" onClick={event => { close(false); event.currentTarget.focus(); setShowSettings(true); }} aria-label={t('sidebar.settings', 'Settings')} title={t('sidebar.settings', 'Settings')}><HeaderIcon name="settings" /></button>
+      <button type="button" className="mailflow-gmail-icon-button" onClick={event => { close(false); event.currentTarget.focus(); window.dispatchEvent(new CustomEvent('mailflow:open-gmail-settings')); }} aria-label={t('sidebar.settings', 'Settings')} title={t('sidebar.settings', 'Settings')}><HeaderIcon name="settings" /></button>
       <button type="button" className="mailflow-gmail-icon-button mailflow-gmail-direct-contacts" onClick={() => { close(false); setShowContacts(!showContacts); }} aria-label={t('contacts.title')} title={t('contacts.title')} aria-pressed={showContacts}><HeaderIcon name="contacts" /></button>
       <button type="button" className="mailflow-gmail-icon-button" aria-label={t('gmail.header.apps', "Apps")} title={t('gmail.header.apps', "Apps")} {...menuProps('apps')}><HeaderIcon name="apps" /></button>
       <button type="button" className="mailflow-gmail-account" aria-label={t('gmail.header.account_label', { defaultValue: 'Account: {{name}}', name })} title={t('gmail.header.account_label', { defaultValue: 'Account: {{name}}', name })} {...menuProps('account')}>{user?.avatar ? <img src={user.avatar} alt="" /> : <span>{name.charAt(0).toUpperCase()}</span>}</button>
@@ -124,7 +123,7 @@ export default function GmailHeader({ searchTargetRef, onShowShortcutHelp }) {
       </div>}
     </div>
     {supportTopic && <GmailSupport topic={supportTopic} storageKey={`mailflow.feedback.${user?.id || user?.username || 'session'}`} onClose={() => setSupportTopic(null)} />}
-    {showSettings && <Suspense fallback={<p role="status">{t('gmail.header.loading_settings', "Loading settings…")}</p>}><GmailSettings onClose={() => setShowSettings(false)} /></Suspense>}
+    {!settingsHosted && <GmailSettingsHost />}
     {showProfile && <Suspense fallback={null}><ProfileModal onClose={() => { setShowProfile(false); opener.current?.focus(); }} /></Suspense>}
   </header>;
 }

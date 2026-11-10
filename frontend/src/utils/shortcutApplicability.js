@@ -1,3 +1,4 @@
+import { nativeLabelActionsBlocked } from './nativeLabelNavigation.js';
 import { canDispatchHoveredGtdShortcut } from './gtdHoveredRow.js';
 import { resolveGtdHotkeyTarget } from './gtdHotkeys.js';
 import { selectedPickerMessage } from './labelPicker.js';
@@ -19,6 +20,7 @@ export function canRunGlobalAction(action, { rightSidebarApplicable }) {
 }
 
 export function canRunSelectedAction(action, state) {
+  if (nativeLabelActionsBlocked(state) && (SELECTED_ACTIONS.has(action) || ['archive', 'delete', 'openLabelPicker', 'gtdTodo', 'gtdWatch', 'gtdDelegated', 'gtdReference', 'gtdSomeday', 'gtdDone'].includes(action))) return false;
   if (canDispatchHoveredGtdShortcut(action, state)) return true;
   if (['gtdTodo', 'gtdWatch', 'gtdDelegated', 'gtdReference', 'gtdSomeday', 'gtdDone'].includes(action)) {
     return Boolean(resolveGtdHotkeyTarget(state));
@@ -29,6 +31,7 @@ export function canRunSelectedAction(action, state) {
 }
 
 export function canHandlePaneShortcut(windowMessageId, state) {
+  if (nativeLabelActionsBlocked(state)) return false;
   if (windowMessageId == null) return Boolean(state?.selectedMessageId);
   return topOpenMessageWindow(state)?.messageId === windowMessageId;
 }

@@ -1,3 +1,4 @@
+import NativeLabelPicker from './NativeLabelPicker.jsx';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -108,7 +109,7 @@ export default function GmailToolbar({ messages, selectedIds, onSelect, onAction
   const act = (action, value) => { close(); onAction(action, selected, value); };
   const item = (label, action, value, disabled = false) => <button type="button" role="menuitem" disabled={disabled || busy} onClick={() => act(action, value)}>{label}</button>;
   const trigger = (name, label, kind, action, disabled = false) => <button type="button" className="gmail-toolbar-icon" aria-label={label} title={label} disabled={disabled || busy}
-    aria-haspopup={kind ? 'menu' : undefined} aria-expanded={kind ? menu === kind : undefined}
+    aria-haspopup={kind ? (kind === 'labels' ? 'dialog' : 'menu') : undefined} aria-expanded={kind ? menu === kind : undefined}
     onKeyDown={event => { if (kind && ['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); open(kind, event); } }}
     onClick={event => kind ? open(kind, event) : act(action)}><Icon name={name} /></button>;
   const chronological = order?.sort === 'date' && !order.starredFirst && !snoozed;
@@ -136,7 +137,7 @@ export default function GmailToolbar({ messages, selectedIds, onSelect, onAction
       <button type="button" className="gmail-toolbar-range" title={paginated ? t("gmailToolbar.pageNavigation", "Page navigation") : t("gmailToolbar.loadedMessagesUseLoadMoreBelowForAdditionalResults", "Loaded messages; use Load more below for additional results")} aria-haspopup={paginated ? 'menu' : undefined} aria-expanded={paginated ? menu === 'pagination' : undefined} onClick={event => paginated && open('pagination', event)}>{t('gmailToolbar.range', { defaultValue: '{{start}}–{{end}} of {{count}}', start: start.toLocaleString(), end: end.toLocaleString(), count: `${count.toLocaleString()}${!totalKnown ? '+' : ''}` })}</button>
       {trigger('newer', previousLabel, null, 'newer', !paginated || page <= 1)}{trigger('older', nextLabel, null, 'older', !paginated || page >= lastPage)}
     </div>
-    {menu && createPortal(<div ref={popup} className="gmail-toolbar-menu" style={position} role="menu" aria-label={t("gmailToolbar.actionMenu", "Mail actions")} onKeyDown={keyDown}>
+    {menu && createPortal(<div ref={popup} className="gmail-toolbar-menu" style={{ ...position, maxHeight: menu === 'labels' ? Math.max(80, descale(window.innerHeight, scale) - position.top - 8) : undefined }} role={menu === 'labels' ? 'dialog' : 'menu'} aria-label={t("gmailToolbar.actionMenu", "Mail actions")} onKeyDown={menu === 'labels' ? undefined : keyDown}>
       {menu === 'more' && (selected.length ? <>
         {item(t("gmailToolbar.markAsRead", "Mark as read"), 'read')}{item(t("gmailToolbar.markAsUnread", "Mark as unread"), 'unread')}{item(t("gmailToolbar.addStar", "Add star"), 'star')}{item(t("gmailToolbar.removeStar", "Remove star"), 'unstar')}
         {item(t("gmailToolbar.markAsImportant", "Mark as important"), 'important', null, true)}{item(t("gmailToolbar.mute", "Mute"), 'mute', null, true)}
@@ -151,7 +152,7 @@ export default function GmailToolbar({ messages, selectedIds, onSelect, onAction
         {!loading && !error && !destinations.some(folder => !folder.no_select && folder.path.toLowerCase().includes(query.toLowerCase())) && <p>{t("gmailToolbar.noMatchingFolders", "No matching folders.")}</p>}
         <p>{t("gmailToolbar.movesUseThisAccountSMailFoldersManageFoldersInMailFlowSettings", "Moves use this account’s mail folders. Manage folders in MailFlow Settings.")}</p></>}
       {menu === 'delete' && <><p>{t("gmailToolbar.messagesAlreadyInTrashWillBePermanentlyDeletedAfterTheUndoPeriodTheyCannotBeRecoveredAfterDeletionIsSentToTheServer", "Messages already in Trash will be permanently deleted after the Undo period. They cannot be recovered after deletion is sent to the server.")}</p>{item(t("gmailToolbar.deletePermanently", "Delete permanently"), 'delete')}<button type="button" role="menuitem" onClick={() => close()}>{t("gmailToolbar.cancel", "Cancel")}</button></>}
-      {menu === 'labels' && <p>{t("gmailToolbar.gmailLabelAssignmentIsNotSupportedByMailFlowUseMoveToForNativeMailFoldersOrTheKlingerGTDControlsToOrganizeWork", "Gmail label assignment is not supported by MailFlow. Use Move to for native mail folders, or the Klinger GTD controls to organize work.")}</p>}
+      {menu === 'labels' && <NativeLabelPicker messages={selected} onClose={() => close()} />}
       {menu === 'tasks' && <p>{t("gmailToolbar.googleTasksIsNotConnectedUseMailFlowSKlingerGTDControlsToOrganizeWork", "Google Tasks is not connected. Use MailFlow’s Klinger GTD controls to organize work.")}</p>}
       {menu === 'snooze' && <><p>{t("gmailToolbar.snoozeTheSelectedMessagesReplyChainsMailFlowSupportsUpTo30Days", "Snooze the selected messages’ reply chains. MailFlow supports up to 30 days.")}</p>{snoozed && item(t("gmailToolbar.unsnooze", "Unsnooze"), 'unsnooze')}
         {snoozePresets(new Date(), t).map(([label, when]) => <button type="button" role="menuitem" key={label} onClick={() => act(snoozed ? 'changeSnooze' : 'snooze', when.toISOString())}>{label}<small>{when.toLocaleString()}</small></button>)}

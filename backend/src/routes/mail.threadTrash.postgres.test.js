@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { installNativeLabelReadFixture } from '../services/testSupport/nativeLabelReadFixture.js';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'owner' }; next(); } }));
@@ -35,6 +36,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('thread route in_trash 
         reply_to jsonb, snippet text, is_read boolean DEFAULT false, is_starred boolean DEFAULT false,
         has_attachments boolean DEFAULT false, category text, list_unsubscribe text,
         list_unsubscribe_post text, delivery_addresses jsonb, flags jsonb, unsubscribed_at timestamptz)`);
+    await installNativeLabelReadFixture(database);
     query.mockImplementation((sql, values) => database.query(sql, values));
     const app = express();
     app.use('/api/mail', mailRoutes);
@@ -118,6 +120,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('thread route in_trash 
     });
 
     for (const message of messages) {
+      expect(message).toMatchObject({ nativeLabelState: 'unavailable', entityId: null, metadataVersion: null, nativeLabels: null });
       const { rows: [{ folder_mappings: mappings }] } = await database.query(
         'SELECT folder_mappings FROM email_accounts WHERE id = $1', [message.account_id],
       );

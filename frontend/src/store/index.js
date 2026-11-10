@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { labelViewKey, validLabelView, NATIVE_LABELS_CHANGED, dedupeNativeMessages } from '../utils/nativeLabelNavigation.js';
 import { resolveConversationMode, groupsMessageList, conversationModeTransition, isConversationMode } from '../utils/conversationMode.js';
 import { applyMessageUpdate } from '../utils/readState.js';
 import { api } from '../utils/api.js';
@@ -119,7 +120,7 @@ function expirePendingCounts() {
 // folder or account, that put them into a list they don't belong to. They are put back only while
 // the list they left is still the one showing; otherwise that list loads them again when reopened.
 const removedFromView = new Map();
-const listViewOf = state => JSON.stringify([state.selectedAccountId ?? null, state.selectedFolder ?? null,
+const listViewOf = state => JSON.stringify([labelViewKey(state.activeLabel), state.selectedAccountId ?? null, state.selectedFolder ?? null,
   String(state.searchQuery || '').trim(), Boolean(state.searchAllFolders), state.activeGtdTab ?? null, Boolean(state.threadedView),
   listOrderFor(state.listSort, state.selectedAccountId, state.selectedFolder), state.listFilter ?? null]);
 function noteRemoved(state, ids) {
@@ -166,6 +167,7 @@ export const useStore = create((set, get) => ({
       // leaves: a cold load has nothing to clear, and clearing there would drop the reading
       // preferences seeded from localStorage until loadPreferences ran.
       ...(state.user && state.user.id !== user?.id ? {
+        activeLabel: null, nativeLabelFeed: null, nativeLabelSnapshots: {},
         messages: [], searchResults: [], searchSizeIndex: null, searchQuery: '', selectedMessageId: null,
         threadMessages: {}, expandedThreadId: null,
         accounts: [], accountsReady: false, folders: {},
@@ -246,6 +248,7 @@ export const useStore = create((set, get) => ({
       set({
         serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
         isLocked: true,
+        activeLabel: null, nativeLabelFeed: null, nativeLabelSnapshots: {},
         messages: [], searchResults: [], searchSizeIndex: null, searchQuery: '',
         accounts: [], accountsReady: false,
         folders: {}, selectedMessageId: null,
@@ -295,15 +298,17 @@ export const useStore = create((set, get) => ({
     // because localStorage restores it on every load. See utils/accountScope.js.
     const previous = get().selectedAccountId;
     const selectedAccountId = resolveSelectedAccount(accounts, previous);
-    const reselected = selectedAccountId !== previous;
+    const active = get().activeLabel;
+    const generationChanged = active && accounts.find(account => account.id === active.accountId)?.storage_generation && accounts.find(account => account.id === active.accountId).storage_generation !== active.storageGeneration;
+    const reselected = selectedAccountId !== previous || generationChanged;
     if (reselected) {
       // Mirror setSelectedAccount's persistence so the fallback survives a reload.
-      localStorage.setItem('mailflow_selected_account', '');
+      localStorage.setItem('mailflow_selected_account', selectedAccountId || '');
       localStorage.setItem('mailflow_selected_folder', 'INBOX');
     }
     set(state => ({
       accounts, accountsReady: true, selectedAccountId,
-      ...(reselected ? { selectedFolder: 'INBOX' } : {}),
+      ...(reselected ? { selectedFolder: 'INBOX', activeLabel: null, nativeLabelFeed: null, labelNavigationReplace: true, messages: [], selectedMessageId: null, messagesRefreshToken: state.messagesRefreshToken + 1 } : {}),
       folders: pruneFolders(state.folders, accounts),
       unreadCounts: displayCountSnapshot(state.serverUnreadCounts, state.pendingCounts, accounts),
     }));
@@ -313,11 +318,44 @@ export const useStore = create((set, get) => ({
     return { accounts, unreadCounts: displayCountSnapshot(state.serverUnreadCounts, state.pendingCounts, accounts) };
   }),
 
+  // Native views are account/generation/UUID scoped; folders stay real provider paths.
+  activeLabel: null,
+  nativeLabelFeed: null,
+  nativeLabelSnapshots: {},
+  nativeLabelsRevision: 0,
+  setActiveLabel: (view) => {
+    if (!validLabelView(view)) return false;
+    const account = get().accounts.find(item => item.id === view.accountId);
+    if (get().accountsReady && (!account || account.enabled === false || account.storage_generation && account.storage_generation !== view.storageGeneration)) return false;
+    localStorage.setItem('mailflow_selected_account', view.accountId);
+    localStorage.setItem('mailflow_selected_folder', 'INBOX');
+    set(state => ({ activeLabel: { ...view }, labelNavigationReplace: false, selectedAccountId: view.accountId, selectedFolder: null,
+      searchQuery: '', searchResults: [], searchSizeIndex: null, selectedMessageId: null,
+      messages: [], messagesTotal: 0, messagesOffset: 0, hasMoreMessages: true, nativeLabelFeed: null,
+      expandedThreadId: null, threadMessages: {}, activeGtdTab: null, showContacts: false,
+      messagesRefreshToken: state.messagesRefreshToken + 1,
+    }));
+    return true;
+  },
+  setNativeLabelSnapshot: (accountId, snapshot) => set(state => ({ nativeLabelSnapshots: { ...state.nativeLabelSnapshots, [accountId]: snapshot } })),
+  invalidateNativeLabels: (detail = {}) => {
+    const state = get();
+    const account = state.accounts.find(item => item.id === detail.accountId);
+    const generation = account?.storage_generation || state.nativeLabelSnapshots[detail.accountId]?.storageGeneration;
+    if (detail.storageGeneration && generation && detail.storageGeneration !== generation) return false;
+    set({ nativeLabelsRevision: state.nativeLabelsRevision + 1, threadMessages: {} });
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(NATIVE_LABELS_CHANGED, { detail }));
+      if (!state.activeLabel) window.dispatchEvent(new CustomEvent('mailflow:refresh'));
+    }
+    return true;
+  },
+
   // Navigation
   selectedAccountId: localStorage.getItem('mailflow_selected_account') || null, // '' stored as null
   selectedFolder: localStorage.getItem('mailflow_selected_folder') || 'INBOX',
   messagesRefreshToken: 0, // incremented on every nav click so the effect always re-fires
-  setSelectedAccount: (accountId, folder = 'INBOX') => {
+  setSelectedAccount: (accountId, folder = 'INBOX', { replaceHistory = false } = {}) => {
     localStorage.setItem('mailflow_selected_account', accountId ?? '');
     localStorage.setItem('mailflow_selected_folder', folder);
     return set(state => {
@@ -331,6 +369,7 @@ export const useStore = create((set, get) => ({
       const wasScopedSearch = !!state.selectedAccountId && !state.searchAllFolders && !!state.searchQuery.trim();
       return {
         selectedAccountId: accountId,
+        activeLabel: null, nativeLabelFeed: null, labelNavigationReplace: replaceHistory,
         selectedFolder: folder,
         selectedMessageId: null,
         messages: [],
@@ -354,13 +393,13 @@ export const useStore = create((set, get) => ({
   // matching isSelectedRow's identity model (#378). Copies in two different accounts are separate
   // mail and both render (#476). appendMessages/restore dedupe on their own paths; this covers the
   // initial/refresh/page loads that replace wholesale.
-  setMessages: (messages) => set({ messages: dedupeByIdentity(messages) }),
+  setMessages: (messages) => set(state => ({ messages: state.activeLabel ? dedupeNativeMessages(messages, state.activeLabel) : dedupeByIdentity(messages) })),
   appendMessages: (newMessages) => set(state => {
     // Merge by stable identity (Message-ID when present, else id): a same-id row is dropped so the
     // existing copy keeps any optimistic local-only fields a refresh lost (unread_count, etc.),
     // while a reindexed message (same Message-ID, new id after a purge+reinsert) replaces its stale
     // row in place instead of appearing as a duplicate. See appendMessagesByIdentity.
-    const messages = appendMessagesByIdentity(state.messages, newMessages);
+    const messages = state.activeLabel ? dedupeNativeMessages([...state.messages, ...newMessages], state.activeLabel) : appendMessagesByIdentity(state.messages, newMessages);
     return messages === state.messages ? {} : { messages };
   }),
   updateMessage: (id, updates) => set(state => {
@@ -422,7 +461,7 @@ export const useStore = create((set, get) => ({
     // present, else id): if the message is already present — including re-added by a network
     // refresh under a regenerated id (matched via Message-ID) — skip it. The local copy carries the
     // freshest optimistic state, so we prefer it over the server view. See missingByIdentity.
-    const missing = missingByIdentity(state.messages, list);
+    const missing = state.activeLabel ? dedupeNativeMessages(list, state.activeLabel).filter(message => !state.messages.some(existing => existing.entityId === message.entityId)) : missingByIdentity(state.messages, list);
     if (missing.length === 0 && !state.searchQuery.trim()) return {};
     const missingFromSearch = missingByIdentity(state.searchResults, list);
     return {
@@ -709,6 +748,7 @@ export const useStore = create((set, get) => ({
   closeAllMessageWindows: () => set({ messageWindows: [] }),
   searchQuery: '',
   setSearchQuery: (q) => set(state => q === state.searchQuery ? {} : { searchQuery: q, searchSizeIndex: null,
+    ...(q.trim() && state.activeLabel ? { activeLabel: null, nativeLabelFeed: null, selectedFolder: 'INBOX', messages: [], selectedMessageId: null, messagesRefreshToken: state.messagesRefreshToken + 1 } : {}),
     replyDrafts: {}, replyDraftRevision: state.replyDraftRevision + 1 }),
   isSearching: false,
   setIsSearching: (v) => set({ isSearching: v }),

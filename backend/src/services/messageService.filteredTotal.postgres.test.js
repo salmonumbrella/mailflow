@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { installNativeLabelReadFixture } from './testSupport/nativeLabelReadFixture.js';
 
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 import { query } from './db.js';
@@ -32,6 +33,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('flat list total under 
         list_unsubscribe_post text, delivery_addresses jsonb, spam_verdict text,
         spam_user_override text, spam_score_ml real, flags jsonb, unsubscribed_at timestamptz);
       CREATE TEMP TABLE contacts (id uuid, user_id text, primary_email text, photo_data text)`);
+    await installNativeLabelReadFixture(database);
     query.mockImplementation((sql, values) => database.query(sql, values));
   });
   afterAll(async () => { await database?.end(); });
@@ -65,6 +67,9 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('flat list total under 
     it(`counts the category's rows, not the folder's (${scope} Inbox)`, async () => {
       const page = await list({ category: 'promotions' });
       expect(page.messages).toHaveLength(3);
+      for (const row of page.messages) expect(row).toMatchObject({
+        nativeLabelState: 'unavailable', entityId: null, metadataVersion: null, nativeLabels: null,
+      });
       expect(page.total).toBe(3);
       const unread = await list({ category: 'promotions', unreadOnly: 'true' });
       expect(unread.messages).toHaveLength(1);

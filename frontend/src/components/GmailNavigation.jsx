@@ -1,3 +1,4 @@
+import NativeLabelNavigation from './NativeLabelNavigation.jsx';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
@@ -84,7 +85,7 @@ export default function GmailNavigation({ collapsed, onManageFolders }) {
     folderEntry('spam', 'spam', translate('folders.spam', 'Spam'), 'in:spam'),
     folderEntry('trash', 'trash', translate('folders.trash', 'Trash'), 'in:trash'),
   ];
-  const active = entry => !showContacts && (entry.query ? searchQuery === entry.query : !searchQuery && selectedFolder === entry.folder)
+  const active = entry => !state.activeLabel && !showContacts && (entry.query ? searchQuery === entry.query : !searchQuery && selectedFolder === entry.folder)
     && (!entry.unified || selectedAccountId === null);
   const hidden = entry => selectedAccountId !== null && !entry.unified && entry.folder
     && (hiddenFolders?.[selectedAccountId] || []).includes(entry.folder);
@@ -138,6 +139,7 @@ export default function GmailNavigation({ collapsed, onManageFolders }) {
     </button>
     {more && moreEntries.map(row)}
     {more && <button type="button" className="gmail-native-nav-row" data-gmail-nav="manage" title={translate('gmail.navigation.manageFolders', 'Manage folders')} aria-label={translate('gmail.navigation.manageFolders', 'Manage folders')} onClick={onManageFolders}><Icon name="folder" />{!collapsed && <span>{translate('gmail.navigation.manageFolders', 'Manage folders')}</span>}</button>}
+    <NativeLabelNavigation accountId={selectedAccountId} collapsed={collapsed} more={more} />
     {!collapsed && <div className="gmail-native-folders-heading">{translate('gmail.navigation.folders', 'Folders')}</div>}
   </section>;
 }

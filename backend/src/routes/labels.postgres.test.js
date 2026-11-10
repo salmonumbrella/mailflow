@@ -68,7 +68,7 @@ describe.skipIf(!ADMIN_URL)('native label definitions on PostgreSQL', () => {
     vi.unstubAllEnvs(); vi.restoreAllMocks();
   });
   beforeEach(async () => {
-    await h.pool.query('TRUNCATE mail_labels, mail_label_state, mail_label_mutations');
+    await h.pool.query('TRUNCATE native_label_memberships, native_label_mutations, mail_labels, mail_label_state, mail_label_mutations');
     await h.pool.query('UPDATE email_accounts SET enabled=true');
     vi.clearAllMocks();
   });
@@ -92,14 +92,16 @@ describe.skipIf(!ADMIN_URL)('native label definitions on PostgreSQL', () => {
     const parent = await create('  Cafe\u0301 ', { color: '#AABBCC', textColor: '#123456', visibility: 'unread', messageVisible: false });
     await create('Child', { parentId: parent.id });
     const state = await list();
-    expect(state.body).toMatchObject({ treeRevision: '2', coverage: 'not_indexed', assignmentSupported: false, counts: null });
+    const { rows: [{ storage_generation: generation }] } = await h.pool.query('SELECT storage_generation FROM email_accounts WHERE id=$1', [account]);
+    expect(state.body.storageGeneration).toBe(generation);
+    expect(state.body).toMatchObject({ treeRevision: '2', coverage: 'synchronized-cache', assignmentSupported: true, counts: null });
     expect(state.body.labels[0]).toMatchObject({ name: 'Café', path: 'Café', color: '#aabbcc', textColor: '#123456', visibility: 'unread', messageVisible: false, counts: null });
     const reset = await edit(parent, { color: null, textColor: null, visibility: 'hide', messageVisible: true });
     expect(reset.body.label).toMatchObject({ color: null, textColor: null, visibility: 'hide', messageVisible: true, revision: '2' });
     const same = await edit(reset.body.label, { color: null });
     expect(same.body.treeRevision).toBe(reset.body.treeRevision);
     expect(provider.broadcast).toHaveBeenCalledTimes(3);
-    expect(provider.broadcast).toHaveBeenLastCalledWith({ type: 'labels_changed', accountId: account, treeRevision: '3' }, owner);
+    expect(provider.broadcast).toHaveBeenLastCalledWith({ type: 'labels_changed', accountId: account, storageGeneration: generation, treeRevision: '3' }, owner);
   });
 
   it('enforces normalized root/sibling uniqueness in the service and direct SQL, permitting separate branches', async () => {
@@ -168,7 +170,7 @@ describe.skipIf(!ADMIN_URL)('native label definitions on PostgreSQL', () => {
     const root = await create('Root'), child = await create('Child', { parentId: root.id }), grandchild = await create('Grandchild', { parentId: child.id });
     const unrelated = await create('Keep');
     const first = await preview(root);
-    expect(first.body).toMatchObject({ removesMessages: false, counts: null, assignmentSupported: false });
+    expect(first.body).toMatchObject({ removesMessages: false, counts: null, assignmentSupported: true, coverage: 'synchronized-cache', associations: [] });
     expect(first.body.descendants.map(l => l.id)).toEqual([child.id, grandchild.id]);
     await create('New child', { parentId: root.id });
     expect((await remove(root, first.body.treeRevision)).status).toBe(409);
@@ -235,7 +237,7 @@ describe.skipIf(!ADMIN_URL)('native label definitions on PostgreSQL', () => {
       const lines = gunzipSync(Buffer.concat(chunks)).toString().trim().split('\n').map(JSON.parse);
       const reordered = lines.flatMap(line => line.table === 'mail_labels'
         ? [...line.rows].sort((a, b) => Number(Boolean(b.parent_id)) - Number(Boolean(a.parent_id))).map(row => ({ table: line.table, rows: [row] })) : [line]);
-      expect(lines[0].tables).toEqual(expect.arrayContaining(['mail_labels', 'mail_label_state', 'mail_label_mutations']));
+      expect(lines[0].tables).toEqual(expect.arrayContaining(['mail_labels', 'mail_label_state', 'mail_label_mutations', 'native_label_memberships', 'native_label_mutations']));
       // Full restore intentionally writes cache rows; the definition endpoint tests above
       // leave these guard triggers enabled throughout every API request.
       await client.query('ALTER TABLE messages DISABLE TRIGGER no_label_message_write; ALTER TABLE folders DISABLE TRIGGER no_label_folder_write');

@@ -3,7 +3,7 @@
 import { createHash, randomUUID } from 'crypto';
 import { query, withTransaction } from './db.js';
 
-export const LABEL_CAPABILITIES = Object.freeze({ assignmentSupported: false, counts: null, coverage: 'not_indexed' });
+export const LABEL_CAPABILITIES = Object.freeze({ assignmentSupported: true, counts: null, coverage: 'synchronized-cache' });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFINITION_FIELDS = ['name', 'parentId', 'color', 'textColor', 'visibility', 'messageVisible'];
 const MAX_LABELS = 500;
@@ -111,22 +111,35 @@ export function derivePaths(labels) {
 // Disabled accounts retain editable local definitions; these operations never need IMAP.
 export async function listDefinitions(userId, input) {
   const { accountId } = validateRequest('list', input);
-  const { rows } = await query(`SELECT COALESCE(s.tree_revision, 0)::text AS tree_revision,
+  const { rows } = await query(`SELECT a.storage_generation, COALESCE(s.tree_revision, 0)::text AS tree_revision,
       COALESCE((SELECT jsonb_agg(to_jsonb(l) || jsonb_build_object('revision', l.revision::text) ORDER BY l.full_path, l.id)
                   FROM mail_labels l WHERE l.account_id = a.id), '[]'::jsonb) AS labels
     FROM email_accounts a LEFT JOIN mail_label_state s ON s.account_id = a.id
     WHERE a.id = $1 AND a.user_id = $2`, [accountId, userId]);
   if (!rows.length) missing();
-  return { labels: rows[0].labels.map(row => dto(fromRow(row))), treeRevision: rows[0].tree_revision, ...LABEL_CAPABILITIES };
+  return { accountId, storageGeneration: rows[0].storage_generation, labels: rows[0].labels.map(row => dto(fromRow(row))), treeRevision: rows[0].tree_revision, ...LABEL_CAPABILITIES };
 }
 export async function previewDeletion(userId, id, input) {
   id = uuid(id, 'id');
-  const state = await listDefinitions(userId, input);
-  const label = state.labels.find(item => item.id === id);
-  if (!label) missing();
-  const descendants = state.labels.filter(item => item.path.startsWith(`${label.path}/`));
-  return { label, descendants, deletedLabelIds: [id, ...descendants.map(item => item.id)],
-    treeRevision: state.treeRevision, removesMessages: false, ...LABEL_CAPABILITIES };
+  const { accountId } = validateRequest('list', input);
+  return withTransaction(async client => {
+    const { rows: [account] } = await client.query('SELECT storage_generation FROM email_accounts WHERE id=$1 AND user_id=$2 FOR UPDATE', [accountId, userId]);
+    if (!account) missing();
+    const { rows } = await client.query('SELECT * FROM mail_labels WHERE account_id=$1 ORDER BY full_path,id', [accountId]);
+    const labels = rows.map(row => dto(fromRow(row)));
+    const label = labels.find(item => item.id === id);
+    if (!label) missing();
+    const descendants = labels.filter(item => item.path.startsWith(`${label.path}/`));
+    const deletedLabelIds = [id, ...descendants.map(item => item.id)];
+    const { rows: [state] } = await client.query('SELECT tree_revision::text FROM mail_label_state WHERE account_id=$1', [accountId]);
+    const { rows: associations } = await client.query(`SELECT storage_generation,COUNT(*)::int AS memberships,
+      COUNT(DISTINCT entity_id)::int AS entities FROM native_label_memberships
+      WHERE account_id=$1 AND label_id=ANY($2::uuid[]) GROUP BY storage_generation ORDER BY storage_generation`, [accountId, deletedLabelIds]);
+    return { label, descendants, deletedLabelIds, treeRevision: state?.tree_revision ?? '0', removesMessages: false,
+      associations: associations.map(row => ({ storageGeneration: row.storage_generation,
+        currentGeneration: row.storage_generation === account.storage_generation, memberships: row.memberships, entities: row.entities })),
+      ...LABEL_CAPABILITIES };
+  });
 }
 const requestHash = request => createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(request).sort(([a], [b]) => a.localeCompare(b))))).digest('hex');
 
@@ -138,7 +151,7 @@ async function mutate(userId, operation, id, rawInput) {
     return await withTransaction(async client => {
       // Ownership is rechecked under a lock that prevents deleting/transferring the account
       // during this transaction. All definition mutations take the state lock in this order.
-      const owned = await client.query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2 FOR SHARE', [input.accountId, userId]);
+      const owned = await client.query('SELECT id, storage_generation FROM email_accounts WHERE id = $1 AND user_id = $2 FOR UPDATE', [input.accountId, userId]);
       if (!owned.rows.length) missing();
       await client.query('INSERT INTO mail_label_state (account_id) VALUES ($1) ON CONFLICT DO NOTHING', [input.accountId]);
       const { rows: [state] } = await client.query('SELECT tree_revision::text FROM mail_label_state WHERE account_id = $1 FOR UPDATE', [input.accountId]);
@@ -159,6 +172,18 @@ async function mutate(userId, operation, id, rawInput) {
       if (operation === 'delete') {
         if (input.expectedTreeRevision !== state.tree_revision) conflict('stale_tree_revision', 'Labels changed since the preview. Review a fresh preview before deleting');
         const deletedLabelIds = [id, ...labels.filter(item => item.path.startsWith(`${label.path}/`)).map(item => item.id)];
+        const exhausted = await client.query(`SELECT 1 FROM message_entities e
+          WHERE e.account_id=$1 AND e.metadata_version=9223372036854775807
+            AND EXISTS (SELECT 1 FROM native_label_memberships m
+              WHERE m.account_id=e.account_id AND m.storage_generation=e.storage_generation AND m.entity_id=e.id
+                AND m.label_id=ANY($2::uuid[])) LIMIT 1`, [input.accountId, deletedLabelIds]);
+        if (exhausted.rows.length) conflict('metadata_version_exhausted', 'Message metadata needs recovery before deleting this label');
+        // Account lock serializes deletion with identity reconciliation and assignments.
+        // Advance once per affected entity, including retained generations, before cascade.
+        await client.query(`UPDATE message_entities e SET metadata_version=metadata_version+1,updated_at=NOW()
+          WHERE e.account_id=$1 AND EXISTS (SELECT 1 FROM native_label_memberships m
+            WHERE m.account_id=e.account_id AND m.storage_generation=e.storage_generation AND m.entity_id=e.id
+              AND m.label_id=ANY($2::uuid[]))`, [input.accountId, deletedLabelIds]);
         await client.query('DELETE FROM mail_labels WHERE account_id = $1 AND id = ANY($2::uuid[])', [input.accountId, deletedLabelIds]);
         result = { deletedLabelIds, treeRevision: nextTreeRevision, ...LABEL_CAPABILITIES };
       } else {
@@ -194,6 +219,7 @@ async function mutate(userId, operation, id, rawInput) {
         }
         result = { label: dto(label), treeRevision: changed ? nextTreeRevision : state.tree_revision, ...LABEL_CAPABILITIES };
       }
+      result = { accountId: input.accountId, storageGeneration: owned.rows[0].storage_generation, ...result };
       if (changed) await client.query('UPDATE mail_label_state SET tree_revision=$2 WHERE account_id=$1', [input.accountId, nextTreeRevision]);
       await client.query(`UPDATE mail_label_mutations SET response=NULL WHERE account_id=$1 AND response IS NOT NULL AND created_at < NOW() - INTERVAL '30 days'`, [input.accountId]);
       await client.query('INSERT INTO mail_label_mutations (account_id,mutation_id,request_hash,response) VALUES ($1,$2,$3,$4::jsonb)',

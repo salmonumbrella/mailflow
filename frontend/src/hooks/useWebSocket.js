@@ -95,6 +95,7 @@ export function useWebSocket() {
       // On reconnect, catch up on any messages that arrived during the outage
       if (wasReconnect) {
         recordDiagEvent({ category: 'ws', type: 'reconnect' });
+        useStore.getState().invalidateNativeLabels();
         window.dispatchEvent(new CustomEvent('mailflow:refresh'));
         api.getUnreadCounts().then(counts => {
           useStore.getState().setUnreadCounts(counts);
@@ -138,6 +139,10 @@ export function useWebSocket() {
 
   const handleMessage = useCallback((data) => {
     switch (data.type) {
+      case 'labels_changed':
+      case 'label_memberships_changed':
+        useStore.getState().invalidateNativeLabels(data);
+        break;
       case 'new_messages': {
         // Blip the sync icon — a real change just synced in, so show background activity
         // even though we no longer broadcast sync_complete on every (mostly-idle) tick.

@@ -379,6 +379,11 @@ export const api = {
   getSignatureLibrary: accountId => request('GET', `/signatures/${encodeURIComponent(accountId)}`),
   saveSignatureLibrary: (accountId, data) => request('PUT', `/signatures/${encodeURIComponent(accountId)}`, data),
   // Native MailFlow definitions are independent of IMAP folder operations.
+  queryNativeLabelMemberships: data => request('POST', '/labels/memberships/query', data),
+  mutateNativeLabelMemberships: data => request('POST', '/labels/memberships', data),
+  undoNativeLabelMemberships: data => request('POST', '/labels/memberships/undo', data),
+  getNativeLabelMessages: (id, options) => request('GET', `/labels/${encodeURIComponent(id)}/messages?${new URLSearchParams(Object.entries(options).filter(([, value]) => value != null))}`),
+  getNativeLabelCounts: (accountId, storageGeneration) => request('GET', `/labels/counts?${new URLSearchParams({ accountId, storageGeneration })}`),
   getNativeLabels: accountId => request('GET', `/labels?accountId=${encodeURIComponent(accountId)}`),
   createNativeLabel: data => request('POST', '/labels', data),
   updateNativeLabel: (id, data) => request('PATCH', `/labels/${encodeURIComponent(id)}`, data),

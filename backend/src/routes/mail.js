@@ -1,3 +1,4 @@
+import { hydrateNativeLabels } from '../services/nativeLabelReadModel.js';
 import { LIVE_SNOOZE_SQL } from '../services/snoozeIdentity.js';
 import { STATUS_STALE_MS } from '../services/folderStatus.js';
 import { Router } from 'express';
@@ -233,7 +234,7 @@ router.get('/messages/:id', async (req, res) => {
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message ID' });
   try {
     const message = await findOwnedMessage(req.session.userId, id, {
-      columns: `m.id, m.uid, m.folder, m.message_id, m.subject,
+      columns: `m.id, m.uid, m.folder, m.entity_id, m.storage_generation, m.uid_validity, m.message_id, m.subject,
              m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
              m.reply_to, m.in_reply_to, m.thread_references,
              m.date, m.snippet, m.is_read, m.is_starred,
@@ -245,7 +246,7 @@ router.get('/messages/:id', async (req, res) => {
       live: true,
     });
     if (!message) return res.status(404).json({ error: 'Message not found' });
-    res.json(message);
+    res.json((await hydrateNativeLabels(req.session.userId, [message]))[0]);
   } catch (err) {
     console.error('GET /messages/:id error:', err.message);
     res.status(500).json({ error: 'Failed to load message' });
@@ -267,7 +268,7 @@ router.get('/resolve-message', async (req, res) => {
     return res.status(400).json({ error: 'Invalid accountId' });
   }
   const accountId = rawAccountId || null;
-  const COLS = `m.id, m.uid, m.folder, m.message_id, m.subject,
+  const COLS = `m.id, m.uid, m.folder, m.entity_id, m.storage_generation, m.uid_validity, m.message_id, m.subject,
              m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
              m.reply_to, m.in_reply_to, m.thread_references, m.thread_id,
              m.date, m.snippet, m.is_read, m.is_starred,
@@ -303,7 +304,7 @@ router.get('/resolve-message', async (req, res) => {
       `, [ref, req.session.userId, accountId]);
     }
     if (result.rows.length === 0) return res.status(404).json({ error: 'Message not found' });
-    res.json(result.rows[0]);
+    res.json((await hydrateNativeLabels(req.session.userId, [result.rows[0]]))[0]);
   } catch (err) {
     console.error('GET /resolve-message error:', err.message);
     res.status(500).json({ error: 'Failed to resolve message' });
@@ -357,7 +358,7 @@ async function getThread(req, res, threadId) {
     const result = await query(`
       WITH deduped AS (
         SELECT DISTINCT ON (m.account_id, m.message_id)
-               m.id, m.uid, m.folder, m.message_id, m.thread_id, m.subject,
+               m.id, m.uid, m.folder, m.entity_id, m.storage_generation, m.uid_validity, m.message_id, m.thread_id, m.subject,
                m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
                m.reply_to, m.in_reply_to, m.thread_references,
                m.date, m.snippet, m.is_read, m.is_starred,
@@ -383,7 +384,7 @@ async function getThread(req, res, threadId) {
       SELECT * FROM deduped ORDER BY date ASC, account_id, id
     `, [accountIds, threadId]);
 
-    res.json({ messages: result.rows });
+    res.json({ messages: await hydrateNativeLabels(req.session.userId, result.rows) });
   } catch (err) {
     console.error('Thread fetch error:', err);
     res.status(500).json({ error: 'Failed to load thread' });

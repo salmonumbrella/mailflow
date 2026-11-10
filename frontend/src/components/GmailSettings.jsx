@@ -46,13 +46,13 @@ function Choice({ name, value, selected, onChange, children, disabled = false })
   return <label className="mf-gmail-settings-choice"><input type="radio" name={name} checked={selected === value} onChange={() => onChange(value)} disabled={disabled} />{children}</label>;
 }
 
-export default function GmailSettings({ onClose, initialAccountId }) {
+export default function GmailSettings({ onClose, initialAccountId, initialTab = 'general', initialCreateLabel = false }) {
   const { t } = useTranslation();
   const state = useStore();
   const panel = useRef(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
-  const [tab, setTab] = useState('general');
+  const [tab, setTab] = useState(['general', 'labels', 'filters'].includes(initialTab) ? initialTab : 'general');
   const [prefs, setPrefs] = useState(() => preferencesOf(state));
   const [savedPrefs, setSavedPrefs] = useState(() => preferencesOf(state));
   const [signatures, setSignatures] = useState({});
@@ -326,7 +326,7 @@ export default function GmailSettings({ onClose, initialAccountId }) {
           {tab === 'labels' && <div className="mf-gmail-settings-labels">
 
             <label>{t("gmail.settings.account", "Account")} <select aria-label={t("gmail.settings.label_account", "Label account")} disabled={labelLocked} value={accountId} onChange={e => { setAccountId(e.target.value); setFolderForm(null); setDeleteFolder(null); }}>{state.accounts.map(a => <option key={a.id} value={a.id}>{a.name || a.email_address}</option>)}</select></label>
-            {account && <GmailLabelManager key={accountId} accountId={accountId} onLockChange={setLabelLocked} />}
+            {account && <GmailLabelManager key={accountId} accountId={accountId} initialCreate={initialCreateLabel && accountId === initialAccountId} onLockChange={setLabelLocked} />}
             <h2>{t('gmail.nativeLabels.foldersTitle', 'IMAP folders')}</h2>
             <p>{t('gmail.nativeLabels.foldersScope', 'These are folders on your mail server, not MailFlow labels. Folder changes apply immediately and deleting a folder can permanently delete its messages.')}</p>
             {!account && <p>{t("gmail.settings.connect_an_account_to_manage_labels", "Connect an account to manage labels.")}</p>}

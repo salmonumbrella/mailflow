@@ -11,6 +11,7 @@ import { screenLockGate } from '../middleware/screenLock.js';
 import { matchApiTokenRoute } from '../services/apiTokenAllowlist.js';
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
+const GENERATION = '44444444-4444-4444-8444-444444444444';
 const ID = '22222222-2222-4222-8222-222222222222';
 const OTHER = '33333333-3333-4333-8333-333333333333';
 const row = (extra = {}) => ({ id: ID, account_id: ACCOUNT, parent_id: null, name: 'Work', normalized_name: 'work', full_path: 'Work', color: null, text_color: null,
@@ -39,7 +40,7 @@ const call = async (method, path = '', body, headers = {}) => {
 const body = extra => ({ accountId: ACCOUNT, name: 'Work', mutationId: randomUUID(), ...extra });
 function transaction({ rows = [], revision = '0', replay, owned = true, failInsert = false } = {}) {
   const client = { query: vi.fn(async (sql) => {
-    if (sql.startsWith('SELECT id FROM email_accounts')) return { rows: owned ? [{ id: ACCOUNT }] : [] };
+    if (sql.includes('FROM email_accounts')) return { rows: owned ? [{ id: ACCOUNT, storage_generation: GENERATION }] : [] };
     if (sql.startsWith('SELECT tree_revision')) return { rows: [{ tree_revision: revision }] };
     if (sql.includes('SELECT request_hash')) return { rows: replay ? [replay] : [] };
     if (sql.startsWith('SELECT * FROM mail_labels')) return { rows };
@@ -92,25 +93,28 @@ describe('native label route contracts', () => {
   it('lists and previews one consistent read snapshot without inserting state or fabricating counts', async () => {
     query.mockImplementation(async sql => ({ rows: sql.includes('SELECT id FROM users') ? [{ id: 'owner' }] : [{ tree_revision: '9007199254740993', labels: [row(), row({ id: OTHER, parent_id: ID, name: 'Child', normalized_name: 'child', full_path: 'Work/Child' })] }] }));
     const state = await call('GET', `?accountId=${ACCOUNT}`);
-    expect(state.body).toMatchObject({ counts: null, coverage: 'not_indexed', assignmentSupported: false, treeRevision: '9007199254740993' });
+    expect(state.body).toMatchObject({ counts: null, coverage: 'synchronized-cache', assignmentSupported: true, treeRevision: '9007199254740993' });
     expect(state.body.labels[0]).not.toHaveProperty('normalizedName');
+    const previewClient = transaction({ rows: [row(), row({ id: OTHER, parent_id: ID, name: 'Child', normalized_name: 'child', full_path: 'Work/Child' })], revision: '9007199254740993' });
     const preview = await call('POST', `/${ID}/delete-preview`, { accountId: ACCOUNT });
     expect(preview.body).toMatchObject({ deletedLabelIds: [ID, OTHER], removesMessages: false, counts: null });
-    expect(withTransaction).not.toHaveBeenCalled(); expect(broadcast).not.toHaveBeenCalled();
+    expect(previewClient.query.mock.calls[0][0]).toContain('FOR UPDATE');
+    expect(previewClient.query.mock.calls.some(([sql]) => /^(INSERT|UPDATE|DELETE)/.test(sql))).toBe(false);
+    expect(broadcast).not.toHaveBeenCalled();
     const reads = query.mock.calls.filter(([sql]) => sql.includes('jsonb_agg'));
-    expect(reads).toHaveLength(2);
+    expect(reads).toHaveLength(1);
     for (const [, params] of reads) expect(params).toEqual([ACCOUNT, 'owner']);
   });
   it('commits label, revision and durable replay response through the same transaction, then pushes to its owner', async () => {
     const client = transaction();
     const result = await call('POST', '', body({ color: '#AABBCC', messageVisible: false }));
     expect(result.status).toBe(201);
-    expect(result.body).toMatchObject({ label: { color: '#aabbcc', messageVisible: false, revision: '1' }, treeRevision: '1', assignmentSupported: false });
+    expect(result.body).toMatchObject({ label: { color: '#aabbcc', messageVisible: false, revision: '1' }, treeRevision: '1', assignmentSupported: true });
     const statements = client.query.mock.calls.map(([sql]) => sql);
     expect(statements.findIndex(sql => sql.includes('FOR UPDATE'))).toBeLessThan(statements.findIndex(sql => sql.startsWith('INSERT INTO mail_labels')));
     const journal = client.query.mock.calls.find(([sql]) => sql.startsWith('INSERT INTO mail_label_mutations'));
     expect(JSON.parse(journal[1][3])).toEqual(result.body);
-    expect(broadcast).toHaveBeenCalledWith({ type: 'labels_changed', accountId: ACCOUNT, treeRevision: '1' }, 'owner');
+    expect(broadcast).toHaveBeenCalledWith({ type: 'labels_changed', accountId: ACCOUNT, storageGeneration: GENERATION, treeRevision: '1' }, 'owner');
   });
   it('returns success after commit even if the push transport is unavailable', async () => {
     transaction(); broadcast.mockImplementationOnce(() => { throw new Error('closed'); });

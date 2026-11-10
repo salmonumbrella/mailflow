@@ -1,7 +1,8 @@
 # Durable message identity
 
-This milestone supplies the identity foundation for native MailFlow metadata. It does not
-add message label membership, provider label synchronization, or compose-label handoff.
+The identity foundation supplies durable message identities for native MailFlow metadata.
+The native label membership slice described below builds on it. Provider label synchronization
+and compose-label handoff remain unimplemented.
 
 ## Verified identity
 
@@ -104,8 +105,8 @@ through `MAILFLOW_TEST_DATABASE_URL`; a skipped suite is not acceptance.
 
 Local checks can run against an isolated PostgreSQL 17 instance. The supported CI target
 remains Node 22 and PostgreSQL 16. No live-provider operation or browser acceptance test
-was performed for this milestone. Full label membership, query/chip UI, rule and composer
-handoffs remain subsequent milestones.
+was performed for this milestone. Native label membership and cache-backed UI are the following local slice described below;
+rule and composer handoffs remain subsequent milestones.
 
 ## Stale asynchronous work and pending account jobs
 
@@ -191,3 +192,93 @@ without a verified selectable epoch have only the generation fence; this does no
 mailbox-object proof for a recreated same-generation path. Successful folder actions return
 captured context so route bookkeeping can refuse newer-generation/epoch cache rows. Post-COPY
 plugin refresh failure is bookkeeping uncertainty, not grounds to repeat an acknowledged COPY.
+
+## Native label membership slice
+
+Migration 0082 adds `native_label_memberships` and `native_label_mutations`. Memberships
+reference account/generation/entity and account/label composite keys, never disposable
+message or folder rows. Labels remain local account-owned definitions. No IMAP command,
+legacy folder-backed label operation, GTD operation or provider synchronization is part of
+this writer. Provider labels, search/rule assignment and compose handoff remain separate.
+
+All supported writes use `nativeLabelMemberships.js`. The lock order is account FOR UPDATE,
+label state/definitions, then canonical entities and memberships. Definition changes and
+subtree deletion use the same account-first order. The mutation resolves historical aliases,
+checks ownership/current generation/live exact cached location and every expected metadata
+version, then commits the entire account batch. An explicit add/remove decision increments
+metadata_version once per distinct canonical entity even when its set is unchanged. This
+prevents a later provisional merge from erasing an intentional no-op removal. A database
+guard rejects direct membership writes onto version-zero or alias entities; it is a
+merge-safety backstop, not a replacement for the service's authorization, lock ordering,
+version checks, idempotency or version advancement. Direct SQL membership editing is not a
+supported writer API. No metadata decisions are silently unioned during reconciliation.
+
+POST `/api/labels/memberships/query` accepts `{accountId, storageGeneration, targets}` where
+each target is `{entityId}`. POST `/api/labels/memberships` additionally requires a UUID
+`mutationId`, `addLabelIds`, `removeLabelIds`, and an `expectedMetadataVersion` decimal string
+on each target. There must be 1–200 distinct requested entities, at most 100 labels in each
+delta, at least one decision, and no label in both deltas. Account, generation, entity and
+label identifiers are UUIDs. A target is an explicit message entity, not a whole conversation
+inferred from a thread head or matching headers.
+
+Both return `{accountId, storageGeneration, targets}`. Each response target carries
+`requestedEntityId`, canonical `entityId`, decimal-string `metadataVersion`, `available`, and
+`labelIds`; a mutation also returns `mutationId`. A query can describe retained metadata with
+`available:false`; a new mutation requires a live verified, non-deleted cached source in the
+current epoch. This is a cache availability requirement, not a claim that mail vanished from
+the server. Exact alias targets are deduplicated only after every expected version is checked.
+Errors include 409 `stale_generation`, `stale_metadata_version`, `identity_unavailable`,
+`mutation_conflict`, and `mutation_expired`, plus 400 invalid input and 404 ownership/label/entity
+failures. A rejected batch leaves no changes or successful mutation record.
+
+The journal stores the request hash and exact generation-tagged response atomically with the
+changes. An exact retry returns that historical response before current generation, label or
+version checks; it never re-executes after intervening edits, deletion, cache purge or account
+replacement. Clients must refresh and must not apply historical responses to a different
+current account/generation. Expired responses are removed after 30 days but their used-key
+hash tombstones remain permanently, so an old retry cannot become a new assignment. A changed
+request with a reused mutation ID fails. Successful new mutations send an owner-scoped
+`label_memberships_changed` notification with accountId, storageGeneration and canonical
+entityIds after commit. Replays do not push; push failure cannot reverse committed success.
+
+Subtree deletion previews disclose membership and distinct-entity counts per storage
+generation, including retained generations. Deletion increments affected entity versions
+once and removes definitions/memberships only; it does not move or delete any mail or folder.
+Both new tables belong to setup and full backups. Same-schema restores reject omitted tables
+or columns, preserve journal tombstones and exact large versions, and keep their guard active.
+All native-label routes remain excluded from API-token access until explicit token scope
+contracts are introduced. Existing session authentication, CSRF and screen lock still apply.
+
+Real PostgreSQL tests cover concurrency, alias resolution, explicit no-op protection, stale
+batch rollback, scoped FK/guard failures, definition deletion across generations, exact replay,
+cache purge/rebinding, and setup/full restore with omission rejection. Browser and live-provider
+acceptance remain outstanding; passing these tests does not complete the Gmail parity checklist.
+
+### Native label Undo
+
+A confirmed forward membership response advertises `undoSupported:true`. POST
+`/api/labels/memberships/undo` accepts `{accountId, storageGeneration, originalMutationId,
+mutationId}`; the last field is a new UUID identifying the Undo request. The server, not the
+client, supplies the inverse. The forward journal stores a private per-target membership
+preimage and exact post-forward metadata versions in `undo_state`, tagged with explicit
+`operation_kind='apply'`. Ordinary DTOs never expose that state. Mixed original memberships
+therefore remain mixed after Undo, including alias-deduplicated batches and explicit no-ops.
+
+New Undo requests require an unexpired, confirmed forward record with a preimage. They check
+owned/current generation, original requested-to-canonical mapping, live verified sources,
+all exact post-forward versions, and existence of the involved definitions. If any target
+has changed, the whole Undo fails without overwriting any later decision. Account replacement,
+expired/missing preimages and Undo-of-Undo are refused. An uncertain forward request must be
+resolved by retrying that exact forward request before offering Undo, never by guessing its
+outcome. Identity conflicts use `undo_identity_changed`; unavailable original records use
+`undo_unavailable`. Other existing membership errors retain their meanings.
+
+Undo advances each canonical entity version once, restores only the necessary set differences,
+and preserves untouched membership rows. Its response uses the ordinary membership DTO plus
+`originalMutationId` and `undoSupported:false`. A committed Undo has its own journal entry and
+exact historical replay, even after subsequent edits or replacement; a fresh Undo request
+never bypasses freshness checks. Replays do not publish notifications. Expiry clears private
+preimages together with response bodies while retaining used-key tombstones. Setup/full backup
+roundtrips preserve `undo_state` and `operation_kind`; omission of either column fails restore.
+Real PostgreSQL tests also exercise restoring a backup and then successfully undoing its
+confirmed forward change after verified cache recovery.

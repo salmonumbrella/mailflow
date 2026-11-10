@@ -176,7 +176,7 @@ const cases = [
 
 // The lookup each route makes for the owner: which helper, on which id, with exactly which
 // columns and filters. Columns are compared with whitespace collapsed.
-const MESSAGE_VIEW = `m.id, m.uid, m.folder, m.message_id, m.subject, m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
+const MESSAGE_VIEW = `m.id, m.uid, m.folder, m.entity_id, m.storage_generation, m.uid_validity, m.message_id, m.subject, m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
   m.reply_to, m.in_reply_to, m.thread_references, m.date, m.snippet, m.is_read, m.is_starred,
   m.has_attachments, m.account_id, m.category, m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
   m.spam_verdict, m.spam_user_override, m.spam_score_ml, a.name AS account_name, a.email_address AS account_email, a.color AS account_color`;

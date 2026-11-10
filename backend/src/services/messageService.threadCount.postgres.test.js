@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { installNativeLabelReadFixture } from './testSupport/nativeLabelReadFixture.js';
 
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'owner' }; next(); } }));
@@ -37,6 +38,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('threaded Inbox message
         list_unsubscribe_post text, delivery_addresses jsonb, spam_verdict text,
         spam_user_override text, spam_score_ml real, flags jsonb, unsubscribed_at timestamptz);
       CREATE TEMP TABLE contacts (id uuid, user_id text, primary_email text, photo_data text)`);
+    await installNativeLabelReadFixture(database);
     query.mockImplementation((sql, values) => database.query(sql, values));
     const app = express();
     app.use('/api/mail', mailRoutes);
@@ -67,6 +69,9 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('threaded Inbox message
 
   const inboxRows = async (accountId) => {
     const result = await listMessages({ userId: 'owner', accountId, folder: 'INBOX', threaded: true });
+    for (const row of result.messages) expect(row).toMatchObject({
+      nativeLabelState: 'unavailable', entityId: null, metadataVersion: null, nativeLabels: null,
+    });
     return Object.fromEntries(result.messages.map(row => [row.thread_id, row]));
   };
 

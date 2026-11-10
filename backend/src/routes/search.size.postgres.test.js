@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { installNativeLabelReadFixture, fixtureId, fixtureName } from '../services/testSupport/nativeLabelReadFixture.js';
 import express from 'express';
 import { buildSearchConditions } from '../services/searchConditions.js';
 
@@ -13,34 +14,37 @@ import { query } from '../services/db.js';
 describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('size search PostgreSQL', () => {
   let database, server, base;
   async function search(q, scope = {}) {
+    if (scope.accountId) scope = { ...scope, accountId: fixtureId(scope.accountId) };
     const response = await fetch(`${base}/?${new URLSearchParams({ q, ...scope })}`);
     expect(response.status).toBe(200);
     const data = await response.json();
-    return { ids: data.messages.map(m => m.id).sort(), sizeIndex: data.sizeIndex };
+    for (const message of data.messages) expect(message).toMatchObject({ nativeLabelState: 'unavailable', nativeLabels: null, entityId: null, metadataVersion: null, storageGeneration: expect.any(String) });
+    return { ids: data.messages.map(m => fixtureName(m.id)).sort(), sizeIndex: data.sizeIndex };
   }
   beforeAll(async () => {
     database = new pg.Client({ connectionString: process.env.MAILFLOW_TEST_DATABASE_URL });
     await database.connect();
     await database.query(`
-      CREATE TEMP TABLE email_accounts (id text, user_id text, enabled boolean,
+      CREATE TEMP TABLE email_accounts (id uuid, user_id text, enabled boolean,
         include_in_unified_inbox boolean, name text, email_address text, color text, folder_mappings jsonb DEFAULT '{}');
-      CREATE TEMP TABLE folders (account_id text, path text, special_use text, name text);
-      CREATE TEMP TABLE messages (id text, account_id text DEFAULT 'main', folder text DEFAULT 'INBOX',
+      CREATE TEMP TABLE folders (account_id uuid, path text, special_use text, name text);
+      CREATE TEMP TABLE messages (id uuid, account_id uuid DEFAULT '${fixtureId('main')}', folder text DEFAULT 'INBOX',
         uid bigint, message_id text, subject text, from_name text, from_email text,
         to_addresses jsonb, cc_addresses jsonb, reply_to jsonb, delivery_addresses jsonb, thread_id text,
         in_reply_to text, thread_references text, date timestamptz DEFAULT '2026-11-10', snippet text,
         is_read boolean, is_starred boolean, has_attachments boolean, is_deleted boolean DEFAULT false,
         search_vector tsvector, body_text text, category text, attachments jsonb DEFAULT '[]', rfc822_size_bytes bigint);
       INSERT INTO email_accounts(id,user_id,enabled,include_in_unified_inbox) VALUES
-        ('main','size-owner',true,true), ('other','stranger',true,true),
-        ('excluded','size-owner',true,false), ('disabled','size-owner',false,true);
-      INSERT INTO folders VALUES ('main','Trash','\\Trash','Trash');
-      INSERT INTO messages(id,rfc822_size_bytes) VALUES ('unknown',NULL), ('zero',0), ('below',999), ('equal',1000), ('above',1001), ('maximum',9007199254740991);
-      INSERT INTO messages(id,rfc822_size_bytes,subject) VALUES ('unknown-true',NULL,'invoice');
-      INSERT INTO messages(id,account_id,rfc822_size_bytes) VALUES ('foreign','other',2000), ('opted-out','excluded',2000), ('disabled','disabled',2000);
-      INSERT INTO messages(id,folder,rfc822_size_bytes) VALUES ('trash','Trash',2000), ('archive','Archive',2000);
-      INSERT INTO messages(id,is_deleted,rfc822_size_bytes) VALUES ('deleted',true,2000);
+        ('${fixtureId('main')}','size-owner',true,true), ('${fixtureId('other')}','stranger',true,true),
+        ('${fixtureId('excluded')}','size-owner',true,false), ('${fixtureId('disabled')}','size-owner',false,true);
+      INSERT INTO folders VALUES ('${fixtureId('main')}','Trash','\\Trash','Trash');
+      INSERT INTO messages(id,rfc822_size_bytes) VALUES ('${fixtureId('unknown')}',NULL), ('${fixtureId('zero')}',0), ('${fixtureId('below')}',999), ('${fixtureId('equal')}',1000), ('${fixtureId('above')}',1001), ('${fixtureId('maximum')}',9007199254740991);
+      INSERT INTO messages(id,rfc822_size_bytes,subject) VALUES ('${fixtureId('unknown-true')}',NULL,'invoice');
+      INSERT INTO messages(id,account_id,rfc822_size_bytes) VALUES ('${fixtureId('foreign')}','${fixtureId('other')}',2000), ('${fixtureId('opted-out')}','${fixtureId('excluded')}',2000), ('${fixtureId('disabled')}','${fixtureId('disabled')}',2000);
+      INSERT INTO messages(id,folder,rfc822_size_bytes) VALUES ('${fixtureId('trash')}','Trash',2000), ('${fixtureId('archive')}','Archive',2000);
+      INSERT INTO messages(id,is_deleted,rfc822_size_bytes) VALUES ('${fixtureId('deleted')}',true,2000);
     `);
+    await installNativeLabelReadFixture(database);
     query.mockImplementation((sql, values) => database.query(sql, values));
     const app = express(); app.use(routes);
     await new Promise(resolve => { server = app.listen(0, resolve); });

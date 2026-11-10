@@ -288,7 +288,7 @@ export default function Sidebar({ forceExpanded = false, onClose } = {}) {
   const uiScale = useUiScale();
   const mailboxNavRef = useRef(null);
   const {
-    accounts, unreadCounts, selectedAccountId, selectedFolder, layout,
+    accounts, unreadCounts, selectedAccountId, selectedFolder, activeLabel, layout,
     setSelectedAccount, setShowAdmin, setAdminTab, setAccountsIntent, openCompose,
     folders, setFolders, setAccounts, user, signOut, lockScreen, sidebarCollapsed: sidebarCollapsedPref, toggleSidebar,
     blockRemoteImages, setBlockRemoteImages, setMobileSidebarOpen, addNotification,
@@ -311,7 +311,7 @@ export default function Sidebar({ forceExpanded = false, onClose } = {}) {
   // Close the mobile drawer whenever the user navigates to a different folder/account
   useEffect(() => {
     if (isMobile) setMobileSidebarOpen(false);
-  }, [selectedAccountId, selectedFolder]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedAccountId, selectedFolder, activeLabel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [msgDragTarget, setMsgDragTarget] = useState(null);
   const [folderDrag, setFolderDrag] = useState(null);

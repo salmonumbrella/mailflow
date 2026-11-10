@@ -511,7 +511,7 @@ test('Gmail toolbar snooze cancel has no effects, failed snooze leaves row selec
 test('Gmail toolbar unsupported capabilities explain boundaries without sending writes', async () => {
   await selectToolbarRows([MESSAGE]);
   CALLS = [];
-  await toolbarClick('Labels'); assert.match(document.querySelector('.gmail-toolbar-menu').textContent, /not supported/);
+  await toolbarClick('Labels'); assert.match(document.querySelector('.gmail-toolbar-menu').textContent, /verified identity/);
   await toolbarClick('Add to Tasks'); assert.match(document.querySelector('.gmail-toolbar-menu').textContent, /Google Tasks is not connected/);
   assert.equal(CALLS.filter(call => call.method !== 'GET').length, 0);
   await React.act(async () => window.dispatchEvent(new window.Event('scroll')));

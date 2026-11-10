@@ -1,3 +1,6 @@
+import { createNativeLabelFeed } from '../utils/nativeLabelFeed.js';
+import { labelViewKey, NATIVE_LABELS_CHANGED, nativeLabelActionsBlocked } from '../utils/nativeLabelNavigation.js';
+import NativeLabelChips from './NativeLabelChips.jsx';
 import GmailToolbar from './GmailToolbar.jsx';
 import { openGmailSenderFilter } from '../utils/gmailSenderFilter.js';
 import { quoteSearch } from '../utils/gmailSearch.js';
@@ -180,7 +183,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const { t } = useTranslation();
   const uiScale = useUiScale();
   const {
-    selectedAccountId, selectedFolder, messages, setMessages,
+    selectedAccountId, selectedFolder, activeLabel, nativeLabelFeed, messages, setMessages,
     appendMessages, messagesTotal, setMessagesTotal,
     setMessagesOffset, hasMoreMessages, setHasMoreMessages,
     loadingMessages, setLoadingMessages, selectedMessageId, lastViewedMessageId,
@@ -212,6 +215,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const isMobile = useMobile();
   // Auto-spam explain modal target (opened from the badge on a row).
   const [spamExplainMessageId, setSpamExplainMessageId] = useState(null);
+  const nativeFeedRef = useRef(null);
+  if (!nativeFeedRef.current) nativeFeedRef.current = createNativeLabelFeed({ api, store: useStore, translate: (key, fallback, values) => tRef.current(key, fallback, values) });
+  const nativeKey = labelViewKey(activeLabel);
   const isUnified = selectedAccountId === null;
   // The Snoozed view (#269): an account's Snoozed folder, or with no account every account's.
   const isSnoozedView = selectedFolder === SNOOZED_FOLDER;
@@ -222,7 +228,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const isAllInboxes = isUnified && !isSnoozedView;
   // The Snoozed view lists single messages, each with when it comes back, and the server never
   // groups it; drawn as conversation rows it showed unread mail as read and repeated row keys.
-  const threadedView = threadedSetting && !isSnoozedView;
+  const threadedView = threadedSetting && !isSnoozedView && !activeLabel;
   const selectedAccount = accounts.find(a => a.id === selectedAccountId);
   const unifiedInboxAccountKey = accounts
     .filter(isAccountInUnifiedInbox)
@@ -348,7 +354,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // While a GTD tab is selected the list body shows that section instead of the
   // folder listing. Same visibility envelope as the tab strip (INBOX, no search).
   const showGtdTab = gtdActive && !!activeGtdTab && selectedFolder === 'INBOX' && !searchQuery.trim();
-  const sortable = isSortableList({ accountId: selectedAccountId, folder: selectedFolder, searchQuery, gtdTab: showGtdTab });
+  const sortable = !activeLabel && isSortableList({ accountId: selectedAccountId, folder: selectedFolder, searchQuery, gtdTab: showGtdTab });
   // Unread badge per GTD tab, from the shared sections store (Waiting merged).
   const gtdTabUnread = (() => {
     const map = {};
@@ -358,8 +364,8 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   // Fetch unread counts per category for the tab bar badges.
   // Re-fetches whenever the account/folder changes or new mail arrives.
-  const categorizationActive = categorizationEnabled || (!isUnified && selectedAccount?.categorization_enabled);
-  archiveViewKeyRef.current = archiveViewKey({
+  const categorizationActive = !activeLabel && (categorizationEnabled || (!isUnified && selectedAccount?.categorization_enabled));
+  archiveViewKeyRef.current = nativeKey + archiveViewKey({
     selectedAccountId,
     selectedFolder,
     searchQuery,
@@ -490,16 +496,54 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     setExpandedThreadId(null);
   }, [messagesRefreshToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (!nativeKey || !accountsReady) return;
+    const controller = nativeFeedRef.current;
+    const load = () => controller.load({ limit: pageSize, unreadOnly });
+    setCurrentPage(1);
+    setSelectedIds(new Set());
+    setFolderSyncing(false);
+    controller.load({ limit: pageSize, unreadOnly, reset: true });
+    const changed = event => {
+      if (!event.detail?.accountId || event.detail.accountId === useStore.getState().activeLabel?.accountId) load();
+    };
+    window.addEventListener(NATIVE_LABELS_CHANGED, changed);
+    window.addEventListener('mailflow:refresh', load);
+    window.addEventListener('focus', load);
+    const timer = window.setInterval(() => { if (document.visibilityState !== 'hidden') load(); }, 30000);
+    return () => { controller.invalidate(); window.clearInterval(timer); window.removeEventListener(NATIVE_LABELS_CHANGED, changed); window.removeEventListener('mailflow:refresh', load); window.removeEventListener('focus', load); };
+  }, [nativeKey, accountsReady, pageSize, unreadOnly, messagesRefreshToken]);
+
+  // Keep selection on the canonical entity when its current cache locator changes.
+  const previousNativeRows = useRef([]);
+  useEffect(() => {
+    if (!nativeKey) return;
+    const previousRows = previousNativeRows.current;
+    previousNativeRows.current = messages;
+    const ids = new Set(messages.map(message => message.id));
+    const aliases = useStore.getState().nativeLabelFeed?.entityAliases || {};
+    setSelectedIds(previous => {
+      const kept = new Set([...previous].map(id => {
+        if (ids.has(id)) return id;
+        const entity = previousRows.find(message => message.id === id)?.entityId;
+        return messages.find(message => message.entityId === (aliases[entity] || entity))?.id;
+      }).filter(Boolean));
+      return kept.size === previous.size && [...kept].every(id => previous.has(id)) ? previous : kept;
+    });
+  }, [nativeKey, messages]);
+
   // Reset and load fresh when account/folder/filter changes
   useEffect(() => {
     let cancelled = false;
+    const generation = ++listGenRef.current;
+    refreshRequestRef.current.invalidate();
+    const current = () => !cancelled && generation === listGenRef.current && !useStore.getState().activeLabel && useStore.getState().selectedAccountId === selectedAccountId && useStore.getState().selectedFolder === selectedFolder;
     const run = async () => {
       // Don't attempt to load until we know which accounts exist.
       // Without this guard, the unified inbox query fires before getAccounts()
       // resolves, finds no account IDs, and returns empty — causing the blank
       // "All Inboxes" on first load.
-      if (!accountsReady) return;
-      listGenRef.current += 1;
+      if (!accountsReady || nativeKey) return;
       setLoadingMessages(true);
       setMessagesOffset(0);
       setHasMoreMessages(true);
@@ -514,7 +558,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         await refreshRequestRef.current.run(
           () => api.getMessages(params),
           (data) => {
-            if (cancelled) return;
+            if (!current()) return;
             setMessagesTotal(data.total);
             setMessages(applyReadGuard(data.messages));
             setMessagesOffset(data.messages.length);
@@ -548,15 +592,16 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         console.error('Failed to load messages:', err);
         setFolderSyncing(false);
       } finally {
-        if (!cancelled) setLoadingMessages(false);
+        if (current()) setLoadingMessages(false);
       }
     };
     run();
     return () => { cancelled = true; };
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [nativeKey, selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Load next page (called by scroll or button)
   const loadMore = useCallback(async () => {
+    if (nativeKey) return nativeFeedRef.current.load({ limit: pageSize, unreadOnly, append: true });
     if (loadingMessages || !hasMoreMessages) return;
     const gen = listGenRef.current;
     setLoadingMessages(true);
@@ -570,7 +615,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       if (useStore.getState().threadedView) params.threaded = 'true';
       if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
       const data = await api.getMessages(params);
-      if (listGenRef.current !== gen) return;
+      if (listGenRef.current !== gen || useStore.getState().activeLabel || useStore.getState().selectedAccountId !== selectedAccountId || useStore.getState().selectedFolder !== selectedFolder) return;
       appendMessages(applyReadGuard(data.messages));
       setMessagesOffset(currentOffset + data.messages.length);
       setHasMoreMessages(currentOffset + data.messages.length < data.total);
@@ -578,14 +623,17 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       console.error('Failed to load more messages:', err);
     } finally {
       // The new list's own load owns the flag once the list was replaced.
-      if (listGenRef.current === gen) setLoadingMessages(false);
+      if (listGenRef.current === gen && !useStore.getState().activeLabel && useStore.getState().selectedAccountId === selectedAccountId && useStore.getState().selectedFolder === selectedFolder) setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
+  }, [nativeKey, selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
 
   // Listen for background refresh events from WebSocket. If a message was just
   // opened, give its body request a brief head start before reloading the full list.
   useEffect(() => {
+    if (nativeKey) return;
+    let cancelled = false;
     const run = async () => {
+      const generation = listGenRef.current;
       try {
         const state = useStore.getState();
         const sm = state.scrollMode;
@@ -603,6 +651,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         await refreshRequestRef.current.run(
           () => api.getMessages(params),
           (data) => {
+            if (cancelled || generation !== listGenRef.current || useStore.getState().activeLabel || useStore.getState().selectedAccountId !== selectedAccountId || useStore.getState().selectedFolder !== selectedFolder) return;
             setMessagesTotal(data.total);
             // If the unread filter is on and the currently open message was just marked
             // read, the server won't return it — preserve it so the user can keep reading.
@@ -640,10 +689,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     };
     window.addEventListener('mailflow:refresh', handler);
     return () => {
+      cancelled = true;
       window.removeEventListener('mailflow:refresh', handler);
       clearTimeout(deferredRefreshTimerRef.current);
     };
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [nativeKey, selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Run the refresh held back while a load was in flight, once that load (and any append it
   // made) has finished.
@@ -706,10 +756,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       // Bumps the search effect if a query is active (it no-ops on an empty query);
       // the refresh event reloads the folder list when not searching.
       setSearchReloadToken(t => t + 1);
-      window.dispatchEvent(new Event('mailflow:refresh'));
+      if (!useStore.getState().activeLabel) window.dispatchEvent(new Event('mailflow:refresh'));
     };
+    window.addEventListener(NATIVE_LABELS_CHANGED, handler);
     window.addEventListener('mailflow:rules-ran', handler);
-    return () => window.removeEventListener('mailflow:rules-ran', handler);
+    return () => { window.removeEventListener(NATIVE_LABELS_CHANGED, handler); window.removeEventListener('mailflow:rules-ran', handler); };
   }, []);
 
   const loadMoreSearch = useCallback(async () => {
@@ -776,8 +827,10 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   // Load a specific page (paginated mode)
   const loadPage = useCallback(async (pageNum) => {
+    if (nativeKey) return;
     if (loadingMessages) return;
-    listGenRef.current += 1;
+    const generation = ++listGenRef.current;
+    const current = () => generation === listGenRef.current && !useStore.getState().activeLabel && useStore.getState().selectedAccountId === selectedAccountId && useStore.getState().selectedFolder === selectedFolder;
     setLoadingMessages(true);
     try {
       const params = { limit: pageSize, offset: (pageNum - 1) * pageSize };
@@ -789,6 +842,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       await refreshRequestRef.current.run(
         () => api.getMessages(params),
         (data) => {
+          if (!current()) return;
           setCurrentPage(pageNum);
           setMessagesTotal(data.total);
           setMessages(applyReadGuard(data.messages));
@@ -799,14 +853,16 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         },
       );
     } catch (err) {
+      if (!current()) return;
       console.error('Failed to load page:', err);
       addNotification({ type: 'error', title: t("gmailToolbar.couldNotLoadThisPage", "Could not load this page"), body: t("gmailToolbar.yourCurrentPageHasBeenKeptPleaseTryAgain", "Your current page has been kept. Please try again.") });
     } finally {
-      setLoadingMessages(false);
+      if (current()) setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, addNotification, t, applyReadGuard, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [nativeKey, selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, addNotification, t, applyReadGuard, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   const handleSync = async () => {
+    if (nativeKey) { useStore.getState().invalidateNativeLabels(activeLabel); return; }
     if (syncing) return;
     setSyncing(true);
     try {
@@ -968,6 +1024,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   }, [threadMessages, setThreadMessages, isUnified]);
 
   const setMessagesReadState = useCallback(async (message, read) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     // An explicit read or unread wins over a delayed automatic read still pending for the row.
     cancelScheduledMarkReadFor(message.id);
     const isThreadRow = isThreadListRow(message);
@@ -1096,6 +1153,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   };
 
   const setMessagesStarredState = useCallback(async (message, starred) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     let actionMessages;
     try {
       actionMessages = await resolveMessagesForThreadAction(message);
@@ -1126,6 +1184,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   // Undo-able delete: optimistically remove, delay the API call by 4.5s so user can undo
   const scheduleDelete = useCallback(async (message) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const tid = message.thread_id || message.id;
     const isThreadRow = isThreadListRow(message);
     const key = isThreadRow ? `thread:${tid}` : message.id;
@@ -1385,6 +1444,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   }, [setMessagesReadState]);
 
   const handleSwipeArchive = useCallback(async (message) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const archiveMessage = archiveVisibleMessageRef.current;
     if (!archiveMessage) return;
     const threadRow = isThreadListRow(message);
@@ -1610,6 +1670,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   }, [displayMessages]);
 
   const handleBulkDelete = useCallback(async (ids, msgs, resolvedMessages = null) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const originView = archiveViewKeyRef.current;
     const restore = rows => resolvedMessages ? restoreMessagesIfViewCurrent(originView, archiveViewKeyRef, rows) : useStore.getState().restoreMessages(rows);
     const key = `bulk:${ids[0]}`;
@@ -1689,6 +1750,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   }, [searchHasMore, removeMessage, prefetchSearchAfterRemoval, resolveMessagesForThreadAction, decrementUnread, incrementUnread, addNotification, t]);
 
   const handleBulkMove = useCallback(async (ids, msgs, folder, resolvedMessages = null) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const originView = archiveViewKeyRef.current;
     const restore = rows => resolvedMessages ? restoreMessagesIfViewCurrent(originView, archiveViewKeyRef, rows) : useStore.getState().restoreMessages(rows);
     // Selected thread rows move the whole conversation. A folder path is
@@ -1746,12 +1808,14 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   }, [removeMessage, decrementUnread, incrementUnread, resolveMessagesForThreadAction, addNotification, t]);
 
   const handleRowMove = useCallback((e, msg) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     e.stopPropagation();
     const rect = e.currentTarget.getBoundingClientRect();
     setContextMenu({ x: rect.left, y: rect.bottom + 4, message: msg, defaultMoveView: true });
   }, []);
 
   const handleRowDragStart = useCallback((e, message) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const { selectedIds, isThreadListRow: isThreadRow, threadFetchFolder, threadFetchUnified } = scRef.current;
     const isMulti = selectedIds.size > 1 && selectedIds.has(message.id);
     const payload = isMulti
@@ -1772,6 +1836,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   }, []);
 
   const handleBulkArchive = useCallback((ids, msgs) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
     const threadGuardsByRow = new Map(
       msgs
@@ -1996,6 +2061,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   ]);
 
   const handleBulkMarkRead = useCallback(async (ids, msgs) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     ids.forEach(id => cancelScheduledMarkReadFor(id));
     const markAsRead = msgs.some(m => !m.is_read);
     // A manual read state either way: a read still in flight from opening one of these no longer
@@ -2039,6 +2105,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // bookkeeping: stars never touch counts. Direction mirrors the single-message star and
   // bulk read convention — any unstarred message in the selection means "star them all".
   const handleBulkStar = useCallback(async (ids, msgs) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const markAsStarred = msgs.some(m => !m.is_starred);
     msgs.forEach(msg => updateMessage(msg.id, { is_starred: markAsStarred }));
     setSelectedIds(new Set());
@@ -2072,12 +2139,14 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     const getState = () => useStore.getState();
 
     const markRead = (msg) => {
+      if (nativeLabelActionsBlocked(useStore.getState())) return;
       if (msg.is_read) return;
       const { updateMessage, decrementUnread, incrementUnread, adjustCategoryCount, markReadBehavior, markReadDelay } = getState();
       if (markReadBehavior === 'manual') return;
       cancelScheduledMarkRead(autoMarkReadTimerRef.current);
       autoMarkReadTimerRef.current = null;
       const doMarkRead = () => {
+        if (nativeLabelActionsBlocked(useStore.getState())) return;
         updateMessage(msg.id, { is_read: true });
         decrementUnread(msg.account_id);
         adjustCategoryCount(msg.category, -1);
@@ -2181,6 +2250,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     };
 
     const onToggleRead = () => {
+      if (nativeLabelActionsBlocked(useStore.getState())) return;
       const { messages, selectedMessageId, updateMessage, decrementUnread, incrementUnread, adjustCategoryCount } = getState();
       if (!selectedMessageId) return;
       const msg = messages.find(m => m.id === selectedMessageId);
@@ -2207,6 +2277,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     };
 
     const onMarkUnread = () => {
+      if (nativeLabelActionsBlocked(useStore.getState())) return;
       const state = getState();
       const message = selectedMessage(state);
       markMessageUnread(message, {
@@ -2333,6 +2404,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // ─────────────────────────────────────────────────────────────
 
   const handleContextAction = async (action, message, data) => {
+    if (nativeLabelActionsBlocked(useStore.getState()) && !['open', 'print'].includes(action)) return;
     switch (action) {
       case 'open':
         handleSelect(message);
@@ -2729,17 +2801,19 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // Shared by the main-pane selection (handleSelect) and the detached-window open
   // path (#219) so both routes behave identically.
   const markMessageReadOnOpen = (message) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     cancelScheduledMarkRead(autoMarkReadTimerRef.current);
     autoMarkReadTimerRef.current = null;
     if (message.is_read || markReadBehavior === 'manual') return;
     const prevUnread = message.unread_count;
     const doMarkRead = () => {
+      if (nativeLabelActionsBlocked(useStore.getState())) return;
       updateMessage(message.id, { is_read: true, unread_count: 0 });
       decrementUnread(message.account_id);
       adjustCategoryCount(message.category, -1);
       const token = setPending(message.id, message.account_id);
       api.bulkRead([message.id], true)
-        .catch(() => api.bulkRead([message.id], true))
+        .catch(error => { if (nativeLabelActionsBlocked(useStore.getState())) throw error; return api.bulkRead([message.id], true); })
         .then(() => settleMarkRead(message.id, message.account_id, token))
         .catch(e => {
           console.error('markRead failed:', e.message);
@@ -2759,6 +2833,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // Open a message in a detached floating window (#219). Warms the body cache and marks
   // it read (like a normal open) without disturbing the main-pane selection.
   const handleOpenInWindow = (message) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (!message || isMobile) return;
     openMessageWindow(message.id);
     api.getMessageBody(message.id).catch(() => {});
@@ -2807,7 +2882,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const selectedFolderCounts = folders[selectedAccountId]?.find(f => f.path === selectedFolder);
   // A role folder reads as the sidebar names it: the "Deleted Items" it labels Trash is Trash here
   // too (#623). Other folders keep their path.
-  const folderLabel = folderRole(selectedFolderCounts || { path: selectedFolder }, selectedAccount?.folder_mappings)
+  const folderLabel = activeLabel ? (useStore.getState().nativeLabelSnapshots[activeLabel.accountId]?.labels.find(item => item.id === activeLabel.labelId)?.path || t('gmail.labelNavigation.label', "Label")) : folderRole(selectedFolderCounts || { path: selectedFolder }, selectedAccount?.folder_mappings)
     ? folderDisplayNameForPath(selectedFolder, t, selectedAccount?.folder_mappings, folders[selectedAccountId])
     : selectedFolder;
   const label = searchQuery.trim()
@@ -2861,6 +2936,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const closeBulkPickerAfterAction = () => { setShowFolderPicker(false); clearSelection(); };
 
   const handleGmailToolbarAction = async (action, rows, value) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     if (gmailActionLock.current) return;
     if (action === 'newer' || action === 'older') {
       clearSelection();
@@ -3224,7 +3300,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         {layout === 'gmail' ? <GmailToolbar
           messages={showGtdTab ? [] : displayMessages} selectedIds={selectedIds}
           onSelect={rows => rows.length ? selectAll(rows) : clearSelection()}
-          onAction={handleGmailToolbarAction} onRefresh={handleSync} busy={gmailActionBusy || loadingMessages} syncing={syncing}
+          onAction={handleGmailToolbarAction} onRefresh={handleSync} busy={gmailActionBusy || loadingMessages || nativeLabelActionsBlocked(useStore.getState())} syncing={syncing}
           permanentDelete={selectedMsgs.some(message => {
             const account = accounts.find(item => item.id === message.account_id);
             const folder = folders[message.account_id]?.find(item => item.path === message.folder) || { path: message.folder };
@@ -3233,7 +3309,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           })}
           canMove={canMove} loadFolders={async () => { const data = await api.getFolders(selectedMsgs[0].account_id); const listed = Array.isArray(data) ? data : data.folders || []; return listed.map(folder => ({ ...folder, name: folderDisplayName(folder, t, bulkMoveAccount?.folder_mappings, listed) })); }}
           order={listOrder} count={searchQuery.trim() ? displayMessages.length : messagesTotal} page={currentPage} pageSize={pageSize}
-          totalKnown={!searchQuery.trim() || !searchHasMore} paginated={scrollMode === 'paginated' && !searchQuery.trim() && !showGtdTab}
+          totalKnown={!searchQuery.trim() || !searchHasMore} paginated={!activeLabel && scrollMode === 'paginated' && !searchQuery.trim() && !showGtdTab}
           onPage={page => { clearSelection(); loadPage(page); }} contextKey={archiveViewKeyRef.current} snoozed={isSnoozedView}
           sortControl={<>{sortable && <ListSortMenu accountId={selectedAccountId} folder={selectedFolder} />}<button type="button" className="gmail-toolbar-filter" aria-label={t("gmailToolbar.unreadOnly", "Unread only")} aria-pressed={unreadOnly} onClick={() => setUnreadOnly(value => !value)}>{unreadOnly ? t("gmailToolbar.unreadOnlyActive", "Unread only ✓") : t("gmailToolbar.allMessages", "All messages")}</button></>}
         /> : <>
@@ -3905,6 +3981,13 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           </div>
         )}
 
+        {activeLabel && <div data-native-label-feed-status style={{ padding: '12px 16px', color: 'var(--text-secondary)', fontSize: 12 }}>
+          <strong>{label}</strong> · Individual messages with this label, excluding Spam and Trash. Counts cover verified synchronized mail, not the whole server.
+          {nativeLabelFeed?.coverage?.priorGenerationMemberships > 0 && <p role="status">{t('gmail.labelNavigation.retainedAssociations', 'Label associations retained from earlier mailbox generations and excluded from this mailbox: {{memberships}}.', { memberships: nativeLabelFeed.coverage.priorGenerationMemberships })}</p>}
+          {nativeLabelFeed?.coverage?.unresolvedMemberships > 0 && <p role="status">{t('gmail.labelNavigation.unresolvedAssociations', 'Retained label memberships awaiting verified message locations and not shown here: {{memberships}}.', { memberships: nativeLabelFeed.coverage.unresolvedMemberships })}</p>}
+          {nativeLabelFeed?.error && <p role="alert">{nativeLabelFeed.error} <button type="button" onClick={() => nativeFeedRef.current.load({ limit: pageSize, unreadOnly })}>{t('gmail.labelNavigation.retryMessages', "Retry label messages")}</button> <button type="button" onClick={() => { clearSelection(); nativeFeedRef.current.load({ limit: pageSize, unreadOnly, reset: true }); }}>{t('gmail.labelNavigation.reload', "Reload from first page")}</button></p>}
+          {nativeLabelFeed?.status === 'ready' && !messages.length && <p role="status">{nativeLabelFeed.coverage?.unresolvedMemberships > 0 ? t('gmail.labelNavigation.noVerifiedMessages', "No verified synchronized messages are currently available for this label.") : unreadOnly ? t('gmail.labelNavigation.noUnreadMessages', "No unread synchronized messages with this label.") : t('gmail.labelNavigation.noMessages', "No synchronized messages with this label.")}</p>}
+        </div>}
         {loadingMessages && displayMessages.length === 0 && (
           <div>
             {Array.from({ length: 7 }).map((_, i) => (
@@ -3924,7 +4007,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           </div>
         )}
 
-        {!loadingMessages && displayMessages.length === 0 && (
+        {!activeLabel && !loadingMessages && displayMessages.length === 0 && (
           <EmptyState
             folderSyncing={folderSyncing}
             searchQuery={searchQuery}
@@ -4318,7 +4401,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
               <MessageRow
                 key={message.id}
                 message={message}
-                selected={isSelectedRow(message, selectedMessageId, selectedMid, selectedAcct)}
+                selected={activeLabel ? message.id === selectedMessageId : isSelectedRow(message, selectedMessageId, selectedMid, selectedAcct)}
                 lastViewed={lastViewedMessageId === message.id && selectedMessageId !== message.id}
                 isChecked={selectedIds.has(message.id)}
                 selectionMode={selectionMode}
@@ -4377,7 +4460,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         )}
 
         {/* Infinite scroll footer */}
-        {scrollMode === 'infinite' && (<>
+        {(activeLabel || scrollMode === 'infinite') && (<>
           {/* Search mode: load more search results */}
           {searchQuery.trim() ? (!isSearching && <>
             {searchLoadingMore && (
@@ -4450,7 +4533,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         </>)}
 
         {/* Pagination footer */}
-        {(layout !== 'gmail' || isMobile) && scrollMode === 'paginated' && !searchQuery.trim() && !loadingMessages && messagesTotal > 0 && (() => {
+        {!activeLabel && (layout !== 'gmail' || isMobile) && scrollMode === 'paginated' && !searchQuery.trim() && !loadingMessages && messagesTotal > 0 && (() => {
           const totalPages = Math.ceil(messagesTotal / pageSize) || 1;
           const btnStyle = (disabled) => ({
             padding: '5px 14px', fontSize: 12, borderRadius: 6, cursor: disabled ? 'default' : 'pointer',
@@ -4814,7 +4897,8 @@ function GmailRowControls({ message, checked, onToggleSelect, onRangeSelect, onS
 
 function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onModifierSelect, onLongPress, onExplainSpam }) {
   const { t } = useTranslation();
-  const checkboxRow = useStore(s => s.layout === 'gmail') && !isMobile;
+  const gmailLayout = useStore(s => s.layout === 'gmail');
+  const checkboxRow = gmailLayout && !isMobile;
   const [hovered, setHovered] = useState(false);
   const messageCount = message.message_count || 1;
   const unreadCount  = parseInt(message.unread_count) || 0;
@@ -5042,6 +5126,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {message.subject || t('common.noSubject')}
             </span>
+            {gmailLayout && <NativeLabelChips message={message} />}
             <PluginSlot name="message-row-meta" ctx={{ message }} />
             <ReplyDraftIndicator message={message} listRow />
             <SpamBadge message={message} onClick={onExplainSpam} />
@@ -5140,7 +5225,8 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
 
 function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onModifierSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress, onExplainSpam }) {
   const { t } = useTranslation();
-  const checkboxRow = useStore(s => s.layout === 'gmail') && !isMobile;
+  const gmailLayout = useStore(s => s.layout === 'gmail');
+  const checkboxRow = gmailLayout && !isMobile;
   const [hovered, setHovered] = useState(false);
   const [avatarHovered, setAvatarHovered] = useState(false);
   const { contentRef, swipeBgLeftRef, swipeBgRightRef, tappedRef } = useSwipeRow({
@@ -5377,7 +5463,8 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {message.subject || t('message.noSubject')}
           </span>
-          <PluginSlot name="message-row-meta" ctx={{ message }} />
+          {gmailLayout && <NativeLabelChips message={message} />}
+            <PluginSlot name="message-row-meta" ctx={{ message }} />
           <ReplyDraftIndicator message={message} listRow />
           <SpamBadge message={message} onClick={onExplainSpam} />
         </div>

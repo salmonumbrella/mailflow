@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { installNativeLabelReadFixture } from './testSupport/nativeLabelReadFixture.js';
 
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 import { query } from './db.js';
@@ -43,13 +44,14 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('all-accounts Snoozed v
       CREATE TEMP TABLE snoozed_messages (storage_generation uuid, account_id uuid, message_id_header text,
         entity_id uuid REFERENCES message_entities(id), wake_state text DEFAULT 'ready',
         original_folder text, snoozed_folder text, snooze_until timestamptz)`);
+    await installNativeLabelReadFixture(database);
     query.mockImplementation((sql, values) => database.query(sql, values));
   });
   afterAll(async () => {
     await database?.end();
   });
   beforeEach(async () => {
-    await database.query('TRUNCATE messages, folders, email_accounts, contacts, snoozed_messages, entity_locations, mailbox_identity_epochs, message_entities');
+    await database.query('TRUNCATE messages, folders, email_accounts, contacts, snoozed_messages, entity_locations, mailbox_identity_epochs, message_entities, native_label_memberships, mail_labels');
     // The view takes in every enabled account, the one left out of All Inboxes too.
     await database.query(
       `INSERT INTO email_accounts(id,user_id,enabled,include_in_unified_inbox,name,email_address,color,folder_mappings) VALUES
@@ -108,8 +110,35 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('all-accounts Snoozed v
       ['<s2@x>', 'INBOX.Snoozed'],
       ['<p2@x>', 'Snoozed'],
     ]);
+    for (const row of messages) expect(row).toMatchObject({
+      entityId: row.entity_id, storageGeneration: row.storage_generation, metadataVersion: '0',
+      nativeLabelState: 'available', nativeLabelScope: 'message', nativeLabels: [],
+    });
     // Actual verified snoozes, not folder counts that also include mail filed by hand.
     expect(total).toBe(4);
+  });
+
+  it('hydrates a bound snoozed delivery without assigning its labels to a same-header delivery', async () => {
+    const source = await message(plain, 'Snoozed', '<independent@x>', false);
+    const sibling = await message(plain, 'Snoozed', '<independent@x>', false);
+    await snooze(source, '2026-10-01T08:00Z');
+    await snooze(sibling, '2026-10-02T08:00Z');
+    const labelId = id();
+    // Explicit fixture identity and metadata, not a header-derived membership.
+    await database.query('UPDATE message_entities SET metadata_version=1 WHERE id=$1', [source.entityId]);
+    await database.query(`INSERT INTO mail_labels(id,account_id,name,full_path,sidebar_visibility,message_visibility,revision)
+      VALUES ($1,$2,'Follow up','Follow up','show',true,1)`, [labelId, plain]);
+    await database.query(`INSERT INTO native_label_memberships(account_id,storage_generation,entity_id,label_id)
+      VALUES ($1,$2,$3,$4)`, [plain, source.generation, source.entityId, labelId]);
+    const { messages, total } = await listMessages({ userId: 'owner', folder: 'Snoozed' });
+    expect(total).toBe(6);
+    expect(messages.find(row => row.entityId === source.entityId)).toMatchObject({
+      nativeLabelState: 'available', metadataVersion: '1',
+      nativeLabels: [{ id: labelId, accountId: plain, name: 'Follow up', path: 'Follow up', revision: '1' }],
+    });
+    expect(messages.find(row => row.entityId === sibling.entityId)).toMatchObject({
+      nativeLabelState: 'available', metadataVersion: '0', nativeLabels: [],
+    });
   });
 
   it('counts only unread snoozed mail when the view is unread only', async () => {

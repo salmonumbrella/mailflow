@@ -15,12 +15,14 @@ vi.mock('./db.js', () => ({
     finally { client.release(); }
   },
 }));
+import { mutateMemberships, undoMemberships } from './nativeLabelMemberships.js';
 import { runMigrations } from './migrations.js';
 import { restoreBackup, writeBackup, SETUP_TABLES, MAIL_CACHE_TABLES, TRANSIENT_TABLES } from './backup.js';
 import { readMailboxIdentity, observeMailboxIdentity, writeObservedMessage } from './messageIdentity.js';
 
 const ADMIN_URL = process.env.MAILFLOW_TEST_DATABASE_URL;
 const durable = ['message_entities', 'entity_provider_keys', 'entity_locations', 'mailbox_identity_epochs',
+  'native_label_memberships', 'native_label_mutations',
   'mail_identity_operations', 'mail_labels', 'mail_label_state', 'mail_label_mutations',
   'mail_signatures', 'mail_signature_state', 'mail_signature_defaults', 'snoozed_messages'];
 const encode = lines => gzipSync(lines.map(JSON.stringify).join('\n') + '\n');
@@ -93,6 +95,10 @@ describe.skipIf(!ADMIN_URL)('durable metadata backup on PostgreSQL', () => {
         VALUES ($1,$2,$3,$4,$5,'#abcdef','unread',false,9007199254740993) RETURNING id`, [account.id, parent, `L${i}`, `l${i}`, path])).rows[0].id;
       labelIds.push(parent);
     }
+    await h.pool.query('UPDATE message_entities SET metadata_version=9007199254740993 WHERE id=$1', [originalEntity]);
+    await h.pool.query('INSERT INTO native_label_memberships(account_id,storage_generation,entity_id,label_id) VALUES ($1,$2,$3,$4)', [account.id, account.storage_generation, originalEntity, labelIds[0]]);
+    await h.pool.query(`INSERT INTO native_label_mutations(account_id,mutation_id,storage_generation,request_hash,response)
+      VALUES ($1,$2,$3,$4,'{"metadataVersion":"9007199254740993"}'),($1,$5,$3,$4,NULL)`, [account.id, randomUUID(), account.storage_generation, 'b'.repeat(64), randomUUID()]);
     await h.pool.query('INSERT INTO mail_label_state VALUES ($1,9007199254740993)', [account.id]);
     await h.pool.query(`INSERT INTO mail_label_mutations(account_id,mutation_id,request_hash,response) VALUES ($1,$2,$3,'{"success":true}')`, [account.id, randomUUID(), 'a'.repeat(64)]);
     const alias = (await h.pool.query("INSERT INTO account_aliases(account_id,name,email) VALUES ($1,'Alias','alias@test') RETURNING id", [account.id])).rows[0].id;
@@ -135,6 +141,20 @@ describe.skipIf(!ADMIN_URL)('durable metadata backup on PostgreSQL', () => {
     expect(BigInt((await h.pool.query("SELECT nextval('folder_status_revision') AS n")).rows[0].n)).toBeGreaterThan(9007199254740993n);
   });
 
+  it.each(['setup', 'full'])('restores %s private Undo preimages and atomically restores the original memberships', async scope => {
+    const input = { accountId: account.id, storageGeneration: account.storage_generation, mutationId: randomUUID(),
+      targets: [{ entityId: originalEntity, expectedMetadataVersion: '9007199254740993' }], addLabelIds: [], removeLabelIds: [labelIds[0]] };
+    await mutateMemberships(account.user_id, input);
+    const before = await snapshot(['native_label_mutations']);
+    await restore(await backup(scope));
+    expect(await snapshot(['native_label_mutations'])).toEqual(before);
+    await write(await context());
+    const result = await undoMemberships(account.user_id, { accountId: account.id, storageGeneration: account.storage_generation,
+      originalMutationId: input.mutationId, mutationId: randomUUID() });
+    expect(result.result.targets[0]).toMatchObject({ metadataVersion: '9007199254740995', labelIds: [labelIds[0]] });
+    expect(result.result).not.toHaveProperty('undo_state');
+  });
+
   it('never invents provider ownership or continuity from unproved cache fields after setup restore', async () => {
     await restore(await backup());
     const before = await snapshot(['entity_provider_keys']);
@@ -175,6 +195,11 @@ describe.skipIf(!ADMIN_URL)('durable metadata backup on PostgreSQL', () => {
     ['mail_identity_operations', 'evidence'],
     ['mail_identity_operations', 'source_locator'],
     ['message_entities', 'metadata_version'],
+    ['native_label_mutations', 'response'],
+    ['native_label_mutations', 'undo_state'],
+    ['native_label_mutations', 'operation_kind'],
+    ['native_label_mutations', 'request_hash'],
+    ['native_label_memberships', 'entity_id'],
     ['snoozed_messages', 'entity_id'],
     ['snoozed_messages', 'wake_state'],
     ['users', 'preferences'],

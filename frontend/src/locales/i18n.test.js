@@ -115,6 +115,15 @@ const dir = dirname(fileURLToPath(import.meta.url));
 // Two locales sharing a value is only allowed if both appear in the same group.
 // Any unlisted pair will still fail.
 const SAME_VALUE_ALLOWED = {
+  // Native-label vocabulary shared naturally by these language pairs.
+  'gmail.labelNavigation.expand': [['es', 'ptBR']], // Expandir {{name}} in Spanish and Brazilian Portuguese.
+  'gmail.labelNavigation.label': [['de', 'en']], // Label is also the German mail-interface term.
+  'gmail.labelNavigation.labels': [['de', 'en']], // Labels is its plural in both languages.
+  'gmail.memberships.edit': [['de', 'en']], // Labels names the message-label editing control.
+  'gmail.memberships.apply': [['es', 'ptBR']], // Aplicar in Spanish and Brazilian Portuguese.
+  'gmail.memberships.cancel': [['es', 'ptBR']], // Cancelar in Spanish and Brazilian Portuguese.
+  'gmail.nativeLabels.hide': [['es', 'ptBR']], // Ocultar in Spanish and Brazilian Portuguese.
+  'gmail.nativeLabels.show': [['es', 'ptBR']], // Mostrar in Spanish and Brazilian Portuguese.
   'messageList.layouts.gmail.label': 'any', // Gmail is a product name in every locale.
   // ── List sort menu (#528) ───────────────────────────────────────────────────
   'messageList.sortSummary':                'any', // "{{sort}}, {{dir}}": only the placeholders and a comma
@@ -932,6 +941,20 @@ describe('i18n locale files', () => {
       assert.equal(missing.length, 0,
         `Literal source translation keys missing from locale files:\n${missing.join('\n')}`);
     });
+  });
+
+  it('every native-label source key has a translation with matching interpolation in every locale', () => {
+    const sourceKeys = loadLiteralSourceTranslationKeys(['gmail.nativeLabels.', 'gmail.memberships.', 'gmail.labelNavigation.']);
+    assert.ok(sourceKeys.length > 100, 'native-label coverage must include definition, membership, navigation and recovery strings');
+    const placeholders = text => [...new Set([...text.matchAll(/{{\s*([\w]+)\s*}}/g)].map(match => match[1]))].sort();
+    for (const key of sourceKeys) {
+      assert.equal(typeof locales.en[key], 'string', `English translation missing: ${key}`);
+      for (const lang of langs) {
+        assert.equal(typeof locales[lang][key], 'string', `${lang} translation missing: ${key}`);
+        assert.ok(locales[lang][key].trim(), `${lang} translation empty: ${key}`);
+        assert.deepEqual(placeholders(locales[lang][key]), placeholders(locales.en[key]), `${lang} interpolation differs: ${key}`);
+      }
+    }
   });
 
   describe('key coverage — every key must appear in every locale', () => {

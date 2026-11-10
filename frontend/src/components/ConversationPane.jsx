@@ -1,3 +1,5 @@
+import { useNativeLabelReaderGuard } from '../hooks/useNativeLabelReaderGuard.js';
+import { nativeLabelActionsBlocked } from '../utils/nativeLabelNavigation.js';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
@@ -59,6 +61,7 @@ const NOTHING_TO_TAKE_DRAFT = {
 // Design from #317 by YunQue0912.
 export default function ConversationPane({ threadId, folder, unified = false, accountId = null, selectedMessageId = null, openedFromRow = false, onReplyDockTarget }) {
   const { t } = useTranslation();
+  const nativeLabelGuard = useNativeLabelReaderGuard();
   const gmailLayout = useStore(s => s.layout === 'gmail');
   const isMobile = useMobile();
   const listFirst = useListFirst();
@@ -80,6 +83,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   // { x, y, view, message } — the move and snooze pickers are ContextMenu's, opened straight
   // into the relevant sub-view rather than reimplemented here. message is the copy they open on.
   const [picker, setPicker] = useState(null);
+  useEffect(() => { if (nativeLabelGuard.blocked) setPicker(null); }, [nativeLabelGuard.blocked]);
   const [openedOnNewest, setOpenedOnNewest] = useState(null);
   // The conversation the cards on screen belong to, set when its fetch lands (the stack's key).
   const [loadedConversation, setLoadedConversation] = useState(null);
@@ -212,6 +216,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   });
 
   const runAction = (name, action) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const taken = action(messages, {
       t,
       addNotification,
@@ -253,6 +258,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   };
 
   const deleteConversationMessage = (message) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const identity = loadedConversation;
     // Old cards can still be visible while the newly selected conversation is loading.
     if (identity !== conversationIdentityRef.current) return;
@@ -302,6 +308,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   // accountId on screen there is nothing to open either on. With the other account's draft picked
   // under the row Move takes nothing (moveThread), and the reader is told before picking a folder.
   const openPicker = (event, view) => {
+    if (nativeLabelActionsBlocked(useStore.getState())) return;
     const pickerMessage = newestConversationMessage(inAccount(messages, accountId));
     if (!pickerMessage || (view === 'move' && otherAccountsDraft(messages, selectedMessageId, accountId))) {
       sayNothingTaken(view);
@@ -332,7 +339,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
       borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)', flexShrink: 0,
     }}>
       <button
-        onClick={closeOpenMessage}
+        data-native-label-safe onClick={closeOpenMessage}
         style={{
           background: 'none', border: 'none', color: 'var(--accent)',
           cursor: 'pointer', display: 'flex', alignItems: 'center',
@@ -356,14 +363,14 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   );
 
   if (error) return (
-    <div ref={paneRef} style={fill}>
+    <div {...nativeLabelGuard.props} ref={paneRef} style={fill}>
       {mobileBackBar}
       <div style={{ padding: 16, color: 'var(--red, #e03131)' }}>{error}</div>
     </div>
   );
   if (loading && !messages.length) {
     return (
-      <div ref={paneRef} style={fill}>
+      <div {...nativeLabelGuard.props} ref={paneRef} style={fill}>
         {mobileBackBar}
         <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div className="skeleton-line" style={{ height: 13, width: '48%', borderRadius: 4 }} />
@@ -375,8 +382,9 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   if (!messages.length) return null;
 
   return (
-    <div ref={paneRef} className="mailflow-conversation-pane" style={{ ...fill, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div {...nativeLabelGuard.props} ref={paneRef} className="mailflow-conversation-pane" style={{ ...fill, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {mobileBackBar}
+      {nativeLabelGuard.blocked && <p role="status" style={{ padding: 12 }}>{t('gmail.memberships.readerPaused', 'Message actions are paused until this label view is verified. Refresh the label view to try again.')}</p>}
       {/* Thread-level actions, the way Gmail does it: archiving a conversation archives all of it,
           so the reader does not file the same thread message by message. The reading pane's buttons,
           in its order and pinned at the top as its toolbar is (#650); snooze, which the reading pane

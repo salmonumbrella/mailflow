@@ -50,3 +50,16 @@ test('GTD shortcuts only capture keys for an active plugin and eligible live sel
     assert.equal(canRunSelectedAction(action, { ...active, selectedMessageId: 'removed-rail' }), false, action);
   }
 });
+
+test('unverified native label views suppress selected command shortcuts without suppressing navigation', () => {
+  const activeLabel = { accountId: 'a1', storageGeneration: 'g', labelId: 'l' };
+  const key = JSON.stringify(['a1', 'g', 'l']);
+  for (const status of ['loading', 'error']) {
+    const state = { ...selected, activeLabel, nativeLabelFeed: { key, status }, enabledPlugins: ['gtd'], accounts: [{ id: 'a1', gtd_enabled: true }] };
+    for (const action of ['archive', 'delete', 'markUnread', 'toggleRead', 'toggleStar', 'reply', 'forward', 'openLabelPicker', 'gtdTodo', 'gtdDone']) assert.equal(canRunSelectedAction(action, state), false, action);
+    assert.equal(canHandlePaneShortcut(null, state), false);
+    assert.equal(canRunSelectedAction('goInbox', state), true);
+    assert.equal(canRunSelectedAction('compose', state), true);
+  }
+  assert.equal(canHandlePaneShortcut(null, { ...selected, activeLabel, nativeLabelFeed: { key, status: 'ready' } }), true);
+});

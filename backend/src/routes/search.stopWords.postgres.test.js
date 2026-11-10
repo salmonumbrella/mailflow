@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { installNativeLabelReadFixture, fixtureId, fixtureName } from '../services/testSupport/nativeLabelReadFixture.js';
 import express from 'express';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
@@ -11,41 +12,45 @@ import { query } from '../services/db.js';
 describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('stop-word body search PostgreSQL', () => {
   let database, server, base;
   async function search(q, scope = {}) {
+    if (scope.accountId) scope = { ...scope, accountId: fixtureId(scope.accountId) };
     const response = await fetch(`${base}/?${new URLSearchParams({ q, ...scope })}`);
     expect(response.status).toBe(200);
-    return (await response.json()).messages.map(message => message.id).sort();
+    const { messages } = await response.json();
+    for (const message of messages) expect(message).toMatchObject({ nativeLabelState: 'unavailable', nativeLabels: null, entityId: null, metadataVersion: null, storageGeneration: expect.any(String) });
+    return messages.map(message => fixtureName(message.id)).sort();
   }
   beforeAll(async () => {
     database = new pg.Client({ connectionString: process.env.MAILFLOW_TEST_DATABASE_URL });
     await database.connect();
     await database.query(`
-      CREATE TEMP TABLE email_accounts (id text, user_id text, enabled boolean,
+      CREATE TEMP TABLE email_accounts (id uuid, user_id text, enabled boolean,
         include_in_unified_inbox boolean, name text, email_address text, color text, folder_mappings jsonb DEFAULT '{}');
-      CREATE TEMP TABLE folders (account_id text, path text, special_use text, name text);
-      CREATE TEMP TABLE messages (id text, account_id text DEFAULT 'main', folder text DEFAULT 'INBOX',
+      CREATE TEMP TABLE folders (account_id uuid, path text, special_use text, name text);
+      CREATE TEMP TABLE messages (id uuid, account_id uuid DEFAULT '${fixtureId('main')}', folder text DEFAULT 'INBOX',
         uid bigint, message_id text, subject text DEFAULT 'Status', from_name text DEFAULT 'Sender',
         from_email text DEFAULT 'sender@example.test', to_addresses jsonb, cc_addresses jsonb, reply_to jsonb, delivery_addresses jsonb, thread_id text,
         in_reply_to text, thread_references text, date timestamptz DEFAULT now(), snippet text,
         is_read boolean, is_starred boolean, has_attachments boolean, is_deleted boolean DEFAULT false,
         search_vector tsvector, body_text text, category text, attachments jsonb DEFAULT '[]');
       INSERT INTO email_accounts (id, user_id, enabled, include_in_unified_inbox, name, email_address, color) VALUES
-        ('main','owner',true,true,'Primary','owner@example.test',NULL),
-        ('other','stranger',true,true,'Other','other@example.test',NULL),
-        ('excluded','owner',true,false,'Excluded','excluded@example.test',NULL),
-        ('disabled','owner',false,true,'Disabled','disabled@example.test',NULL);
-      INSERT INTO folders VALUES ('main','Trash','\\Trash','Trash');
-      INSERT INTO messages(id,body_text) VALUES ('body','How are we doing Orion?'),
-        ('unrelated','Orion runners run swiftly.'), ('null',NULL), ('empty','');
-      INSERT INTO messages(id,subject,body_text) VALUES ('split','Orion','How are we doing?'),
-        ('substring','Weaver somewhere',''), ('punctuation','!!!','');
+        ('${fixtureId('main')}','owner',true,true,'Primary','owner@example.test',NULL),
+        ('${fixtureId('other')}','stranger',true,true,'Other','other@example.test',NULL),
+        ('${fixtureId('excluded')}','owner',true,false,'Excluded','excluded@example.test',NULL),
+        ('${fixtureId('disabled')}','owner',false,true,'Disabled','disabled@example.test',NULL);
+      INSERT INTO folders VALUES ('${fixtureId('main')}','Trash','\\Trash','Trash');
+      INSERT INTO messages(id,body_text) VALUES ('${fixtureId('body')}','How are we doing Orion?'),
+        ('${fixtureId('unrelated')}','Orion runners run swiftly.'), ('${fixtureId('null')}',NULL), ('${fixtureId('empty')}','');
+      INSERT INTO messages(id,subject,body_text) VALUES ('${fixtureId('split')}','Orion','How are we doing?'),
+        ('${fixtureId('substring')}','Weaver somewhere',''), ('${fixtureId('punctuation')}','!!!','');
       INSERT INTO messages(id,account_id,body_text) VALUES
-        ('foreign','other','How are we doing Orion?'),
-        ('opted-out','excluded','How are we doing Orion?'),
-        ('disabled','disabled','How are we doing Orion?');
-      INSERT INTO messages(id,folder,body_text) VALUES ('trash','Trash','How are we doing Orion?');
-      INSERT INTO messages(id,is_deleted,body_text) VALUES ('deleted',true,'How are we doing Orion?');
-      INSERT INTO messages(id,search_vector) VALUES ('vector',to_tsvector('english','nebula'));
+        ('${fixtureId('foreign')}','${fixtureId('other')}','How are we doing Orion?'),
+        ('${fixtureId('opted-out')}','${fixtureId('excluded')}','How are we doing Orion?'),
+        ('${fixtureId('disabled')}','${fixtureId('disabled')}','How are we doing Orion?');
+      INSERT INTO messages(id,folder,body_text) VALUES ('${fixtureId('trash')}','Trash','How are we doing Orion?');
+      INSERT INTO messages(id,is_deleted,body_text) VALUES ('${fixtureId('deleted')}',true,'How are we doing Orion?');
+      INSERT INTO messages(id,search_vector) VALUES ('${fixtureId('vector')}',to_tsvector('english','nebula'));
     `);
+    await installNativeLabelReadFixture(database);
     query.mockImplementation((sql, values) => database.query(sql, values));
     const app = express();
     app.use(routes);
@@ -132,25 +137,25 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('stop-word body search 
   });
 
   it('searches actual attachment filenames and native categories without wildcard expansion', async () => {
-    await database.query("UPDATE messages SET category = 'newsletter', attachments = $1 WHERE id = 'body'", [JSON.stringify([{ filename: 'report_100%.pdf' }])]);
+    await database.query(`UPDATE messages SET category = 'newsletter', attachments = $1 WHERE id = '${fixtureId('body')}'`, [JSON.stringify([{ filename: 'report_100%.pdf' }])]);
     try {
       expect(await search('category:newsletter filename:"report_100%.pdf"')).toEqual(['body']);
       expect(await search('filename:"report_100X.pdf"')).toEqual([]);
       expect(await search('category:primary nebula')).toEqual(['vector']);
-    } finally { await database.query("UPDATE messages SET category = NULL, attachments = '[]' WHERE id = 'body'"); }
+    } finally { await database.query(`UPDATE messages SET category = NULL, attachments = '[]' WHERE id = '${fixtureId('body')}'`); }
   });
 
   it('finds provider/localized special-use folders and user mappings without widening literal paths', async () => {
-    await database.query("INSERT INTO folders VALUES ('main','[Gmail]/Sent Mail',$1,'Sent Mail'), ('main','Benutzer/Ablage',NULL,'Ablage')", ['\\Sent']);
-    await database.query("INSERT INTO messages(id,folder) VALUES ('sent-role','[Gmail]/Sent Mail'), ('sent-mapped','Benutzer/Ablage')");
-    await database.query("UPDATE email_accounts SET folder_mappings = $1 WHERE id = 'main'", [JSON.stringify({ sent: 'Benutzer/Ablage' })]);
+    await database.query(`INSERT INTO folders VALUES ('${fixtureId('main')}','[Gmail]/Sent Mail',$1,'Sent Mail'), ('${fixtureId('main')}','Benutzer/Ablage',NULL,'Ablage')`, ['\\Sent']);
+    await database.query(`INSERT INTO messages(id,folder) VALUES ('${fixtureId('sent-role')}','[Gmail]/Sent Mail'), ('${fixtureId('sent-mapped')}','Benutzer/Ablage')`);
+    await database.query(`UPDATE email_accounts SET folder_mappings = $1 WHERE id = '${fixtureId('main')}'`, [JSON.stringify({ sent: 'Benutzer/Ablage' })]);
     try {
       expect(await search('in:sent')).toEqual(['sent-mapped', 'sent-role']);
       expect(await search('in:"[Gmail]/Sent Mail"')).toEqual(['sent-role']);
     } finally {
-      await database.query("DELETE FROM messages WHERE id IN ('sent-role','sent-mapped')");
-      await database.query("DELETE FROM folders WHERE path IN ('[Gmail]/Sent Mail','Benutzer/Ablage')");
-      await database.query("UPDATE email_accounts SET folder_mappings = '{}' WHERE id = 'main'");
+      await database.query(`DELETE FROM messages WHERE id IN ('${fixtureId('sent-role')}','${fixtureId('sent-mapped')}')`);
+      await database.query(`DELETE FROM folders WHERE path IN ('[Gmail]/Sent Mail','Benutzer/Ablage')`);
+      await database.query(`UPDATE email_accounts SET folder_mappings = '{}' WHERE id = '${fixtureId('main')}'`);
     }
   });
 

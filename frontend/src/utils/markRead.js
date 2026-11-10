@@ -1,3 +1,4 @@
+import { nativeLabelActionsBlocked } from './nativeLabelNavigation.js';
 import { useStore } from '../store/index.js';
 import { api } from './api.js';
 import { setPending, settleMarkRead, failMarkRead, onReadRollback, pendingMarkReadMap, completedMarkReadMap } from './pendingReads.js';
@@ -40,9 +41,21 @@ export function cancelScheduledMarkReadFor(id) {
 
 // onChange(isRead) hears the optimistic change and its rollback, for a caller that keeps its own
 // copy of the message beside the store's: a conversation card does.
+// Resume only the same durable message from a newly verified current feed row.
+// Header equality, an old cache locator, or a different entity cannot resume a read.
+export function verifiedNativeLabelReadTarget(previous, state = useStore.getState()) {
+  if (!state.activeLabel || nativeLabelActionsBlocked(state) || !previous?.entityId || !previous.storageGeneration) return null;
+  return state.messages.find(current => current.id === previous.id && current.entityId === previous.entityId
+    && current.account_id === previous.account_id && current.storageGeneration === previous.storageGeneration
+    && current.nativeLabelState === 'available' && current.account_id === state.activeLabel.accountId
+    && current.storageGeneration === state.activeLabel.storageGeneration) || null;
+}
+
 export function applyMarkRead(msg, { onChange } = {}) {
   if (!msg || msg.is_read) return;
   const st = useStore.getState();
+  if (nativeLabelActionsBlocked(st)) return;
+  if (st.activeLabel) { msg = verifiedNativeLabelReadTarget(msg, st); if (!msg || msg.is_read) return; }
   // A read of this message is already under way, or has just landed and the store still shows it:
   // a stale copy must not count it a second time. Opening a conversation marks its row read from the
   // list, and the card the pane opens then marked the same message read again from the thread's
@@ -93,6 +106,7 @@ export function shownReadInStore(id, st = useStore.getState()) {
 // mark was deferred, so the caller can cancelScheduledMarkRead it if the reader
 // moves on first, and null when there is nothing to cancel.
 export function scheduleMarkRead(msg, options) {
+  if (nativeLabelActionsBlocked(useStore.getState())) return null;
   if (!msg || msg.is_read) return null;
   const { markReadBehavior, markReadDelay } = useStore.getState();
   if (markReadBehavior === 'manual') return null;
@@ -114,7 +128,7 @@ export function scheduleMarkReadTimer(id, run, delayMs) {
     timers?.delete(timer);
     scheduledMessageByTimer.delete(timer);
     if (timers?.size === 0) scheduledByMessage.delete(id);
-    run();
+    if (!nativeLabelActionsBlocked(useStore.getState())) run();
   }, delayMs);
   if (!scheduledByMessage.has(id)) scheduledByMessage.set(id, new Set());
   scheduledByMessage.get(id).add(timer);

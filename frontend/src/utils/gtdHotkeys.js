@@ -1,3 +1,4 @@
+import { nativeLabelActionsBlocked } from './nativeLabelNavigation.js';
 import { resolveRowDisplay } from './gtd.js';
 import { buildGtdActionSections } from './gmailGtd.js';
 
@@ -27,6 +28,7 @@ export function getGtdRailSelection() {
 }
 
 export function resolveGtdHotkeyTarget(state, railSelection = lastRailSelection) {
+  if (nativeLabelActionsBlocked(state)) return null;
   const id = state?.selectedMessageId;
   if (id == null || !state.enabledPlugins?.includes('gtd')) return null;
   const sections = buildGtdActionSections(state.gtdSections);

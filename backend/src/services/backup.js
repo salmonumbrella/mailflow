@@ -43,6 +43,8 @@ export const SETUP_TABLES = [
   'mail_signatures',
   'mailbox_identity_epochs',
   'message_entities',
+  'native_label_memberships',
+  'native_label_mutations',
   'oidc_providers',
   'plugin_account_config',
   'plugin_data',
@@ -76,6 +78,7 @@ const RESTORABLE_TABLES = new Set([...SETUP_TABLES, ...MAIL_CACHE_TABLES]);
 // file cannot omit one: treating it as an empty optional table would silently erase content.
 const DURABLE_METADATA_TABLES = [
   'message_entities', 'entity_provider_keys', 'entity_locations', 'mailbox_identity_epochs',
+  'native_label_memberships', 'native_label_mutations',
   'mail_identity_operations', 'mail_labels', 'mail_label_state', 'mail_label_mutations',
   'mail_signatures', 'mail_signature_state', 'mail_signature_defaults', 'snoozed_messages',
 ];

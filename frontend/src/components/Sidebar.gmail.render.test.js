@@ -4,7 +4,7 @@
 // until it was expanded. The harness mirrors MessageList.render.test.js: node --test cannot
 // parse JSX, so the loader hook transforms .jsx with sucrase, and react-i18next is stubbed.
 
-import { test, describe } from 'node:test';
+import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
@@ -271,3 +271,5 @@ describe('Gmail sidebar uses live native mailboxes', () => {
     assert.ok([...document.querySelectorAll('span')].some(el => el.textContent === 'Projects'));
   });
 });
+
+after(async () => { if (root) await React.act(async () => root.unmount()); });

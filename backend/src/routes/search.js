@@ -1,3 +1,4 @@
+import { hydrateNativeLabels } from '../services/nativeLabelReadModel.js';
 import { Router } from 'express';
 import { buildSearchConditions } from '../services/searchConditions.js';
 import { SearchQueryError } from '../services/searchExpression.js';
@@ -111,7 +112,7 @@ router.get('/', searchLimiter, async (req, res) => {
   try {
     const result = await query(`
       SELECT
-        m.id, m.uid, m.folder, m.message_id, m.subject, m.from_name, m.from_email,
+        m.id, m.uid, m.folder, m.entity_id, m.storage_generation, m.uid_validity, m.message_id, m.subject, m.from_name, m.from_email,
         m.to_addresses, m.cc_addresses, m.reply_to, m.delivery_addresses, m.thread_id,
         m.in_reply_to, m.thread_references,
         m.date, m.snippet, m.is_read, m.is_starred, m.has_attachments, m.account_id,
@@ -140,7 +141,7 @@ router.get('/', searchLimiter, async (req, res) => {
         providerComplete: false,
       };
     }
-    res.json({ messages: result.rows, query: q, ...(sizeIndex ? { sizeIndex } : {}) });
+    res.json({ messages: await hydrateNativeLabels(req.session.userId, result.rows), query: q, ...(sizeIndex ? { sizeIndex } : {}) });
   } catch (err) {
     console.error('Search error:', err);
     res.status(500).json({ error: 'Search failed' });
