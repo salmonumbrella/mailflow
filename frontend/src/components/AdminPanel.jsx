@@ -6015,7 +6015,7 @@ function AboutTab() {
 
 // ─── Rules Tab ────────────────────────────────────────────────────────────────
 function ruleEditorScope(state) {
-  return JSON.stringify([state.user?.id, state.accounts.map(account => [account.id, account.storage_generation, account.enabled]).sort()]);
+  return JSON.stringify([state.user?.id, state.isLocked, state.accounts.map(account => [account.id, account.storage_generation, account.enabled]).sort()]);
 }
 
 function RulesTab() {
@@ -6023,7 +6023,10 @@ function RulesTab() {
   const { accounts, folders: storeFolders, setFolders, rulesPreFill, setRulesPreFill } = useStore();
   const scopeKey = ruleEditorScope(useStore.getState());
   const scopeEpoch = useRef(0);
-  const rulesUserId = useRef(useStore.getState().user?.id);
+  const readyScope = useRef(null);
+  const formEpoch = useRef(0);
+  const deleteEpoch = useRef(0);
+  const runPending = useRef(null);
   const reorderPending = useRef(null);
   const [reordering, setReordering] = useState(false);
   const [rulesReload, setRulesReload] = useState(0);
@@ -6035,7 +6038,7 @@ function RulesTab() {
   const [formData, setFormData] = useState(null);
   const [formError, setFormError] = useState('');
   const [formSaving, setFormSaving] = useState(false);
-  const savingRule = useRef(false);
+  const savingRule = useRef(null);
   const [ruleError, setRuleError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [runningRules, setRunningRules] = useState(false);
@@ -6048,8 +6051,19 @@ function RulesTab() {
 
   const isMobile = useMobile();
 
+  function currentScope(token) {
+    const state = useStore.getState();
+    return token && !state.isLocked && scopeEpoch.current === token.epoch && ruleEditorScope(state) === token.scopeKey;
+  }
+
+  function rulesAreCurrent() {
+    return readyScope.current?.scopeKey === scopeKey && currentScope(readyScope.current);
+  }
+
   async function handleRunRules() {
-    if (reorderPending.current || loading || rulesRefreshFailed) return;
+    if (runPending.current || reorderPending.current || !rulesAreCurrent() || loading || rulesRefreshFailed) return;
+    const token = { epoch: scopeEpoch.current, scopeKey };
+    runPending.current = token;
     setRunningRules(true);
     setRunResult(null);
     setRunError('');
@@ -6059,14 +6073,18 @@ function RulesTab() {
       // via the mailflow:rules-run-complete window event below.
       await api.runRules();
     } catch (err) {
-      setRunError(err.message || t('admin.rules.runError'));
-      setRunningRules(false);
+      if (runPending.current === token && currentScope(token)) {
+        runPending.current = null;
+        setRunError(err.message || t('admin.rules.runError'));
+        setRunningRules(false);
+      }
     }
   }
 
   useEffect(() => {
     const onRunComplete = (event) => {
       const detail = event.detail || {};
+      runPending.current = null;
       if (detail.ok === false) setRunError(t('admin.rules.runError'));
       else setRunResult({ processed: detail.processed, matched: detail.matched });
       setRunningRules(false);
@@ -6075,20 +6093,44 @@ function RulesTab() {
     return () => window.removeEventListener('mailflow:rules-run-complete', onRunComplete);
   }, [t]);
 
+  useEffect(() => useStore.subscribe((state, previous) => {
+    if (ruleEditorScope(state) === ruleEditorScope(previous)) return;
+    // Observe every transition, including logout/login or generation A/B/A in one render.
+    scopeEpoch.current++;
+    readyScope.current = null;
+    savingRule.current = null;
+    reorderPending.current = null;
+    runPending.current = null;
+    if (state.user?.id !== previous.user?.id) {
+      formEpoch.current++;
+      setFormMode(null); setFormId(null); setFormData(null);
+    }
+    setRulesReload(value => value + 1);
+  }), []);
+
   useEffect(() => {
     const epoch = ++scopeEpoch.current;
+    const token = { epoch, scopeKey };
     const current = () => scopeEpoch.current === epoch && ruleEditorScope(useStore.getState()) === scopeKey;
+    readyScope.current = null;
     reorderPending.current = null;
-    setReordering(false);
+    savingRule.current = null;
+    runPending.current = null;
+    deleteEpoch.current++;
+    setReordering(false); setFormSaving(false); setFormError(''); setConfirmDelete(null);
+    setRunningRules(false); setRunResult(null); setRunError('');
+    setRuleDragIdx(null); setRuleDropIdx(null);
     setRules([]); setLoading(true); setRuleError(''); setRulesRefreshFailed(false);
-    if (rulesUserId.current !== useStore.getState().user?.id) {
-      setFormMode(null); setFormId(null); setFormData(null); setConfirmDelete(null);
-      rulesUserId.current = useStore.getState().user?.id;
-    }
     api.getRules()
-      .then(data => { if (current()) { setRules(data); setLoading(false); } })
+      .then(data => { if (current()) { readyScope.current = token; setRules(data); setLoading(false); } })
       .catch(error => { if (current()) { setLoading(false); setRulesRefreshFailed(true); setRuleError(error.message || t('admin.rules.errorSave')); } });
-    return () => { scopeEpoch.current = epoch + 1; reorderPending.current = null; };
+    return () => {
+      scopeEpoch.current = epoch + 1;
+      readyScope.current = null;
+      reorderPending.current = null;
+      savingRule.current = null;
+      runPending.current = null;
+    };
   }, [scopeKey, rulesReload]); // eslint-disable-line react-hooks/exhaustive-deps -- reload for identity/retry changes, not translation function changes
 
   useEffect(() => {
@@ -6101,11 +6143,14 @@ function RulesTab() {
   useEffect(() => {
     if (!formMode || !formData?.accountId) return;
     const accountId = formData.accountId;
+    const epoch = scopeEpoch.current;
+    let cancelled = false;
     if (accountId in useStore.getState().folders) return;
     api.getFolders(accountId)
-      .then(data => setFolders(accountId, data))
+      .then(data => { if (!cancelled && scopeEpoch.current === epoch && ruleEditorScope(useStore.getState()) === scopeKey) setFolders(accountId, data); })
       .catch(() => {});
-  }, [formMode, formData?.accountId, setFolders]);
+    return () => { cancelled = true; };
+  }, [formMode, formData?.accountId, scopeKey, rulesReload, setFolders]);
 
   function blankForm(prefill = {}) {
     return {
@@ -6125,6 +6170,7 @@ function RulesTab() {
 
   function openAdd(prefill) {
     if (reorderPending.current) return;
+    formEpoch.current++;
     setFormData(blankForm(prefill));
     setFormId(null);
     setFormMode('add');
@@ -6133,6 +6179,7 @@ function RulesTab() {
 
   function openEdit(rule) {
     if (reorderPending.current) return;
+    formEpoch.current++;
     const rawActions = Array.isArray(rule.actions) ? rule.actions : [];
     const destActionsSet = new Set(['move', 'archive', 'delete']);
     let destSeen = false;
@@ -6160,6 +6207,7 @@ function RulesTab() {
   }
 
   function closeForm() {
+    formEpoch.current++;
     setFormMode(null);
     setFormId(null);
     setFormData(null);
@@ -6167,39 +6215,41 @@ function RulesTab() {
   }
 
   async function handleToggle(rule) {
-    if (savingRule.current || reorderPending.current) return;
-    savingRule.current = true; setRuleError('');
+    if (savingRule.current || reorderPending.current || !rulesAreCurrent()) return;
+    const token = { epoch: scopeEpoch.current, scopeKey };
+    savingRule.current = token; setRuleError('');
     const updated = { ...rule, enabled: !rule.enabled };
     try {
       const saved = await api.updateRule(rule.id, {
         name: rule.name,
         accountId: rule.account_id || null,
         expectedStorageGeneration: rule.storage_generation,
-      expectedRuleRevision: rule.rule_revision,
+        expectedRuleRevision: rule.rule_revision,
         conditionLogic: rule.condition_logic,
         conditions: rule.conditions,
         actions: rule.actions,
         enabled: updated.enabled,
         stopProcessing: rule.stop_processing,
       });
-      setRules(prev => prev.map(r => r.id === rule.id ? saved : r));
-    } catch (error) { setRuleError(error.message || t('admin.rules.errorSave')); }
-    finally { savingRule.current = false; }
+      if (currentScope(token)) setRules(prev => prev.map(r => r.id === rule.id ? saved : r));
+    } catch (error) { if (currentScope(token)) setRuleError(error.message || t('admin.rules.errorSave')); }
+    finally { if (savingRule.current === token) savingRule.current = null; }
   }
 
   async function handleDelete(id) {
-    if (savingRule.current || reorderPending.current) return;
-    savingRule.current = true;
+    if (savingRule.current || reorderPending.current || !rulesAreCurrent()) return;
+    const token = { epoch: scopeEpoch.current, scopeKey, deleteEpoch: deleteEpoch.current };
+    savingRule.current = token;
     try {
       await api.deleteRule(id);
-      setRules(prev => prev.filter(r => r.id !== id));
+      if (currentScope(token)) setRules(prev => prev.filter(r => r.id !== id));
     } catch { /* intentional */ }
-    finally { savingRule.current = false; }
-    setConfirmDelete(null);
+    finally { if (savingRule.current === token) savingRule.current = null; }
+    if (currentScope(token) && deleteEpoch.current === token.deleteEpoch) setConfirmDelete(null);
   }
 
   async function handleSave() {
-    if (savingRule.current || reorderPending.current) return;
+    if (savingRule.current || reorderPending.current || !rulesAreCurrent()) return;
     const { name, conditionLogic, conditions, actions, accountId, enabled, stopProcessing } = formData;
     if (!name.trim() || conditions.length === 0 || actions.length === 0) {
       setFormError(t('admin.rules.errorRequired'));
@@ -6218,7 +6268,8 @@ function RulesTab() {
     const state = useStore.getState();
     const nativeError = nativeRuleActionError({ actions, conditions, accountId, expectedStorageGeneration: formData.expectedStorageGeneration, accounts: state.accounts, snapshots: state.nativeLabelSnapshots });
     if (nativeError) { setFormError(t(nativeError)); return; }
-    savingRule.current = true; setFormSaving(true);
+    const token = { epoch: scopeEpoch.current, scopeKey, formEpoch: formEpoch.current };
+    savingRule.current = token; setFormSaving(true);
     setFormError('');
     try {
       const payload = {
@@ -6234,21 +6285,21 @@ function RulesTab() {
       };
       if (formMode === 'add') {
         const created = await api.createRule(payload);
-        setRules(prev => [...prev, created]);
+        if (currentScope(token)) setRules(prev => [...prev, created]);
       } else {
         const updated = await api.updateRule(formId, payload);
-        setRules(prev => prev.map(r => r.id === formId ? updated : r));
+        if (currentScope(token)) setRules(prev => prev.map(r => r.id === formId ? updated : r));
       }
-      closeForm();
+      if (currentScope(token) && formEpoch.current === token.formEpoch) closeForm();
     } catch (error) {
-      setFormError(error.message || t('admin.rules.errorSave'));
+      if (currentScope(token) && formEpoch.current === token.formEpoch) setFormError(error.message || t('admin.rules.errorSave'));
     } finally {
-      savingRule.current = false; setFormSaving(false);
+      if (savingRule.current === token) { savingRule.current = null; if (currentScope(token)) setFormSaving(false); }
     }
   }
 
   async function handleReorderRules(from, to) {
-    if (savingRule.current || reorderPending.current) return;
+    if (savingRule.current || reorderPending.current || !rulesAreCurrent()) return;
     const token = { epoch: scopeEpoch.current, scopeKey };
     reorderPending.current = token;
     setReordering(true); setRuleError('');
@@ -6666,11 +6717,18 @@ function RulesTab() {
         {formError && (
           <div style={{ color: 'var(--red)', fontSize: 12, marginBottom: 12 }}>{formError}</div>
         )}
+        {loading && <div role="status">{t('common.loading')}</div>}
+        {rulesRefreshFailed && (
+          <div role="alert" style={{ color: 'var(--red)', fontSize: 12, marginBottom: 12 }}>
+            {ruleError}
+            <button type="button" onClick={() => setRulesReload(value => value + 1)}>{t('common.retry')}</button>
+          </div>
+        )}
 
         <div style={{ display: 'flex', gap: 10 }}>
           <button
             onClick={handleSave}
-            disabled={formSaving}
+            disabled={formSaving || loading || rulesRefreshFailed || reordering}
             style={{ flex: 1, padding: '9px 0', background: 'var(--accent)', color: 'var(--accent-text)', border: 'none', borderRadius: 7, fontWeight: 600, fontSize: 13, cursor: formSaving ? 'not-allowed' : 'pointer', opacity: formSaving ? 0.7 : 1 }}
           >
             {formSaving ? t('admin.rules.saving') : t('admin.rules.saveButton')}
@@ -6775,7 +6833,7 @@ function RulesTab() {
                   {t('admin.rules.deleteButton')}
                 </button>
                 <button
-                  onClick={() => setConfirmDelete(null)}
+                  onClick={() => { deleteEpoch.current++; setConfirmDelete(null); }}
                   style={{ padding: '5px 12px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}
                 >
                   {t('common.cancel')}
@@ -6816,7 +6874,7 @@ function RulesTab() {
                   </button>
                   <button
                     disabled={reordering}
-                    onClick={() => setConfirmDelete(rule.id)}
+                    onClick={() => { deleteEpoch.current++; setConfirmDelete(rule.id); }}
                     style={{ padding: '4px 10px', background: 'none', border: '1px solid var(--red)', borderRadius: 6, fontSize: 12, cursor: 'pointer', color: 'var(--red)' }}
                   >
                     {t('admin.rules.deleteButton')}

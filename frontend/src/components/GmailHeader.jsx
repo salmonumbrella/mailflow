@@ -60,6 +60,13 @@ export default function GmailHeader({ searchTargetRef, onShowShortcutHelp, setti
   const [showProfile, setShowProfile] = useState(false);
   const [supportTopic, setSupportTopic] = useState(null);
   const [popover, setPopover] = useState(null);
+  const [quickSettingsOpen, setQuickSettingsOpen] = useState(false);
+  useEffect(() => {
+    const update = event => setQuickSettingsOpen(event.detail?.open === true);
+    setQuickSettingsOpen(!!document.getElementById('mailflow-gmail-quick-settings'));
+    window.addEventListener('mailflow:gmail-quick-settings-changed', update);
+    return () => window.removeEventListener('mailflow:gmail-quick-settings-changed', update);
+  }, []);
   const [status, setStatus] = useState('Active');
   const controls = useRef(null);
   const panel = useRef(null);
@@ -110,7 +117,7 @@ export default function GmailHeader({ searchTargetRef, onShowShortcutHelp, setti
     <div className="mailflow-gmail-header-controls" ref={controls} onBlur={event => { if (popover && event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) close(false); }}>
       <button type="button" className="mailflow-gmail-status-button" aria-label={t('gmail.header.status_label', { defaultValue: 'Status: {{status}}', status: statusLabel(status) })} {...menuProps('status')}><span className="mailflow-gmail-status-dot" data-status={status} /><span>{statusLabel(status)}</span><span aria-hidden="true">⌄</span></button>
       <button type="button" className="mailflow-gmail-icon-button" aria-label={t('gmail.header.support', "Support")} title={t('gmail.header.support', "Support")} {...menuProps('support')}><HeaderIcon name="support" /></button>
-      <button type="button" className="mailflow-gmail-icon-button" onClick={event => { close(false); event.currentTarget.focus(); window.dispatchEvent(new CustomEvent('mailflow:open-gmail-settings')); }} aria-label={t('sidebar.settings', 'Settings')} title={t('sidebar.settings', 'Settings')}><HeaderIcon name="settings" /></button>
+      <button type="button" className="mailflow-gmail-icon-button" onClick={event => { close(false); event.currentTarget.focus(); window.dispatchEvent(new CustomEvent('mailflow:toggle-gmail-quick-settings', { detail: { opener: event.currentTarget } })); }} aria-expanded={quickSettingsOpen} aria-controls="mailflow-gmail-quick-settings" aria-haspopup="dialog" aria-label={t('sidebar.settings', 'Settings')} title={t('sidebar.settings', 'Settings')}><HeaderIcon name="settings" /></button>
       <button type="button" className="mailflow-gmail-icon-button mailflow-gmail-direct-contacts" onClick={() => { close(false); setShowContacts(!showContacts); }} aria-label={t('contacts.title')} title={t('contacts.title')} aria-pressed={showContacts}><HeaderIcon name="contacts" /></button>
       <button type="button" className="mailflow-gmail-icon-button" aria-label={t('gmail.header.apps', "Apps")} title={t('gmail.header.apps', "Apps")} {...menuProps('apps')}><HeaderIcon name="apps" /></button>
       <button type="button" className="mailflow-gmail-account" aria-label={t('gmail.header.account_label', { defaultValue: 'Account: {{name}}', name })} title={t('gmail.header.account_label', { defaultValue: 'Account: {{name}}', name })} {...menuProps('account')}>{user?.avatar ? <img src={user.avatar} alt="" /> : <span>{name.charAt(0).toUpperCase()}</span>}</button>
@@ -123,7 +130,7 @@ export default function GmailHeader({ searchTargetRef, onShowShortcutHelp, setti
       </div>}
     </div>
     {supportTopic && <GmailSupport topic={supportTopic} storageKey={`mailflow.feedback.${user?.id || user?.username || 'session'}`} onClose={() => setSupportTopic(null)} />}
-    {!settingsHosted && <GmailSettingsHost />}
+    {!settingsHosted && <GmailSettingsHost onShowShortcutHelp={onShowShortcutHelp} />}
     {showProfile && <Suspense fallback={null}><ProfileModal onClose={() => { setShowProfile(false); opener.current?.focus(); }} /></Suspense>}
   </header>;
 }

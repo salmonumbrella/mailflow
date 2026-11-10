@@ -448,7 +448,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     setSelectionModeActive(false);
     setShowFolderPicker(false);
     lastSelectIdxRef.current = -1;
-  }, [messagesRefreshToken]);
+  }, [messagesRefreshToken, pageSize]);
 
   // Escape clears selection; click-outside closes folder picker
   useEffect(() => {
@@ -5230,6 +5230,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
           ) : (threadMsgs || []).map((msg, idx) => (
             <div
               key={msg.id}
+              className="mailflow-thread-message-row"
               onClick={e => { e.stopPropagation(); if (!selectionMode) onSelect(msg); }}
               onDoubleClick={onOpenWindow ? (e => { e.stopPropagation(); onOpenWindow(msg); }) : undefined}
               onContextMenu={!isMobile ? (e => { e.preventDefault(); onContextMenu(e, msg); }) : undefined}
@@ -5250,8 +5251,8 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
                   width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)',
                 }} />
               )}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div className="mailflow-thread-message-content" style={{ flex: 1, minWidth: 0 }}>
+                <div className="mailflow-thread-message-sender" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span style={{
                     fontSize: 12, fontWeight: msg.is_read ? 400 : 600,
                     color: msg.is_read ? 'var(--text-secondary)' : 'var(--text-primary)',
@@ -5264,7 +5265,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
                   </span>
                 </div>
                 {showMessagePreviews && (
-                <div style={{
+                <div className="mailflow-thread-message-preview" style={{
                   fontSize: 11, color: 'var(--text-tertiary)',
                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1,
                 }}>

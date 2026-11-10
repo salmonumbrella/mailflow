@@ -82,11 +82,12 @@ beforeEach(async () => {
     getAccounts: async () => [],
     getUnreadCounts: async () => ({ total: 0, byAccount: {}, snapshots: {}, complete: true }),
     getFolders: async () => [],
+    getRules: async () => [],
     savePreferencesOnExit: () => {},
     todoist: { ...originalApi.todoist, status: async () => ({ connected: false }) },
   });
   useStore.setState({
-    layout: 'comfortable', selectedMessageId: null, composing: false, showContacts: false,
+    user: { id: 'user-one' }, gmailDensitySaveState: 'idle', layout: 'comfortable', selectedMessageId: null, composing: false, showContacts: false,
     showAdmin: false, isLocked: false, accounts: [], messages: [],
   });
   useStore.getState().setLayout('gmail');
@@ -173,6 +174,8 @@ test('Gmail header operates native sidebar, contacts, settings surface, and acco
   assert.equal(useStore.getState().showContacts, false);
   assert.equal(useStore.getState().selectedFolder, 'INBOX');
   await click('.mailflow-gmail-header button[aria-label="sidebar.settings"]');
+  assert.ok(document.getElementById('mailflow-gmail-quick-settings'));
+  await React.act(async () => [...document.querySelectorAll('button')].find(button => button.textContent === 'gmail.quick_settings.see_all').click());
   assert.ok(document.querySelector('[data-test-close-settings]'));
   await click('[data-test-close-settings]');
   await click('.mailflow-gmail-account');
@@ -204,4 +207,25 @@ test('Gmail header menus and help prevent underlying compose and command-palette
   await keys(document.activeElement);
   assert.equal(useStore.getState().composing, false);
   assert.equal(document.querySelector('[data-test-palette]'), null);
+});
+
+
+test('quick settings sits beside mail and shortcut help Escape preserves the open reader and gear focus', async () => {
+  await openMessage();
+  const gear = document.querySelector('button[aria-label="sidebar.settings"]');
+  await React.act(async () => { gear.focus(); gear.click(); });
+  const drawer = document.getElementById('mailflow-gmail-quick-settings');
+  assert.ok(drawer);
+  assert.equal(drawer.parentElement.className, 'mailflow-mail-body');
+  assert.equal(document.querySelectorAll('#mailflow-gmail-quick-settings').length, 1);
+  await React.act(async () => [...drawer.querySelectorAll('button')].find(button => button.textContent === 'gmail.quick_settings.view_shortcuts').click());
+  assert.equal(document.getElementById('mailflow-gmail-quick-settings'), null);
+  const help = document.querySelector('[role="dialog"][aria-label="shortcuts.title"]');
+  assert.ok(help, 'help must identify itself as the active dialog');
+  assert.ok(help.contains(document.activeElement), 'help receives focus');
+  const event = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+  await React.act(async () => document.activeElement.dispatchEvent(event));
+  assert.equal(document.querySelector('[role="dialog"][aria-label="shortcuts.title"]'), null);
+  assert.equal(useStore.getState().selectedMessageId, 'message-1');
+  assert.equal(document.activeElement, gear);
 });

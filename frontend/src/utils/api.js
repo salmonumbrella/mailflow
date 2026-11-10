@@ -58,6 +58,21 @@ async function request(method, path, body, extraHeaders) {
   return res.json();
 }
 
+// Density responses are interpreted only after their caller checks its user/session/intent.
+// In particular, a delayed 423 must not lock a different user's newly opened session.
+async function densityPreferenceRequest(method, body) {
+  const res = await fetch(BASE + '/auth/preferences/gmail-density', {
+    method, credentials: 'include',
+    headers: { [CSRF_HEADER]: CSRF_VALUE, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    ...(body ? { keepalive: true, body: JSON.stringify(body) } : {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || 'Density preference request failed'), {
+    status: res.status, gmailDensity: data.gmailDensity, gmailDensityRevision: data.gmailDensityRevision,
+  });
+  return data;
+}
+
 // purpose is 'compose' (writing assistant), 'summarize' (summaries and AI actions) or 'reply'
 // (Reply with AI, which needs both): the server checks it against the admin's switches (#644).
 export async function streamAiChat(messages, { purpose, signal, onDelta } = {}) {
@@ -230,6 +245,8 @@ export const api = {
   resetPassword: (token, password) => request('POST', '/auth/reset-password', { token, password }),
   getPreferences: () => request('GET', '/auth/preferences'),
   savePreferences: (prefs) => request('PATCH', '/auth/preferences', prefs),
+  getGmailDensity: () => densityPreferenceRequest('GET'),
+  saveGmailDensity: body => densityPreferenceRequest('PATCH', body),
   // The same write, but issued while the page is going away. keepalive lets the browser
   // finish the request after the document is gone; an ordinary fetch is cancelled and the
   // setting is lost, then overwritten by the older server value on the next load. Bypasses

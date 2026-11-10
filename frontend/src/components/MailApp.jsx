@@ -861,11 +861,10 @@ export default function MailApp() {
       overflow: 'hidden',
       background: 'var(--bg-primary)',
     }}>
-      {layout === 'gmail' && <GmailSettingsHost />}
       {layout === 'gmail' && !isMobile && (
         <GmailHeader settingsHosted searchTargetRef={setGmailSearchTarget} onShowShortcutHelp={() => setShowShortcutHelp(true)} />
       )}
-      <div className="mailflow-mail-body" style={{ display: 'flex', width: '100%', height: '100%', minHeight: 0, flex: 1 }}>
+      <div className="mailflow-mail-body" tabIndex={layout === 'gmail' && isMobile ? -1 : undefined} style={{ display: 'flex', width: '100%', height: '100%', minHeight: 0, flex: 1 }}>
       {isMobile ? (
         <>
           {/* Backdrop — covers full screen including status bar area */}
@@ -1034,6 +1033,7 @@ export default function MailApp() {
         </>
       )}
 
+      {layout === 'gmail' && <GmailSettingsHost onShowShortcutHelp={() => setShowShortcutHelp(true)} />}
       </div>
 
       <InboxReplyDraftObserver />
@@ -1064,6 +1064,25 @@ function ShortcutHelpOverlay({ shortcuts, onClose }) {
   const { t } = useTranslation();
   const effective = getEffectiveShortcuts(shortcuts);
   const groups    = getGroupedActions();
+  const panel = useRef(null);
+  useEffect(() => {
+    const previous = document.activeElement;
+    const element = panel.current;
+    element?.querySelector('button')?.focus();
+    return () => {
+      const activeDialog = document.activeElement?.closest('[role="dialog"]');
+      if (previous?.isConnected && (!activeDialog || activeDialog === element)) previous.focus();
+    };
+  }, []);
+  const onKey = event => {
+    event.stopPropagation();
+    if (event.key === 'Escape') { event.preventDefault(); onClose(); }
+    if (event.key !== 'Tab') return;
+    const controls = [...panel.current.querySelectorAll('button:not(:disabled), a[href], [tabindex="0"]')];
+    const first = controls[0]; const last = controls.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  };
 
   const keyBadge = (key) => {
     if (!key) return <span style={{ color: 'var(--text-tertiary)', fontSize: 11 }}>—</span>;
@@ -1108,6 +1127,7 @@ function ShortcutHelpOverlay({ shortcuts, onClose }) {
       }}
     >
       <div
+        ref={panel} role="dialog" aria-modal="true" aria-label={t('shortcuts.title')} onKeyDown={onKey}
         onClick={e => e.stopPropagation()}
         style={{
           background: 'var(--bg-secondary)',
@@ -1123,7 +1143,7 @@ function ShortcutHelpOverlay({ shortcuts, onClose }) {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>{t('shortcuts.title')}</div>
           <button
-            onClick={onClose}
+            aria-label={t('common.close')} onClick={onClose}
             style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: 4, display: 'flex' }}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">

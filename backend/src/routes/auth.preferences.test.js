@@ -279,3 +279,12 @@ describe('PATCH /auth/preferences composeDefaultFullscreen', () => {
     expect(query.mock.calls[0][1][48]).toBeNull();
   });
 });
+
+describe('PATCH /auth/preferences Gmail density bypass protection', () => {
+  it.each([{ gmailDensity: 'compact' }, { gmailDensityRevision: 2 }, { gmailDensity: undefined }])('refuses unversioned density fields before updating other preferences', async body => {
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await patchPreferences({ session: { userId: 'user-1' }, body: { ...body, theme: 'light' } }, res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(query).not.toHaveBeenCalled();
+  });
+});

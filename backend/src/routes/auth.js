@@ -781,6 +781,44 @@ export function sanitizeListSort(listSort) {
   return JSON.stringify(clean);
 }
 
+const GMAIL_DENSITIES = ['default', 'comfortable', 'compact'];
+const densitySnapshot = preferences => ({
+  gmailDensity: GMAIL_DENSITIES.includes(preferences?.gmailDensity) ? preferences.gmailDensity : 'default',
+  gmailDensityRevision: Number.isSafeInteger(preferences?.gmailDensityRevision) && preferences.gmailDensityRevision >= 0
+    ? preferences.gmailDensityRevision : 0,
+});
+
+export async function getGmailDensityPreference(req, res) {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+  const result = await query('SELECT preferences FROM users WHERE id = $1', [req.session.userId]);
+  if (!result.rows.length) return res.status(404).json({ error: 'User not found' });
+  res.json(densitySnapshot(result.rows[0].preferences));
+}
+
+export async function patchGmailDensityPreference(req, res) {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+  const { gmailDensity, expectedRevision } = req.body || {};
+  if (!GMAIL_DENSITIES.includes(gmailDensity) || !Number.isSafeInteger(expectedRevision)
+      || expectedRevision < 0 || expectedRevision >= Number.MAX_SAFE_INTEGER) {
+    return res.status(400).json({ error: 'A valid gmailDensity and expectedRevision are required' });
+  }
+  // Compare and increment within the same UPDATE. A request whose response was lost, or
+  // which outlives its page, cannot overwrite a later accepted density choice.
+  const result = await query(`
+    UPDATE users SET preferences = preferences || jsonb_build_object(
+      'gmailDensity', $2::text, 'gmailDensityRevision', $3::bigint + 1)
+    WHERE id = $1 AND COALESCE(preferences->>'gmailDensityRevision', '0')::bigint = $3::bigint
+    RETURNING preferences
+  `, [req.session.userId, gmailDensity, expectedRevision]);
+  if (result.rows.length) return res.json({ ok: true, ...densitySnapshot(result.rows[0].preferences) });
+  const current = await query('SELECT preferences FROM users WHERE id = $1', [req.session.userId]);
+  if (!current.rows.length) return res.status(404).json({ error: 'User not found' });
+  return res.status(409).json({ error: 'Gmail density changed', code: 'gmail_density_conflict', ...densitySnapshot(current.rows[0].preferences) });
+}
+
+router.get('/preferences/gmail-density', getGmailDensityPreference);
+router.patch('/preferences/gmail-density', patchGmailDensityPreference);
+
 export async function patchPreferences(req, res) {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
   const { theme, font, layout, notificationSound, pageSize, scrollMode, syncInterval,
@@ -792,6 +830,9 @@ export async function patchPreferences(req, res) {
           autoLockMinutes, showMobileAvatars, gravatarAvatars, folderSyncInterval,
           folderOrder, senderFavicons, showMessagePreviews, defaultSender,
           conversationMode, hoverActionSet, autoOpenReplyDrafts, afterRemove, darkEmailBodies, listSort, composeDefaultFullscreen } = req.body;
+  if (Object.prototype.hasOwnProperty.call(req.body, 'gmailDensity') || Object.prototype.hasOwnProperty.call(req.body, 'gmailDensityRevision')) {
+    return res.status(400).json({ error: 'Use the versioned Gmail density preference endpoint' });
+  }
   if (composeDefaultFullscreen !== undefined && typeof composeDefaultFullscreen !== 'boolean') {
     return res.status(400).json({ error: 'composeDefaultFullscreen must be a boolean' });
   }

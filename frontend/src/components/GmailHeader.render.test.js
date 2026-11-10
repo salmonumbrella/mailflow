@@ -29,6 +29,7 @@ const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
 const GmailHeader = (await import('./GmailHeader.jsx')).default;
 const originalGetContacts = api.getContacts;
+const originalGetRules = api.getRules;
 let root, shortcutCount, contactsCalls;
 const button = text => [...document.querySelectorAll('button')].find(el => { const clone = el.cloneNode(true); clone.querySelectorAll('[aria-hidden="true"]').forEach(node => node.remove()); return clone.textContent.trim() === text || el.getAttribute('aria-label') === text; });
 const click = async el => { assert.ok(el, 'Expected button'); await React.act(async () => { el.focus(); el.click(); }); };
@@ -48,6 +49,7 @@ const supportDialog = () => document.querySelector('.mailflow-gmail-support');
 
 beforeEach(async () => {
   shortcutCount = 0; contactsCalls = [];
+  api.getRules = async () => [];
   sessionStorage.clear();
   document.documentElement.dataset.mailflowLayout = 'gmail';
   useStore.setState({ user: { id: 'u1', username: 'alex', displayName: 'Alex Mailflow' }, accounts: [{ id: 'a1', name: 'Personal', email_address: 'alex@example.com', enabled: true }, { id: 'a2', name: 'Work', email_address: 'alex@work.example', enabled: true }], selectedAccountId: 'a1', selectedFolder: 'INBOX', selectedMessageId: null, sidebarCollapsed: false, sidebarWidth: 220, searchQuery: '', searchAllFolders: false, showContacts: false, layout: 'gmail' });
@@ -55,7 +57,7 @@ beforeEach(async () => {
   root = createRoot(document.getElementById('root'));
   await React.act(async () => root.render(React.createElement(GmailHeader, { onShowShortcutHelp: () => shortcutCount++ })));
 });
-afterEach(async () => { await React.act(async () => root.unmount()); api.getContacts = originalGetContacts; });
+afterEach(async () => { await React.act(async () => root.unmount()); api.getContacts = originalGetContacts; api.getRules = originalGetRules; });
 
 test('shell preserves native sidebar and contacts routes, home clears reader/search and search host persists', async () => {
   const host = document.getElementById('mailflow-gmail-search');
@@ -154,6 +156,8 @@ test('account identity and switching use native account IDs, with native profile
   await click(button('Close profile'));
   assert.equal(document.activeElement, trigger);
   await click(button('Settings'));
+  assert.ok(document.querySelector('[aria-labelledby="mf-gmail-quick-title"][role="dialog"]'));
+  await click(button('See all settings'));
   assert.ok(document.querySelector('[aria-label="Settings"][role="dialog"]'));
   await click(button('Close settings'));
   await click(trigger); await click(button('Close account menu'));

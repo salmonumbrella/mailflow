@@ -115,6 +115,13 @@ const dir = dirname(fileURLToPath(import.meta.url));
 // Two locales sharing a value is only allowed if both appear in the same group.
 // Any unlisted pair will still fail.
 const SAME_VALUE_ALLOWED = {
+  // Quick settings reuse established mail-interface vocabulary in these exact languages.
+  'gmail.quick_settings.density_compact': [['en', 'fr'], ['es', 'ptBR']], // Compact / Compacto.
+  'gmail.quick_settings.field_from': [['cs', 'pl'], ['es', 'fr', 'ptBR']], // Od / De mean From.
+  'gmail.quick_settings.field_to': [['es', 'ptBR']], // Para means To in both languages.
+  'gmail.quick_settings.field_header': [['de', 'en']], // Header is the established German mail term.
+  'gmail.quick_settings.field_native_label': [['de', 'en']], // Label is also used in German mail interfaces.
+  'gmail.quick_settings.theme': [['es', 'it', 'ptBR']], // Tema means Theme in all three languages.
   // Native-label vocabulary shared naturally by these language pairs.
   'nativeLabelRules.convertedFalse': [['en', 'es', 'it']], // No is the negative answer in English, Spanish and Italian.
   'nativeLabelRules.review': [['es', 'ptBR']], // Revisar filtro in Spanish and Brazilian Portuguese.
@@ -649,6 +656,30 @@ const LOCALE_SPECIFIC_KEYS = new Set(
 // found by a plain text search of the source. Add here to suppress false
 // "unused key" failures.
 const DYNAMIC_KEYS = new Set([
+  // GmailQuickSettings resolves density, condition and action labels from validated identifiers.
+  'gmail.quick_settings.density_default',
+  'gmail.quick_settings.density_comfortable',
+  'gmail.quick_settings.density_compact',
+  'gmail.quick_settings.field_from',
+  'gmail.quick_settings.field_to',
+  'gmail.quick_settings.field_subject',
+  'gmail.quick_settings.field_body',
+  'gmail.quick_settings.field_has_attachment',
+  'gmail.quick_settings.field_header',
+  'gmail.quick_settings.field_read_status',
+  'gmail.quick_settings.field_native_label',
+  'gmail.quick_settings.field_is_read',
+  'gmail.quick_settings.action_mark_read',
+  'gmail.quick_settings.action_star',
+  'gmail.quick_settings.action_archive',
+  'gmail.quick_settings.action_delete',
+  'gmail.quick_settings.action_move',
+  'gmail.quick_settings.action_set_category',
+  'gmail.quick_settings.action_notify',
+  'gmail.quick_settings.action_forward',
+  'gmail.quick_settings.action_apply_native_label',
+  'gmail.quick_settings.action_remove_native_label',
+
   // t(`shortcuts.visibleMailbox.${kind}`) — numbered mailbox text shares a template.
   'shortcuts.visibleMailbox.label',
   'shortcuts.visibleMailbox.description',
@@ -957,6 +988,20 @@ describe('i18n locale files', () => {
         assert.equal(typeof locales[lang][key], 'string', `${lang} translation missing: ${key}`);
         assert.ok(locales[lang][key].trim(), `${lang} translation empty: ${key}`);
         assert.deepEqual(placeholders(locales[lang][key]), placeholders(locales.en[key]), `${lang} interpolation differs: ${key}`);
+      }
+    }
+  });
+
+  it('every Gmail quick-settings source key has a nonempty translation in every locale', () => {
+    const sourceKeys = [...new Set([
+      ...loadLiteralSourceTranslationKeys(['gmail.quick_settings.']),
+      ...[...DYNAMIC_KEYS].filter(key => key.startsWith('gmail.quick_settings.')),
+    ])];
+    assert.ok(sourceKeys.length >= 55, 'quick settings must cover preferences, saved filters and their recovery states');
+    for (const key of sourceKeys) {
+      for (const lang of langs) {
+        assert.equal(typeof locales[lang][key], 'string', `${lang} translation missing: ${key}`);
+        assert.ok(locales[lang][key].trim(), `${lang} translation empty: ${key}`);
       }
     }
   });

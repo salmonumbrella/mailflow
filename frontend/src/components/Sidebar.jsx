@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import AccountMark from './AccountMark.jsx';
 import GmailNavigation from './GmailNavigation.jsx';
+import { mobileSettingsOpener } from '../utils/gmailSettingsFocus.js';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { totalBadge, unreadBadge } from '../utils/unreadBadge.js';
@@ -312,6 +313,17 @@ export default function Sidebar({ forceExpanded = false, onClose } = {}) {
   useEffect(() => {
     if (isMobile) setMobileSidebarOpen(false);
   }, [selectedAccountId, selectedFolder, activeLabel]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const openSettings = event => {
+    if (isMobile && layout === 'gmail') {
+      const body = event.currentTarget.closest('.mailflow-mail-body');
+      const opener = mobileSettingsOpener(body, t('messageList.menu', 'Menu'));
+      setMobileSidebarOpen(false);
+      window.dispatchEvent(new CustomEvent('mailflow:open-gmail-quick-settings', { detail: { opener } }));
+      return;
+    }
+    setAdminTab('accounts'); setShowAdmin(true); setMobileSidebarOpen(false);
+  };
 
   const [msgDragTarget, setMsgDragTarget] = useState(null);
   const [folderDrag, setFolderDrag] = useState(null);
@@ -1882,10 +1894,10 @@ export default function Sidebar({ forceExpanded = false, onClose } = {}) {
           </div>
 
           {/* Settings */}
-          <div
-            onClick={() => { setAdminTab('accounts'); setShowAdmin(true); setMobileSidebarOpen(false); }}
+          <button type="button" aria-label={t('sidebar.settings')}
+            onClick={openSettings}
             style={{
-              display: 'flex', alignItems: 'center', gap: 10,
+              display: 'flex', alignItems: 'center', gap: 10, width: '100%', border: 0, background: 'transparent', font: 'inherit', textAlign: 'left',
               padding: '8px 14px', cursor: 'pointer',
               WebkitTapHighlightColor: 'transparent',
             }}
@@ -1903,7 +1915,7 @@ export default function Sidebar({ forceExpanded = false, onClose } = {}) {
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2" style={{ flexShrink: 0 }}>
               <polyline points="9 18 15 12 9 6"/>
             </svg>
-          </div>
+          </button>
 
           {/* Update available (#261) */}
           {updateInfo?.updateAvailable && (

@@ -46,7 +46,7 @@ function Choice({ name, value, selected, onChange, children, disabled = false })
   return <label className="mf-gmail-settings-choice"><input type="radio" name={name} checked={selected === value} onChange={() => onChange(value)} disabled={disabled} />{children}</label>;
 }
 
-export default function GmailSettings({ onClose, initialAccountId, initialTab = 'general', initialCreateLabel = false }) {
+export default function GmailSettings({ onClose, initialAccountId, initialTab = 'general', initialCreateLabel = false, restoreFocus = true }) {
   const { t } = useTranslation();
   const state = useStore();
   const panel = useRef(null);
@@ -101,8 +101,8 @@ export default function GmailSettings({ onClose, initialAccountId, initialTab = 
       else if (!event.shiftKey && (document.activeElement === last || !panel.current.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
     };
     document.addEventListener('keydown', onKey, true);
-    return () => { document.removeEventListener('keydown', onKey, true); if (previous?.isConnected) previous.focus(); };
-  }, []);
+    return () => { document.removeEventListener('keydown', onKey, true); if (restoreFocus && previous?.isConnected) previous.focus(); };
+  }, [restoreFocus]);
 
   useEffect(() => {
     let cancelled = false;

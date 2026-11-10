@@ -32,7 +32,28 @@ import {
 import { removeThreadCacheEntry } from '../utils/threadedArchive.js';
 import i18n, { initialLanguage } from '../i18n.js';
 import { createPrefSaveQueue } from '../utils/prefSaveQueue.js';
+import { applyGmailDensity, isGmailDensity, normalizeGmailDensity } from '../utils/gmailDensity.js';
+import { createGmailDensityPersistence, GMAIL_DENSITY_INTENT_KEY, GMAIL_DENSITY_SNAPSHOT_KEY, readDensityIntent, readDensityCache } from '../utils/gmailDensityPersistence.js';
 import { compareListOrder, isDefaultListOrder, listOrderFor, listSortKey } from '../utils/listSort.js';
+
+let _gmailDensitySession = 0;
+let _gmailDensityLoadSeq = 0;
+const initialGmailDensity = normalizeGmailDensity(localStorage.getItem('mailflow_gmail_density'));
+applyGmailDensity(initialGmailDensity);
+
+function pendingGmailDensity(userId) {
+  const intent = readDensityIntent(localStorage, userId);
+  return intent?.pending ? intent.value : null;
+}
+
+const _densityPersistence = createGmailDensityPersistence({
+  storage: localStorage,
+  getContext: () => ({ userId: useStore.getState().user?.id, locked: useStore.getState().isLocked, session: _gmailDensitySession }),
+  read: () => api.getGmailDensity(),
+  save: body => api.saveGmailDensity(body),
+  onState: gmailDensitySaveState => useStore.setState({ gmailDensitySaveState }),
+  onLocked: () => window.dispatchEvent(new CustomEvent('mailflow:locked')),
+});
 
 // Accumulate rapid preference changes and flush at most once per second. The queue itself
 // lives in prefSaveQueue.js so its behaviour is testable without a network or a DOM.
@@ -69,7 +90,7 @@ function cancelPendingPrefSave() {
 // reliably on mobile, where the page is frozen or discarded instead. visibilitychange also
 // covers tab switches and app backgrounding, which simply means the write lands sooner.
 if (typeof window !== 'undefined') {
-  const flushOnExit = () => _prefQueue.flush({ exiting: true });
+  const flushOnExit = () => { _prefQueue.flush({ exiting: true }); void _densityPersistence.flush(); };
   window.addEventListener('pagehide', flushOnExit);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushOnExit();
@@ -133,10 +154,19 @@ export const useStore = create((set, get) => ({
   // Auth
   user: null,
   setUser: (user) => {
+    const densityIdentityChanged = get().user?.id !== user?.id;
     // On a real identity change (login, logout, account switch) drop any queued preference
     // flush so the previous user's debounce can't save into the new/absent session.
     if (get().user?.id !== user?.id) {
       cancelPendingPrefSave();
+      _gmailDensitySession++;
+      _densityPersistence.cancel();
+      // The cache is user-owned, including when a page reload interrupted a save.
+      if (get().user || !readDensityCache(localStorage, user?.id)) {
+        localStorage.removeItem('mailflow_gmail_density');
+        localStorage.removeItem(GMAIL_DENSITY_INTENT_KEY);
+        localStorage.removeItem(GMAIL_DENSITY_SNAPSHOT_KEY);
+      }
       clearTimeout(pendingCountTimer);
       pendingCountTimer = null;
       // AI runs deliberately outlive the message pane, so nothing else would stop one here. A
@@ -152,6 +182,8 @@ export const useStore = create((set, get) => ({
     set(state => ({
       user,
       ...(state.user?.id !== user?.id ? {
+        gmailDensity: readDensityCache(localStorage, user?.id)?.value || normalizeGmailDensity(localStorage.getItem('mailflow_gmail_density')),
+        gmailDensitySaveState: pendingGmailDensity(user?.id) ? 'pending' : 'idle',
         serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
         unreadCounts: { total: 0, byAccount: {}, snapshots: {}, complete: false },
         snoozedCount: 0,
@@ -187,6 +219,8 @@ export const useStore = create((set, get) => ({
         collapsedFolders: [], expandedAccounts: {},
       } : {}),
     }));
+    applyGmailDensity(get().gmailDensity);
+    if (densityIdentityChanged && !get().isLocked && pendingGmailDensity(user?.id)) get().retryGmailDensitySave();
   },
   updateUser: (updates) => set(state => ({ user: state.user ? { ...state.user, ...updates } : state.user })),
   // The sidebar and the lock screen sign out here, through the shared helper (#523, #310).
@@ -233,6 +267,11 @@ export const useStore = create((set, get) => ({
   // Lock screen
   isLocked: localStorage.getItem('mailflow_locked') === '1',
   setLocked: (locked) => {
+    const densitySessionChanged = Boolean(locked) !== get().isLocked;
+    if (densitySessionChanged) {
+      _gmailDensitySession++;
+      if (locked) _densityPersistence.cancel();
+    }
     if (locked) {
       // The lock screen replaces the mail view, and with it an open composer: this lets the
       // composer hand what it holds to keepComposeForLock first, so it reopens with it on unlock.
@@ -267,6 +306,7 @@ export const useStore = create((set, get) => ({
       localStorage.removeItem('mailflow_locked_message');
       localStorage.removeItem('mailflow_locked');
       set({ isLocked: false, selectedMessageId: restoredMessageId });
+      if (densitySessionChanged && pendingGmailDensity(get().user?.id)) get().retryGmailDensitySave();
     }
   },
   // Lock now: tell the server (it then 423s the API until unlocked), then drop into
@@ -561,6 +601,17 @@ export const useStore = create((set, get) => ({
   },
   isSidebarResizing: false,
   setIsSidebarResizing: (v) => set({ isSidebarResizing: v }),
+  gmailDensity: initialGmailDensity,
+  gmailDensityEpoch: 0,
+  gmailDensitySaveState: 'idle',
+  setGmailDensity: (value) => {
+    if (!isGmailDensity(value) || !get().user || get().isLocked) return false;
+    _densityPersistence.choose(value);
+    set(state => ({ gmailDensity: value, gmailDensityEpoch: state.gmailDensityEpoch + 1 }));
+    applyGmailDensity(value);
+    return true;
+  },
+  retryGmailDensitySave: () => _densityPersistence.retry(),
   pageSize: parseInt(localStorage.getItem('mailflow_page_size')) || 50,
   setPageSize: (size) => {
     localStorage.setItem('mailflow_page_size', String(size));
@@ -1359,6 +1410,11 @@ export const useStore = create((set, get) => ({
     const userId = get().user?.id;
     const faviconEpoch = get().senderFaviconsEpoch;
     const fullscreenEpoch = get().composeDefaultFullscreenEpoch;
+    const densityEpoch = get().gmailDensityEpoch;
+    const densitySession = _gmailDensitySession;
+    const densityLoad = ++_gmailDensityLoadSeq;
+    const densityWasPending = pendingGmailDensity(userId) !== null;
+    const densityIntentToken = readDensityIntent(localStorage, userId)?.token;
     try {
       const prefs = await api.getPreferences();
       if (get().user?.id !== userId) return;
@@ -1393,6 +1449,19 @@ export const useStore = create((set, get) => ({
           ? undefined
           : (Number(localStorage.getItem('mailflow_list_width')) || undefined);
         applyLayout(clean, savedListWidth);
+      }
+      if (!get().isLocked && densitySession === _gmailDensitySession) _densityPersistence.observeRevision(prefs.gmailDensityRevision);
+      if (!get().isLocked && densitySession === _gmailDensitySession && densityLoad === _gmailDensityLoadSeq
+          && densityEpoch === get().gmailDensityEpoch && densityIntentToken === readDensityIntent(localStorage, userId)?.token) {
+        if (pendingGmailDensity(userId)) {
+          get().retryGmailDensitySave();
+        } else if (!densityWasPending) {
+          const value = normalizeGmailDensity(prefs.gmailDensity);
+          if (_densityPersistence.hydrate(value, prefs.gmailDensityRevision)) {
+            set({ gmailDensity: value, gmailDensitySaveState: 'idle' });
+            applyGmailDensity(value);
+          }
+        }
       }
       // A local toggle made while this GET was in flight owns the newer choice.
       if (typeof prefs.composeDefaultFullscreen === 'boolean' && get().composeDefaultFullscreenEpoch === fullscreenEpoch) {
