@@ -8,7 +8,7 @@ export default function RightSidebar({ title, headerAccessory, onCollapse, toggl
   // Expanding multiple sections can make the content taller than the viewport.
   // Reserve the scrollbar gutter so right-anchored header and row content does not jump.
   return (
-    <div style={{
+    <div className="mailflow-right-sidebar" style={{
       width: 'var(--right-sidebar-width, 296px)', flexShrink: 0,
       borderLeft: '1px solid var(--border)', background: 'var(--bg-secondary)',
       display: 'flex', flexDirection: 'column', overflowY: 'auto', height: '100%',

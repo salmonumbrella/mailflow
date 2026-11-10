@@ -4,7 +4,7 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    branches: ["main"]
+    branches: ["main", "staging/upstream-bdeab4b"]
 
 jobs:
   backend:

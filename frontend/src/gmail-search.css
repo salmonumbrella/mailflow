@@ -1,0 +1,51 @@
+html[data-mailflow-layout="gmail"] .mailflow-gmail-search { position: relative; width: 100%; min-width: 0; }
+html[data-mailflow-layout="gmail"] #mailflow-gmail-search .mailflow-gmail-search > input,
+html[data-mailflow-layout="gmail"] .mailflow-gmail-search > input { width: 100%; height: 48px; padding: 10px 88px 10px 48px !important; background: var(--bg-tertiary); color: var(--text-primary); border: 0; border-radius: 24px; font: inherit !important; box-sizing: border-box; }
+html[data-mailflow-layout="gmail"] .mailflow-gmail-search > button { position: absolute; top: 5px; width: 38px; height: 38px; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--text-secondary); cursor: pointer; }
+html[data-mailflow-layout="gmail"] .mailflow-gmail-search > .gmail-search-icon { left: 7px; }
+html[data-mailflow-layout="gmail"] .mailflow-gmail-search > .gmail-search-options { right: 7px; }
+html[data-mailflow-layout="gmail"] .mailflow-gmail-search > .gmail-search-clear { right: 47px; font-size: 24px; }
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown { position: absolute; top: calc(100% + 2px); left: 0; width: min(600px, calc(100vw - 24px)); max-width: 100%; max-height: calc(100dvh - 90px); overflow: auto; padding: 16px; box-sizing: border-box; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-popover); z-index: 210; font-size: 14px; }
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown button,
+html[data-mailflow-layout="gmail"] .gmail-search-refinements button { font: inherit; color: var(--text-primary); background: transparent; border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px; cursor: pointer; }
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown button:hover,
+html[data-mailflow-layout="gmail"] .gmail-search-refinements button:hover { background: var(--bg-hover); }
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown button:disabled,
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown input:disabled,
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown select:disabled { opacity: .5; cursor: not-allowed; }
+html[data-mailflow-layout="gmail"] .gmail-search-chips { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 10px; }
+html[data-mailflow-layout="gmail"] .gmail-search-suggestion { display: flex; align-items: center; }
+html[data-mailflow-layout="gmail"] .gmail-search-suggestion[aria-selected="true"] { background: var(--accent-dim); }
+html[data-mailflow-layout="gmail"] .gmail-search-suggestion button { border: 0; text-align: left; }
+html[data-mailflow-layout="gmail"] .gmail-search-suggestion button:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+html[data-mailflow-layout="gmail"] .gmail-search-advanced-link { width: 100%; margin-top: 8px; text-align: left; }
+html[data-mailflow-layout="gmail"] .gmail-search-advanced > label { display: flex; align-items: center; gap: 10px; min-width: 0; margin-bottom: 15px; }
+html[data-mailflow-layout="gmail"] .gmail-search-advanced > label > span { width: 110px; flex-shrink: 0; }
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown input:not([type="checkbox"]),
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown select,
+html[data-mailflow-layout="gmail"] .gmail-search-refinements input,
+html[data-mailflow-layout="gmail"] .gmail-search-refinements select { flex: 1; min-width: 0; padding: 7px 5px; font: inherit; color: var(--text-primary); background: var(--bg-secondary); border: 0; border-bottom: 1px solid var(--border); border-radius: 0; outline-offset: 2px; box-sizing: border-box; }
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown input:focus-visible,
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown select:focus-visible,
+html[data-mailflow-layout="gmail"] .gmail-search-dropdown button:focus-visible { outline: 2px solid var(--accent); }
+html[data-mailflow-layout="gmail"] .gmail-search-note { font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+html[data-mailflow-layout="gmail"] .gmail-search-check { display: flex !important; gap: 10px; align-items: center; margin: 12px 0; }
+html[data-mailflow-layout="gmail"] .gmail-search-check input { accent-color: var(--accent); width: 16px; height: 16px; }
+html[data-mailflow-layout="gmail"] .gmail-search-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+html[data-mailflow-layout="gmail"] .gmail-search-actions .gmail-search-primary { background: var(--accent); color: var(--text-on-accent, var(--bg-primary)); border-color: var(--accent); }
+html[data-mailflow-layout="gmail"] .gmail-filter-dialog > label,
+html[data-mailflow-layout="gmail"] .gmail-filter-dialog > fieldset > label { display: flex; gap: 12px; align-items: center; margin: 12px 0; }
+html[data-mailflow-layout="gmail"] .gmail-search-query { overflow-wrap: anywhere; color: var(--text-secondary); }
+html[data-mailflow-layout="gmail"] .gmail-search-date-bounds { display: flex; gap: 12px; }
+html[data-mailflow-layout="gmail"] .gmail-search-date-bounds label { flex: 1; }
+html[data-mailflow-layout="gmail"] .gmail-search-refinements { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 16px; border-bottom: 1px solid var(--border-subtle); font-size: 12px; }
+html[data-mailflow-layout="gmail"] .gmail-search-refinements select { flex: 0 1 auto; }
+html[data-mailflow-layout="gmail"] .gmail-search-refinements button[aria-pressed="true"] { color: var(--accent); background: var(--accent-dim); }
+html[data-mailflow-layout="gmail"] .gmail-search-refinements form { display: flex; gap: 4px; }
+html[data-mailflow-layout="gmail"] .gmail-search-sort { margin-left: auto; color: var(--text-secondary); }
+@media (max-width: 600px) {
+  html[data-mailflow-layout="gmail"] .gmail-search-dropdown { position: fixed; top: 64px; left: 12px; right: 12px; width: auto; max-width: none; }
+  html[data-mailflow-layout="gmail"] .gmail-search-advanced > label > span { width: 84px; }
+}
+html[data-mailflow-layout="gmail"] .gmail-filter-run-status { position: absolute; top: calc(100% + 4px); right: 0; max-width: min(560px, 90vw); padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); color: var(--text-primary); box-shadow: var(--shadow-popover); z-index: 210; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+html[data-mailflow-layout="gmail"] .gmail-filter-run-status button { padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg-tertiary); color: var(--text-primary); font: inherit; }

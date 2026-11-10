@@ -7,7 +7,7 @@ registerHooks({ load(url, context, nextLoad) {
   return url.endsWith('.json') ? { format: 'module', source: `export default ${readFileSync(new URL(url), 'utf8')}`, shortCircuit: true } : nextLoad(url, context);
 } });
 const dom = new JSDOM('<div id="root"></div>', { url: 'https://mail.example.invalid' });
-Object.assign(globalThis, { window: dom.window, document: dom.window.document, localStorage: dom.window.localStorage, CustomEvent: dom.window.CustomEvent, IS_REACT_ACT_ENVIRONMENT: true });
+Object.assign(globalThis, { window: dom.window, document: dom.window.document, localStorage: dom.window.localStorage, CustomEvent: dom.window.CustomEvent, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true });
 let socket;
 class FakeSocket {
   static CLOSED = 3;
@@ -51,6 +51,21 @@ test('an alert for filed mail shows, for its own folder, with no new inbox mail 
       folder: 'INBOX', messages: [{ id: 'm2' }], count: 1, alertMessages: [], alertCount: 0 }) }));
     assert.equal(useStore.getState().notifications.filter(n => n.type === 'new_mail').length, 0, 'silenced mail still shows no toast');
     assert.equal(listRefreshes, 1, 'but is listed');
+  } finally {
+    await React.act(async () => root.unmount());
+    api.getUnreadCounts = original;
+  }
+});
+
+test('intentional filter cancellation is not announced as a run error', async () => {
+  const root = createRoot(document.getElementById('root'));
+  useStore.setState({ notifications: [] });
+  const original = api.getUnreadCounts;
+  api.getUnreadCounts = async () => ({ byAccount: {}, snapshots: {} });
+  try {
+    await React.act(async () => { root.render(React.createElement(App)); });
+    await React.act(async () => socket.onmessage({ data: JSON.stringify({ type: 'rules_run_complete', ok: false, status: 'cancelled', matched: 1, processed: 1 }) }));
+    assert.match(useStore.getState().notifications.at(-1).title, /stopped.*not undone/);
   } finally {
     await React.act(async () => root.unmount());
     api.getUnreadCounts = original;

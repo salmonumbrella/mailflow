@@ -457,6 +457,10 @@
       "list": {
         "label": "Nejdřív seznam",
         "description": "Seznam přes celou šířku; zpráva se otevře samostatně"
+      },
+      "gmail": {
+        "label": "Gmail",
+        "description": "Prostředí inspirované Gmailem s doručenou poštou přes celou šířku a nerušeným čtením"
       }
     },
     "snoozedUntil": "Odloženo do {{when}}",
@@ -945,7 +949,13 @@
       "someday": "Někdy",
       "reference": "Reference"
     },
-    "undoFailed": "Štítek se nepodařilo vrátit zpět"
+    "undoFailed": "Štítek se nepodařilo vrátit zpět",
+    "gmail": {
+      "action": "Vyžaduje akci / odpověď",
+      "awaiting": "Čeká na odpověď",
+      "reference": "Podklady / události",
+      "bounded": "Nejnovějších {{available}} z {{total}}. Starší zprávy jsou ve složce štítku."
+    }
   },
   "rightSidebar": {
     "hide": "Skrýt pravý postranní panel",

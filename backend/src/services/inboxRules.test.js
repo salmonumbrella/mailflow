@@ -1006,3 +1006,89 @@ describe('newMailPushPayload', () => {
     expect(payload).not.toHaveProperty('messageId');
   });
 });
+
+describe('applyInboxRules — targeted historical snapshot', () => {
+  it('uses only the supplied owned snapshot instead of loading unrelated rules', async () => {
+    query.mockReset(); query.mockResolvedValue({ rows: [] });
+    const rule = mkRule([{ type: 'star' }]);
+    const result = await applyInboxRules([mkMsg()], account, mockImap, { rule });
+    expect(query.mock.calls.some(([sql]) => sql.includes('FROM inbox_rules'))).toBe(false);
+    expect(result.matchedCount).toBe(1);
+    expect(result.failedCount).toBe(0);
+    expect(result.remaining).toHaveLength(1);
+    expect(mockImap.setFlag).toHaveBeenCalledWith(account, 100, 'INBOX', '\\Flagged', true);
+  });
+  it('refuses a snapshot owned by another user or scoped to another account', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(applyInboxRules([mkMsg()], account, mockImap, { rule: mkRule([{ type: 'star' }], { user_id: 'foreign' }) })).rejects.toThrow(/belong/);
+    await expect(applyInboxRules([mkMsg()], account, mockImap, { rule: mkRule([{ type: 'star' }], { account_id: 'foreign' }) })).rejects.toThrow(/belong/);
+    expect(mockImap.setFlag).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+  it('reports a missing destination as a failed action, not completed filing', async () => {
+    resolveArchiveFolder.mockResolvedValue(null);
+    const result = await applyInboxRules([mkMsg()], account, mockImap, { rule: mkRule([{ type: 'archive' }]) });
+    expect(result).toMatchObject({ matchedCount: 1, failedCount: 1 });
+    expect(result.remaining).toHaveLength(1);
+    expect(mockImap.bulkMoveMessages).not.toHaveBeenCalled();
+  });
+  it('cannot expunge a historical match even with a misconfigured trash mapping', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    resolveTrashFolder.mockResolvedValue('INBOX'); resolveAllTrashPaths.mockResolvedValue(['INBOX']);
+    getDeleteStrategy.mockReturnValue({ action: 'expunge' });
+    const result = await applyInboxRules([mkMsg()], account, mockImap, { rule: mkRule([{ type: 'delete' }]) });
+    expect(result).toMatchObject({ matchedCount: 1, failedCount: 1 });
+    expect(mockImap.setFlag).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+});
+
+describe('historical action ordering preserves source identity', () => {
+  it('waits for flags on the original UID before a Gmail-style archive removes the source', async () => {
+    query.mockReset(); query.mockResolvedValue({ rows: [] });
+    resolveArchiveFolder.mockResolvedValue('[Gmail]/All Mail'); isAllMailFolder.mockResolvedValue(true);
+    mockImap.bulkMoveMessages.mockResolvedValue({ failed: [] });
+    const order = [];
+    mockImap.setFlag.mockImplementation(async () => { await Promise.resolve(); order.push('flag'); });
+    mockImap.bulkMoveMessages.mockImplementation(async () => { order.push('archive'); return { failed: [] }; });
+    const result = await applyInboxRules([mkMsg()], account, mockImap, { rule: mkRule([{ type: 'archive' }, { type: 'mark_read' }]) });
+    expect(order).toEqual(['flag', 'archive']);
+    expect(result).toMatchObject({ matchedCount: 1, failedCount: 0 });
+  });
+  it('keeps the source recoverable if its flag push fails before a historical move', async () => {
+    query.mockReset(); query.mockResolvedValue({ rows: [] });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const imap = { ...mockImap, _enqueueFlagPush: vi.fn(), setFlag: vi.fn().mockRejectedValue(new Error('offline')) };
+    const result = await applyInboxRules([mkMsg()], account, imap, { rule: mkRule([{ type: 'move', value: 'Archive' }, { type: 'star' }]) });
+    expect(result).toMatchObject({ matchedCount: 1, failedCount: 1 });
+    expect(imap._enqueueFlagPush).toHaveBeenCalledWith('acc-1', 'msg-1', '\\Flagged', true);
+    expect(imap.bulkMoveMessages).not.toHaveBeenCalled();
+    expect(result.remaining).toHaveLength(1);
+    error.mockRestore();
+  });
+});
+
+describe('historical cancellation boundaries', () => {
+  it('finishes the current provider action then stops before filing or touching the next message', async () => {
+    query.mockReset(); query.mockResolvedValue({ rows: [] });
+    let cancelled = false;
+    mockImap.setFlag.mockImplementation(async () => { cancelled = true; });
+    const result = await applyInboxRules([mkMsg(), mkMsg({ id: 'msg-2', uid: 101 })], account, mockImap, {
+      rule: mkRule([{ type: 'mark_read' }, { type: 'move', value: 'Archive' }]),
+      shouldContinue: async () => !cancelled,
+    });
+    expect(result).toMatchObject({ processedCount: 1, cancelled: true, failedCount: 0 });
+    expect(mockImap.setFlag).toHaveBeenCalledTimes(1);
+    expect(mockImap.bulkMoveMessages).not.toHaveBeenCalled();
+  });
+  it('counts a malformed-condition evaluation error instead of reporting a successful zero-match run', async () => {
+    query.mockReset(); query.mockResolvedValue({ rows: [] });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await applyInboxRules([mkMsg()], account, mockImap, {
+      rule: mkRule([{ type: 'star' }], { conditions: [{ field: 'from', operator: 'contains', value: { unexpected: true } }] }),
+    });
+    expect(result).toMatchObject({ processedCount: 1, matchedCount: 0, failedCount: 1 });
+    expect(mockImap.setFlag).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+});

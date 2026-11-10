@@ -325,7 +325,9 @@ export function useWebSocket() {
         // hand the counts to the settings panel if it is open, and refresh views and
         // counts — rules move messages between folders.
         addNotification({
-          title: data.ok === false
+          title: data.status === 'cancelled'
+            ? t('admin.rules.runCancelled', { defaultValue: 'Filter run stopped. Completed actions were not undone.' })
+            : data.ok === false
             ? t('admin.rules.runError')
             : t('admin.rules.runResult', { matched: data.matched, processed: data.processed }),
         });

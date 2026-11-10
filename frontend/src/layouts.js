@@ -65,6 +65,18 @@ export const LAYOUTS = {
     rowPx: 20,
   },
 
+  gmail: {
+    labelKey: 'messageList.layouts.gmail.label',
+    label: 'Gmail',
+    descriptionKey: 'messageList.layouts.gmail.description',
+    description: 'Gmail-inspired shell with a full-width inbox and focused reading',
+    direction: 'row',
+    listWidth: null,
+    listFirst: true,
+    rowPy: 10,
+    rowPx: 16,
+  },
+
   vertical: {
     labelKey: 'messageList.layouts.vertical.label',
     label: 'Vertical Split',
@@ -90,8 +102,10 @@ export function normalizeLayout(layoutKey) {
 // customListWidth: optional px override from drag-to-resize (persisted in localStorage).
 // When provided it is applied instead of the preset listWidth.
 export function applyLayout(layoutKey, customListWidth) {
-  const layout = LAYOUTS[normalizeLayout(layoutKey)];
+  const key = normalizeLayout(layoutKey);
+  const layout = LAYOUTS[key];
   const root = document.documentElement;
+  root.setAttribute('data-mailflow-layout', key);
   root.style.setProperty('--layout-row-py', layout.rowPy + 'px');
   root.style.setProperty('--layout-row-px', layout.rowPx + 'px');
   if (layout.listWidth != null) {

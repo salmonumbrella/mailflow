@@ -1,0 +1,291 @@
+# Gmail presentation: implementation and acceptance
+
+Reference: [mail-view Gmail at 661e8abd](https://github.com/R44VC0RP/mail-view/tree/661e8abdd168992f63deb74a951f72ad00390467/gmail).
+
+This opt-in layout preserves MailFlow accounts, mail identities, server operations, selected palette and font. It is not Gmail or a Google integration. Native layouts remain the default. Superhuman is a separate change and is not included.
+
+## Current acceptance status
+
+**Incomplete reference parity. Not ready for final acceptance.** Passing unit and jsdom tests are not a visual or live-provider pass. The checklist below keeps every reference surface visible; an unchecked entry is not evidence of missing native functionality, but does require individual acceptance.
+
+Implemented adaptations include persistent global search, single-view reading, scan-line rows with checkbox/star controls, range selection, persistent mixed-state select-all and six selection presets, inline native replies, recipient paste/token handling and native contact picker, Gmail-shaped search and filter creation with account-scoped historical execution, and Klinger-style GTD sections. New settings, header/support/account/app surfaces and navigation use native operations where supported and explicitly explain unavailable Google features.
+
+## Important native differences and unfinished work
+
+- Generic IMAP folders are not non-destructive Gmail labels. Folder deletion can delete mail. The settings UI must disclose this and cannot claim Gmail label deletion semantics. Custom label colors, arbitrary provider importance and colored-star workflows require separate data/provider support.
+- MailFlow categories are Primary, Newsletter, Promotion, Automated and Social. Google Forums/Updates are not silently mapped to them.
+- Search does not have indexed byte size, generic labels, importance or relevance ranking. Saved filter conversion intentionally rejects unsupported criteria instead of silently widening them. Historical execution is an explicitly selected account's Inbox, not every folder. Unknown starts are checked, not blindly replayed.
+- Native account signatures are not a multi-signature library. Vacation responder, passcode/confidential delivery, Google Drive, mail merge, shared presence and Google account services are unavailable unless separately integrated. Notices or local reference simulations do not provide those services.
+- Exact reader authentication details/quoted-content controls, attachment variants, some composer More/formatting menus, default fullscreen preference and several reference-only dialogs remain native-different or absent.
+- GTD uses real MailFlow classification. The section feed contains at most fifty loaded thread heads; compact pages do not claim full-server pagination.
+- Live-browser geometry, real provider actions, keyboard-only accessibility, 390/768/1024px layouts, large fonts, forced colors and final screenshots remain unverified.
+
+## Verification
+
+Backend: 4,271 tests passed with 290 environment-gated skips; backend lint, plugin-boundary lint and syntax check passed. Frontend final two-worker run: all 4,607 tests passed, with zero failures or skips. The default-concurrency run passed 4,606 and failed the existing AccountErrors expired-sign-in timing fixture; the isolated fixture rerun passed all 19 cases. This timing failure is disclosed, not counted as a clean default run. Frontend lint and production build passed. Independent focused review reran 44 tests and found no remaining P1/P2 defects in the reviewed changes after corrections.
+
+Dependency audits at the high-severity threshold passed; five backend and two frontend moderate advisories remain. No dependency upgrades were made. Database-dependent checks did not run locally because no disposable PostgreSQL is configured. Local runtime is Node 24.22.1; CI uses the repository's Node 22 and PostgreSQL 16. The fork staging-base PR trigger is added without changing CI jobs, permissions, secrets or deployment behavior. Hosted CI has not yet been verified. No deployment or live account mutation was performed for testing. Browser visual/interaction verification and the requested automated Roborev execution remain unavailable in the current environment; no such pass is asserted.
+
+## Exhaustive source-surface checklist
+
+### Shell and header
+Source: gmail/src/Header.tsx; App.tsx; shell.css; chrome-fidelity.css
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G001 [PENDING_ACCEPTANCE] Main-menu collapse/expand with state and accessible expanded label
+- [ ] G002 [PENDING_ACCEPTANCE] Home button returns to mailbox and clears search
+- [ ] G003 [PENDING_ACCEPTANCE] Persistent global search while reading, viewing contacts, or Scheduled
+- [ ] G004 [PENDING_ACCEPTANCE] 64px top bar, sidebar-aligned brand, flexible search, right control cluster
+- [ ] G005 [PENDING_ACCEPTANCE] Status menu: Active / Do not disturb / Away and checked state
+- [ ] G006 [PENDING_ACCEPTANCE] Support menu: help, training, feedback
+- [ ] G007 [PENDING_ACCEPTANCE] Google-apps menu and local app notices
+- [ ] G008 [PENDING_ACCEPTANCE] Contacts panel within apps menu, back navigation and contact list
+- [ ] G009 [PENDING_ACCEPTANCE] Account menu, close, account identity and local-account notice
+- [ ] G010 [PENDING_ACCEPTANCE] Header popover outside-click / Escape dismissal and focus restoration
+
+### Folder and label navigation
+Source: gmail/src/Sidebar.tsx; App.tsx
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G011 [PENDING_ACCEPTANCE] Inbox unread count and active folder styling
+- [ ] G012 [PENDING_ACCEPTANCE] Starred, Snoozed, Sent, Drafts with draft count
+- [ ] G013 [PENDING_ACCEPTANCE] Expandable Categories: Social, Updates, Forums, Promotions
+- [ ] G014 [PENDING_ACCEPTANCE] More/Less: Important, Scheduled, All Mail, Spam, Trash
+- [ ] G015 [PENDING_ACCEPTANCE] Collapsed sidebar icons/tooltips and expanded sidebar labels
+- [ ] G016 [PENDING_ACCEPTANCE] Keyboard navigation: arrows, Home, End, Enter/Space
+- [ ] G017 [PENDING_ACCEPTANCE] Custom label tree, nesting, unread counts, expand/collapse
+- [ ] G018 [PENDING_ACCEPTANCE] Hidden labels More/Less affordance
+- [ ] G019 [PENDING_ACCEPTANCE] Create label with parent selector and duplicate/empty-name validation
+- [ ] G020 [PENDING_ACCEPTANCE] Edit/rename label and change parent
+- [ ] G021 [PENDING_ACCEPTANCE] Delete label plus descendants confirmation without deleting messages
+- [ ] G022 [PENDING_ACCEPTANCE] Drag mail onto labels/folders
+- [ ] G023 [PENDING_ACCEPTANCE] Label context menu, viewport placement, nested color submenu
+- [ ] G024 [PENDING_ACCEPTANCE] Standard label foreground/background combinations
+- [ ] G025 [PENDING_ACCEPTANCE] Custom foreground/background picker with keyboard grid and preview
+- [ ] G026 [PENDING_ACCEPTANCE] Remove label color
+- [ ] G027 [PENDING_ACCEPTANCE] Label-list visibility: show, hide, show-if-unread
+- [ ] G028 [PENDING_ACCEPTANCE] Message-list label visibility: show/hide
+- [ ] G029 [PENDING_ACCEPTANCE] Manage labels entry point
+
+### Mailbox rows and selection
+Source: gmail/src/MailList.tsx; mail-list.css; App.tsx
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G030 [PENDING_ACCEPTANCE] 40px desktop scanline, sender column, inline labels+subject+preview, right-aligned date
+- [ ] G031 [PENDING_ACCEPTANCE] Density default/comfortable/compact including 32px compact rows
+- [ ] G032 [PENDING_ACCEPTANCE] Read/unread emphasis with inherited MailFlow palette
+- [ ] G033 [PENDING_ACCEPTANCE] Always-visible checkbox and star controls
+- [ ] G034 [PENDING_ACCEPTANCE] Single selection, multi-selection and Shift-checkbox range selection
+- [ ] G035 [PENDING_ACCEPTANCE] Context-click selects the targeted conversation
+- [ ] G036 [PENDING_ACCEPTANCE] Grid accessibility, row labels, focused row and keyboard activation
+- [ ] G037 [PENDING_ACCEPTANCE] Hover archive/delete/read-unread/snooze quick actions
+- [ ] G038 [PENDING_ACCEPTANCE] Keyboard focus reveals same quick actions as hover
+- [ ] G039 [PENDING_ACCEPTANCE] Thread count and draft indicators
+- [ ] G040 [PENDING_ACCEPTANCE] Inline label chips and removable/colored labels
+- [ ] G041 [PENDING_ACCEPTANCE] Attachment chips, attachment preview and download
+- [ ] G042 [PENDING_ACCEPTANCE] Unsubscribe row affordance
+- [ ] G043 [PENDING_ACCEPTANCE] Empty states specialized for search/starred/snoozed/spam/trash/drafts
+- [ ] G044 [PENDING_ACCEPTANCE] Pagination, stable selection across navigation and list scroll restoration
+- [ ] G045 [PENDING_ACCEPTANCE] Mailbox footer: storage, activity details, policy links (source is mock values)
+
+### Toolbar and menus
+Source: gmail/src/Toolbar.tsx; MailMenus.tsx; App.tsx
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G046 [PENDING_ACCEPTANCE] Persistent select-all checkbox and partial-selection state
+- [ ] G047 [PENDING_ACCEPTANCE] Selection dropdown: All / None / Read / Unread / Starred / Unstarred
+- [ ] G048 [PENDING_ACCEPTANCE] Refresh and More controls when nothing selected
+- [ ] G049 [PENDING_ACCEPTANCE] Selection-aware Archive / Report spam / Delete
+- [ ] G050 [PENDING_ACCEPTANCE] Selection-aware Mark read/unread / Snooze / Add to Tasks
+- [ ] G051 [PENDING_ACCEPTANCE] Move-to dropdown with destination search and folders/categories/labels
+- [ ] G052 [PENDING_ACCEPTANCE] Label-as dropdown with search, mixed states, staged add/remove and Apply
+- [ ] G053 [PENDING_ACCEPTANCE] Create-new and Manage-labels from move/label menus
+- [ ] G054 [PENDING_ACCEPTANCE] More menu: mark read/unread, star/unstar, important/unimportant
+- [ ] G055 [PENDING_ACCEPTANCE] More menu: mute, filter messages like these, forward as attachment
+- [ ] G056 [PENDING_ACCEPTANCE] Right-click: reply/reply-all/forward/forward-as-attachment
+- [ ] G057 [PENDING_ACCEPTANCE] Right-click: archive/delete/read-unread/snooze/tasks/move/labels/mute
+- [ ] G058 [PENDING_ACCEPTANCE] Right-click: find sender mail and open in new window
+- [ ] G059 [PENDING_ACCEPTANCE] Snooze presets: later today, tomorrow, weekend, next week
+- [ ] G060 [PENDING_ACCEPTANCE] Snooze custom calendar: previous/next month, date/time, future validation
+- [ ] G061 [PENDING_ACCEPTANCE] Unsnooze action and return to appropriate view
+- [ ] G062 [PENDING_ACCEPTANCE] Range count, Newer/Older pagination and Newest/Oldest menu
+- [ ] G063 [PENDING_ACCEPTANCE] Arrow-key menu navigation, nested submenu arrow keys, Escape and focus return
+- [ ] G064 [PENDING_ACCEPTANCE] Viewport clamping, scroll dismissal and outside-click dismissal
+- [ ] G065 [PENDING_ACCEPTANCE] Trash permanent deletion confirmation
+- [ ] G066 [PENDING_ACCEPTANCE] Undo toast restores data and closes/dismisses appropriately
+
+### Search and filtering
+Source: gmail/src/Search.tsx; NEWSearchFilters.tsx; search.ts; FilterDialog.tsx
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G067 [PENDING_ACCEPTANCE] Search combobox suggestions and keyboard selection
+- [ ] G068 [PENDING_ACCEPTANCE] Recent search history, reuse and remove entries
+- [ ] G069 [PENDING_ACCEPTANCE] Enter-to-search, clear and advanced options affordance
+- [ ] G070 [PENDING_ACCEPTANCE] Advanced From / To / Subject / Has words / Does not have fields
+- [ ] G071 [PENDING_ACCEPTANCE] Advanced size comparison, amount and units
+- [ ] G072 [PENDING_ACCEPTANCE] Advanced date-within selector and keyboard calendar
+- [ ] G073 [PENDING_ACCEPTANCE] Advanced folder/label selector and has-attachment checkbox
+- [ ] G074 [PENDING_ACCEPTANCE] Query-to-fields and fields-to-query roundtrip without dropping operators
+- [ ] G075 [PENDING_ACCEPTANCE] Search results Mail / Conversations / Spaces tabs
+- [ ] G076 [PENDING_ACCEPTANCE] Any-time refinement: day/week/month/year
+- [ ] G077 [PENDING_ACCEPTANCE] Has-attachment refinement toggle
+- [ ] G078 [PENDING_ACCEPTANCE] To refinement contact autocomplete, clear/apply
+- [ ] G079 [PENDING_ACCEPTANCE] Advanced-search link from search/sent/drafts refinements
+- [ ] G080 [PENDING_ACCEPTANCE] Most relevant / most recent sorting menu
+- [ ] G081 [PENDING_ACCEPTANCE] Sender/recipient contact banner and compose-from-address
+- [ ] G082 [PENDING_ACCEPTANCE] Create filter from search, return to search criteria
+- [ ] G083 [PENDING_ACCEPTANCE] Filter actions archive/read/star/label/delete/never-spam/important/not-important/category
+- [ ] G084 [PENDING_ACCEPTANCE] Filter action validation and mutual exclusion for importance
+- [ ] G085 [PENDING_ACCEPTANCE] Apply newly created filter to existing matching conversations
+- [ ] G086 [PENDING_ACCEPTANCE] Persist, edit and delete saved filters
+- [ ] G087 [PENDING_ACCEPTANCE] Filter sender directly from message/context menu
+- [ ] G088 [PENDING_ACCEPTANCE] Search grammar: quoted/grouped terms, OR, negation, sender/recipient/subject
+- [ ] G089 [PENDING_ACCEPTANCE] Search grammar: folders/labels/categories, read/star/important/attachment flags
+- [ ] G090 [PENDING_ACCEPTANCE] Search grammar: dates/relative dates, sizes and attachment names
+- [ ] G091 [PENDING_ACCEPTANCE] Disabled forwarding filter + explanatory notice (source limitation)
+
+### Conversation reader
+Source: gmail/src/MessageView.tsx; message.css; message-fidelity.css
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G092 [PENDING_ACCEPTANCE] Full-width conversation view with back and previous/next
+- [ ] G093 [PENDING_ACCEPTANCE] Conversation subject, labels, remove Inbox, external marker
+- [ ] G094 [PENDING_ACCEPTANCE] Print all and open conversation in new window
+- [ ] G095 [PENDING_ACCEPTANCE] Multiple messages in chronological conversation, collapse/expand individual messages
+- [ ] G096 [PENDING_ACCEPTANCE] Expand/collapse all conversations controls
+- [ ] G097 [PENDING_ACCEPTANCE] Sender avatar, time and relative/full-date display
+- [ ] G098 [PENDING_ACCEPTANCE] Sender details popover: From/To/Cc/Bcc/date/subject/mailed-by/signed-by/security
+- [ ] G099 [PENDING_ACCEPTANCE] Per-message reply and More menu
+- [ ] G100 [PENDING_ACCEPTANCE] Per-message reply-all/forward/print/delete/filter sender/show original actions
+- [ ] G101 [PENDING_ACCEPTANCE] Original HTML rendering isolation and plain text formatting
+- [ ] G102 [PENDING_ACCEPTANCE] Quoted content reveal/collapse
+- [ ] G103 [PENDING_ACCEPTANCE] Attachment cards: preview, download, download-all, image/document/calendar variants
+- [ ] G104 [PENDING_ACCEPTANCE] Attachment image/document modal close and keyboard behavior
+- [ ] G105 [PENDING_ACCEPTANCE] Inline reply/reply-all/forward mode switch
+- [ ] G106 [PENDING_ACCEPTANCE] Inline recipient editing plus Cc/Bcc
+- [ ] G107 [PENDING_ACCEPTANCE] Inline rich-text reply body and formatting toolbar
+- [ ] G108 [PENDING_ACCEPTANCE] Inline attachments/photos/links/emoji/signature/labels
+- [ ] G109 [PENDING_ACCEPTANCE] Reply dock state and expand/collapse
+- [ ] G110 [PENDING_ACCEPTANCE] Pop inline reply into compose window, edit subject and preserve draft
+- [ ] G111 [PENDING_ACCEPTANCE] Inline reply send, schedule-send, discard and validation
+- [ ] G112 [PENDING_ACCEPTANCE] Inline draft save/restore and interrupted-navigation behavior
+- [ ] G113 [PENDING_ACCEPTANCE] Confidential reply controls and removal (source local simulation)
+- [ ] G114 [PENDING_ACCEPTANCE] Emoji reaction affordance with explanatory unavailable state
+
+### Composer and recipient editor
+Source: gmail/src/Composer.tsx; RecipientField.tsx; RichTextEditor.tsx; composer-fidelity.css
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G115 [PENDING_ACCEPTANCE] Docked compose geometry, titlebar and preserve size while dragging
+- [ ] G116 [PENDING_ACCEPTANCE] Minimize/restore, fullscreen toggle, default fullscreen preference
+- [ ] G117 [PENDING_ACCEPTANCE] Save-and-close, discard confirmation, draft reopen
+- [ ] G118 [PENDING_ACCEPTANCE] To / Cc / Bcc fields and subject
+- [ ] G119 [PENDING_ACCEPTANCE] Recipient token creation on delimiters/paste/blur, validation and removal
+- [ ] G120 [PENDING_ACCEPTANCE] Recipient contact autocomplete keyboard navigation and selection
+- [ ] G121 [PENDING_ACCEPTANCE] Contact-picker modal, search, groups, select all, clear selection
+- [ ] G122 [PENDING_ACCEPTANCE] Recipient chip popover/editing and multiple recipient behavior
+- [ ] G123 [PENDING_ACCEPTANCE] Editor paragraphs, selection, keyboard commands and rich clipboard paste
+- [ ] G124 [PENDING_ACCEPTANCE] Send validation for recipients/subject/body; send confirmation flows
+- [ ] G125 [PENDING_ACCEPTANCE] Send keyboard shortcut and split send/schedule dropdown
+- [ ] G126 [PENDING_ACCEPTANCE] Schedule presets and custom future date/time picker
+- [ ] G127 [PENDING_ACCEPTANCE] File attachments, remove attachment, drag/drop and upload
+- [ ] G128 [PENDING_ACCEPTANCE] Insert photo: source tabs, upload, URL, inline/attachment insertion
+- [ ] G129 [PENDING_ACCEPTANCE] Drive picker: search, file-type filter, grid/list, selection, clear/insert (source mock)
+- [ ] G130 [PENDING_ACCEPTANCE] Insert/edit link: anchor text, URL, validation, apply/remove
+- [ ] G131 [PENDING_ACCEPTANCE] Emoji picker categories, search, recent use and keyboard behavior
+- [ ] G132 [PENDING_ACCEPTANCE] Signature select/no signature, manage signatures and insertion
+- [ ] G133 [PENDING_ACCEPTANCE] Composer labels menu with search and applied-state management
+- [ ] G134 [PENDING_ACCEPTANCE] More: plain text, print, spell check, default fullscreen
+- [ ] G135 [PENDING_ACCEPTANCE] Mail merge toggle and spreadsheet-import affordance (source local simulation)
+- [ ] G136 [PENDING_ACCEPTANCE] Confidential mode: expiration, passcode choice, save/remove (source local simulation)
+- [ ] G137 [PENDING_ACCEPTANCE] Layout template picker, insert layout and default styling/color (source local simulation)
+- [ ] G138 [PENDING_ACCEPTANCE] Unsaved draft interruptions, repeated send protection and error/undo state
+
+### Formatting toolbar
+Source: gmail/src/FormattingToolbar.tsx; RichTextEditor.tsx; editor.css
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G139 [PENDING_ACCEPTANCE] Font-family menu and active font detection
+- [ ] G140 [PENDING_ACCEPTANCE] Font-size menu and active size detection
+- [ ] G141 [PENDING_ACCEPTANCE] Bold / Italic / Underline
+- [ ] G142 [PENDING_ACCEPTANCE] Foreground and highlight color palette plus reset
+- [ ] G143 [PENDING_ACCEPTANCE] Left / center / right alignment
+- [ ] G144 [PENDING_ACCEPTANCE] Numbered and bulleted lists
+- [ ] G145 [PENDING_ACCEPTANCE] Indent less/more and block quote
+- [ ] G146 [PENDING_ACCEPTANCE] Strikethrough and remove formatting
+- [ ] G147 [PENDING_ACCEPTANCE] Undo/redo availability
+- [ ] G148 [PENDING_ACCEPTANCE] Overflow More formatting controls
+- [ ] G149 [PENDING_ACCEPTANCE] Selection preserved while opening/using popovers
+- [ ] G150 [PENDING_ACCEPTANCE] Keyboard navigation, Escape dismissal and focus restoration
+
+### Quick settings and full settings
+Source: gmail/src/App.tsx; SettingsView.tsx; settings-fidelity.css
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G151 [PENDING_ACCEPTANCE] Quick settings right drawer, close and See all settings
+- [ ] G152 [PENDING_ACCEPTANCE] Density radio controls, selected state and persistence
+- [ ] G153 [PENDING_ACCEPTANCE] Page size 10/25/50/100 and reset to first page
+- [ ] G154 [PENDING_ACCEPTANCE] Keyboard-shortcut help from quick settings
+- [ ] G155 [PENDING_ACCEPTANCE] Saved filters list and delete in quick settings
+- [ ] G156 [PENDING_ACCEPTANCE] General / Labels / Filters and Blocked Addresses page tabs
+- [ ] G157 [PENDING_ACCEPTANCE] Disabled tabs for unsupported reference areas remain honestly disabled
+- [ ] G158 [PENDING_ACCEPTANCE] General: important-mail/off notification preference
+- [ ] G159 [PENDING_ACCEPTANCE] General: star presets 1/4/all, drag/click in-use and unused stars
+- [ ] G160 [PENDING_ACCEPTANCE] General: keyboard shortcuts on/off
+- [ ] G161 [PENDING_ACCEPTANCE] General: icon/text button labels preference
+- [ ] G162 [PENDING_ACCEPTANCE] General: profile picture/about-me notice
+- [ ] G163 [PENDING_ACCEPTANCE] General: auto-create contacts preference
+- [ ] G164 [PENDING_ACCEPTANCE] Signature manager: create/rename/delete validation
+- [ ] G165 [PENDING_ACCEPTANCE] Signature rich-text editor and formatting
+- [ ] G166 [PENDING_ACCEPTANCE] Default signature selection and compose integration
+- [ ] G167 [PENDING_ACCEPTANCE] Personal level indicators preference
+- [ ] G168 [PENDING_ACCEPTANCE] Show/hide snippets preference
+- [ ] G169 [PENDING_ACCEPTANCE] Vacation responder on/off, dates, subject, plain/rich body (source local settings)
+- [ ] G170 [PENDING_ACCEPTANCE] Save Changes/Cancel and dirty-state behavior
+- [ ] G171 [PENDING_ACCEPTANCE] System label visibility and show-in-IMAP toggles (source local settings)
+- [ ] G172 [PENDING_ACCEPTANCE] Category label-list/message-list visibility
+- [ ] G173 [PENDING_ACCEPTANCE] Custom label tree/counts, visibility, edit/remove/create
+- [ ] G174 [PENDING_ACCEPTANCE] Filter list with criteria/actions, edit/delete/create and back-to-mail
+- [ ] G175 [PENDING_ACCEPTANCE] Setting notices and dismiss controls
+
+### Help and feedback
+Source: gmail/src/SupportView.tsx; Header.tsx; support-fidelity.css
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G176 [PENDING_ACCEPTANCE] Help drawer open/close/back, article list and search
+- [ ] G177 [PENDING_ACCEPTANCE] Help resource/community/forum placeholder navigation
+- [ ] G178 [PENDING_ACCEPTANCE] Feedback issue/idea choice
+- [ ] G179 [PENDING_ACCEPTANCE] Required issue category and description validation
+- [ ] G180 [PENDING_ACCEPTANCE] Review step, back navigation and form retention
+- [ ] G181 [PENDING_ACCEPTANCE] Screenshot toggle with explicitly blank local preview
+- [ ] G182 [PENDING_ACCEPTANCE] Email-updates choice
+- [ ] G183 [PENDING_ACCEPTANCE] Local feedback save confirmation without third-party send
+- [ ] G184 [PENDING_ACCEPTANCE] Legal/privacy/account-info explanatory notices
+- [ ] G185 [PENDING_ACCEPTANCE] Modal focus trapping, Escape and restore previous focus
+
+### Global state, navigation and integration
+Source: gmail/src/App.tsx; mailbox.ts; search.ts; tests/browser.js
+Individual acceptance remains open pending final integration and browser validation.
+
+- [ ] G186 [PENDING_ACCEPTANCE] Persist mailbox preferences without resetting selected MailFlow color theme
+- [ ] G187 [PENDING_ACCEPTANCE] Opt-in layout selection, legacy default unchanged, switch out cleanly
+- [ ] G188 [PENDING_ACCEPTANCE] URL navigation, Back/Forward, direct thread/draft links
+- [ ] G189 [PENDING_ACCEPTANCE] Context-sensitive keyboard shortcuts with typing/modal suppression
+- [ ] G190 [PENDING_ACCEPTANCE] G then I sequence; C, /, ?, U, E, #, !, Shift-I/U, R/A/F, S, X, J/K
+- [ ] G191 [PENDING_ACCEPTANCE] Next/previous navigation and focused-row scroll-into-view
+- [ ] G192 [PENDING_ACCEPTANCE] Search/folder selection clears incompatible selected state
+- [ ] G193 [PENDING_ACCEPTANCE] Real MailFlow account/folder/message identities instead of reference synthetic state
+- [ ] G194 [PENDING_ACCEPTANCE] Real API contracts for read/star/archive/move/delete/labels/snooze/send/schedule
+- [ ] G195 [PENDING_ACCEPTANCE] Loading, empty, network-error and retry behavior
+- [ ] G196 [PENDING_ACCEPTANCE] Safe draft persistence and no duplicate sends
+- [ ] G197 [PENDING_ACCEPTANCE] GTD Klinger sidebar coexistence, collapse/resize, states and actions
+- [ ] G198 [PENDING_ACCEPTANCE] GTD deep links preserve correct mailbox message identity
+- [ ] G199 [PENDING_ACCEPTANCE] GTD shortcuts/context menu and hover cleanup
+- [ ] G200 [PENDING_ACCEPTANCE] Desktop widths with both sidebars open and collapsed
+- [ ] G201 [PENDING_ACCEPTANCE] Mobile 390px, tablet 768/1024px, long text and large font
+- [ ] G202 [PENDING_ACCEPTANCE] Reduced motion, forced colors, keyboard-only and screen reader semantics
+- [ ] G203 [PENDING_ACCEPTANCE] No false success for unavailable Google services or demo-only operations
+
+## Reference limits, not production promises
+
+The reference is explicitly a synthetic local mailbox, not Gmail or Google backend access. Its SettingsView disables Inbox, Accounts, Forwarding/POP/IMAP, Add-ons, Chat and Meet, Advanced, Offline and Themes tabs. Filters forwarding is disabled. Feedback is saved locally, screenshots are blank demo previews, and several Drive/confidential/mail-merge/layout/template and account interactions are simulations/notices. Matching the reference requires faithful UI and honest behavior, not claiming unavailable service integration.

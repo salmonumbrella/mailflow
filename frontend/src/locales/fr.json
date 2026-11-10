@@ -571,6 +571,10 @@
       "list": {
         "label": "Liste d'abord",
         "description": "Liste en pleine largeur ; un message s'ouvre seul"
+      },
+      "gmail": {
+        "label": "Gmail",
+        "description": "Interface inspirée de Gmail avec boîte de réception en pleine largeur et lecture sans distraction"
       }
     },
     "snoozedUntil": "En attente jusqu'à {{when}}",
@@ -2238,6 +2242,12 @@
       "delegated": "Délégué",
       "someday": "Un jour",
       "reference": "Référence"
+    },
+    "gmail": {
+      "action": "Action / réponse requise",
+      "awaiting": "En attente de réponse",
+      "reference": "Références / événements",
+      "bounded": "{{available}} derniers sur {{total}}. Les anciens messages sont dans le dossier du libellé."
     }
   },
   "window": {

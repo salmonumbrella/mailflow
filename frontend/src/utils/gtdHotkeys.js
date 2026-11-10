@@ -1,4 +1,5 @@
-import { buildGtdDisplaySections, resolveRowDisplay } from './gtd.js';
+import { resolveRowDisplay } from './gtd.js';
+import { buildGtdActionSections } from './gmailGtd.js';
 
 let lastRailSelection = null;
 const pendingClassifications = new Set();
@@ -28,7 +29,7 @@ export function getGtdRailSelection() {
 export function resolveGtdHotkeyTarget(state, railSelection = lastRailSelection) {
   const id = state?.selectedMessageId;
   if (id == null || !state.enabledPlugins?.includes('gtd')) return null;
-  const sections = buildGtdDisplaySections(state.gtdSections);
+  const sections = buildGtdActionSections(state.gtdSections);
   const selectedCopy = Object.values(state.threadMessages || {}).flat().find(message => message.id === id);
   const sectionFor = key => sections.find(section => section.key === key);
   const fromSection = key => {

@@ -585,6 +585,10 @@
       "list": {
         "label": "Najpierw lista",
         "description": "Lista na całą szerokość; wiadomość otwiera się osobno"
+      },
+      "gmail": {
+        "label": "Gmail",
+        "description": "Interfejs inspirowany Gmailem ze skrzynką na całą szerokość i widokiem do czytania bez rozpraszania"
       }
     },
     "snoozedUntil": "Odłożone do {{when}}",
@@ -2257,7 +2261,13 @@
       "someday": "Kiedyś",
       "reference": "Materiały"
     },
-    "undoFailed": "Nie udało się cofnąć etykiety"
+    "undoFailed": "Nie udało się cofnąć etykiety",
+    "gmail": {
+      "action": "Wymaga działania / odpowiedzi",
+      "awaiting": "Oczekiwanie na odpowiedź",
+      "reference": "Materiały / wydarzenia",
+      "bounded": "Najnowsze {{available}} z {{total}}. Starsze wiadomości są w folderze etykiety."
+    }
   },
   "window": {
     "minimize": "Minimalizuj",

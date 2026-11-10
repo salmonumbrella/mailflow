@@ -571,6 +571,10 @@
       "list": {
         "label": "Lista primeiro",
         "description": "Lista em largura total; a mensagem abre sozinha"
+      },
+      "gmail": {
+        "label": "Gmail",
+        "description": "Interface inspirada no Gmail com caixa de entrada em largura total e leitura sem distrações"
       }
     },
     "snoozedUntil": "Adiado até {{when}}",
@@ -2238,6 +2242,12 @@
       "delegated": "Delegada",
       "someday": "Algum dia",
       "reference": "Referência"
+    },
+    "gmail": {
+      "action": "Requer ação / resposta",
+      "awaiting": "Aguardando resposta",
+      "reference": "Referências / eventos",
+      "bounded": "Últimas {{available}} de {{total}}. As anteriores estão na pasta do marcador."
     }
   },
   "window": {

@@ -20,15 +20,15 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('stop-word body search 
     await database.connect();
     await database.query(`
       CREATE TEMP TABLE email_accounts (id text, user_id text, enabled boolean,
-        include_in_unified_inbox boolean, name text, email_address text, color text);
+        include_in_unified_inbox boolean, name text, email_address text, color text, folder_mappings jsonb DEFAULT '{}');
       CREATE TEMP TABLE folders (account_id text, path text, special_use text, name text);
       CREATE TEMP TABLE messages (id text, account_id text DEFAULT 'main', folder text DEFAULT 'INBOX',
         uid bigint, message_id text, subject text DEFAULT 'Status', from_name text DEFAULT 'Sender',
         from_email text DEFAULT 'sender@example.test', to_addresses jsonb, cc_addresses jsonb, reply_to jsonb, delivery_addresses jsonb, thread_id text,
         in_reply_to text, thread_references text, date timestamptz DEFAULT now(), snippet text,
         is_read boolean, is_starred boolean, has_attachments boolean, is_deleted boolean DEFAULT false,
-        search_vector tsvector, body_text text);
-      INSERT INTO email_accounts VALUES
+        search_vector tsvector, body_text text, category text, attachments jsonb DEFAULT '[]');
+      INSERT INTO email_accounts (id, user_id, enabled, include_in_unified_inbox, name, email_address, color) VALUES
         ('main','owner',true,true,'Primary','owner@example.test',NULL),
         ('other','stranger',true,true,'Other','other@example.test',NULL),
         ('excluded','owner',true,false,'Excluded','excluded@example.test',NULL),
@@ -123,4 +123,35 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('stop-word body search 
       expect(result.rows[0].negative).toBe(!present);
     }
   });
+  it('evaluates Boolean groups, excludes foreign accounts, and keeps folder branches local', async () => {
+    expect(await search('nebula OR (Orion -we)')).toEqual(['unrelated', 'vector']);
+    expect(await search('{nebula "How are we doing"}')).toEqual(['body', 'split', 'vector']);
+    expect(await search('(in:trash Orion) OR (in:inbox nebula)')).toEqual(['trash', 'vector']);
+    expect(await search('in:anywhere "How are we doing"')).toEqual(['body', 'split', 'trash']);
+    expect(await search('-(Orion OR nebula)')).toEqual(['empty', 'null', 'punctuation', 'substring']);
+  });
+
+  it('searches actual attachment filenames and native categories without wildcard expansion', async () => {
+    await database.query("UPDATE messages SET category = 'newsletter', attachments = $1 WHERE id = 'body'", [JSON.stringify([{ filename: 'report_100%.pdf' }])]);
+    try {
+      expect(await search('category:newsletter filename:"report_100%.pdf"')).toEqual(['body']);
+      expect(await search('filename:"report_100X.pdf"')).toEqual([]);
+      expect(await search('category:primary nebula')).toEqual(['vector']);
+    } finally { await database.query("UPDATE messages SET category = NULL, attachments = '[]' WHERE id = 'body'"); }
+  });
+
+  it('finds provider/localized special-use folders and user mappings without widening literal paths', async () => {
+    await database.query("INSERT INTO folders VALUES ('main','[Gmail]/Sent Mail',$1,'Sent Mail'), ('main','Benutzer/Ablage',NULL,'Ablage')", ['\\Sent']);
+    await database.query("INSERT INTO messages(id,folder) VALUES ('sent-role','[Gmail]/Sent Mail'), ('sent-mapped','Benutzer/Ablage')");
+    await database.query("UPDATE email_accounts SET folder_mappings = $1 WHERE id = 'main'", [JSON.stringify({ sent: 'Benutzer/Ablage' })]);
+    try {
+      expect(await search('in:sent')).toEqual(['sent-mapped', 'sent-role']);
+      expect(await search('in:"[Gmail]/Sent Mail"')).toEqual(['sent-role']);
+    } finally {
+      await database.query("DELETE FROM messages WHERE id IN ('sent-role','sent-mapped')");
+      await database.query("DELETE FROM folders WHERE path IN ('[Gmail]/Sent Mail','Benutzer/Ablage')");
+      await database.query("UPDATE email_accounts SET folder_mappings = '{}' WHERE id = 'main'");
+    }
+  });
+
 });

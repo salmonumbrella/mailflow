@@ -11,7 +11,7 @@ import { registerHoveredGtdRow } from '../utils/gtdHoveredRow.js';
 // inbox message list (GtdTabList, variant="list"). `variant` is passed straight through
 // to GtdEntryRow to pick its size table; every action here stays section-scoped via
 // doneStates so "done"/"move"/"delete" only touch the section the row belongs to.
-export default function GtdTriageRow({ thread, sectionKey, variant, selected, onOpen, rowActions, hoverQuickActions = true, t }) {
+export default function GtdTriageRow({ thread, sectionKey, variant, selected, onOpen, rowActions, hoverQuickActions = true, compact = false, t }) {
   const isWaiting = sectionKey === 'waiting';
   // The label states this row's "done" strips: a Waiting row clears its own kinds
   // (leaving GTD labels in other sections alone); other sections clear their own state.
@@ -35,6 +35,7 @@ export default function GtdTriageRow({ thread, sectionKey, variant, selected, on
       thread={thread}
       sectionKey={sectionKey}
       variant={variant}
+      compact={compact}
       selected={selected}
       t={t}
       onClick={() => { rememberGtdRailSelection(thread, sectionKey); onOpen(); }}

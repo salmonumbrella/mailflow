@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { buildSearchConditions } from '../services/searchConditions.js';
+import { SearchQueryError } from '../services/searchExpression.js';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
@@ -35,42 +37,9 @@ function searchLimiter(req, res, next) {
   next();
 }
 
-// Parses a raw search string into structured operator filters and free-text
-// terms. Supports from: to: subject: has: is: after: before: in:, quoted values
-// (from:"John Smith"), and a leading '-' that negates either an operator
-// (-from:smith) or a bare word (-invoice). Filters are a list (not a map) so
-// repeated/negated operators like `from:a -from:b` are all preserved.
-export function parseSearchQuery(raw) {
-  const filters = [];
-  const terms = [];
-
-  // The leading (-?) captures optional negation. \b sits between an optional '-'
-  // and the operator name, so both `from:` and `-from:` match.
-  const opPattern = /(-?)\b(from|to|subject|has|is|after|before|in):("([^"]*)"|([\S]+))/gi;
-  const remaining = raw.replace(opPattern, (_, neg, key, _v, quoted, unquoted) => {
-    const k = key.toLowerCase();
-    const v = (quoted !== undefined ? quoted : (unquoted || '')).toLowerCase().trim();
-    if (v) filters.push({ key: k, value: v, negate: neg === '-' });
-    return ' ';
-  }).trim();
-
-  for (const word of remaining.split(/\s+/)) {
-    let w = word.trim();
-    if (!w || w === '-') continue; // skip blanks and a lone '-' (nothing to negate)
-    let negate = false;
-    if (w[0] === '-' && w.length > 1) { negate = true; w = w.slice(1); }
-    terms.push({ value: w, negate });
-  }
-
-  return { filters, terms };
-}
-
-// Wraps a positive condition so that when negated it also matches rows where the
-// underlying columns are NULL (COALESCE(..., false) treats NULL as "not a match",
-// which NOT then flips to a match — the intuitive meaning of exclusion).
-function negateCond(sql) {
-  return `NOT COALESCE((${sql}), false)`;
-}
+// Keep the flat-token helper for existing callers. Requests use the bounded
+// Boolean expression parser/compiler in searchConditions.js.
+export { parseSearchQuery } from '../services/searchQuery.js';
 
 export function resolveSearchFolderScope(filters, folderParam = '') {
   let folderScope;
@@ -106,28 +75,7 @@ export function trashFolderExclusionCondition() {
       )`;
 }
 
-// Postgres refuses to build a tsvector larger than ~1MB of packed lexemes
-// (SQLSTATE 54000), so an oversized body would 500 the whole search. Cap the
-// text fed to to_tsvector at 600k chars — matching msgvault's maxFTSBodyChars
-// (internal/store/dialect_pg.go) — so one huge email can't crash the query.
-// Exported because slice 02's search_fts trigger caps the same way.
-export const FTS_BODY_CHAR_CAP = 600000;
-
-// Builds the per-term free-text OR-condition: a term matches if it appears in
-// the sender, the subject, the stored search_vector, or the length-capped body.
-// Extracted so the body cap is a single, testable source of truth.
-export function freeTextTermCondition(likeIdx, ftsIdx) {
-  return `(
-        m.from_name ILIKE $${likeIdx}
-        OR m.from_email ILIKE $${likeIdx}
-        OR m.subject ILIKE $${likeIdx}
-        OR m.search_vector @@ plainto_tsquery('english', $${ftsIdx})
-        OR CASE WHEN numnode(plainto_tsquery('english', $${ftsIdx})) > 0
-          THEN to_tsvector('english', LEFT(coalesce(m.body_text,''), ${FTS_BODY_CHAR_CAP})) @@ plainto_tsquery('english', $${ftsIdx})
-          ELSE to_tsvector('simple', LEFT(coalesce(m.body_text,''), ${FTS_BODY_CHAR_CAP})) @@ plainto_tsquery('simple', $${ftsIdx})
-        END
-      )`;
-}
+export { freeTextTermCondition, FTS_BODY_CHAR_CAP } from '../services/searchConditions.js';
 
 router.get('/', searchLimiter, async (req, res) => {
   const { q, accountId, limit = 50, offset = 0 } = req.query;
@@ -143,101 +91,18 @@ router.get('/', searchLimiter, async (req, res) => {
   if (!targetIds.length) return res.json({ messages: [] });
 
   const cap = Math.max(1, Math.min(parseInt(limit) || 50, 200));
-  const { filters, terms } = parseSearchQuery(trimmed);
-
-  const conditions = [];
-  const params = [targetIds];
-  let p = 2;
-
-  // Folder scope. `in:` in the query wins; otherwise the client-supplied `folder`
-  // param (the folder the user is currently viewing) applies. `undefined` means
-  // no in: operator was given, so we fall back to the param below.
-  //   folderScope === null   → search all folders
-  //   folderScope === string → restrict to that folder
-
-  // ── Operator filters ──────────────────────────────────────────────────────
-
-  for (const f of filters) {
-    // in: controls scope rather than adding a row condition; negation is
-    // meaningless here so it's ignored.
-    if (f.key === 'in') {
-      continue;
-    }
-
-    let cond = null;
-
-    if (f.key === 'from') {
-      params.push(`%${f.value}%`);
-      cond = `(m.from_email ILIKE $${p} OR m.from_name ILIKE $${p})`;
-      p++;
-    } else if (f.key === 'subject') {
-      params.push(`%${f.value}%`);
-      cond = `m.subject ILIKE $${p++}`;
-    } else if (f.key === 'to') {
-      // to: searches the to/cc address JSON — cast to text covers name and email
-      params.push(`%${f.value}%`);
-      cond = `(m.to_addresses::text ILIKE $${p} OR m.cc_addresses::text ILIKE $${p})`;
-      p++;
-    } else if (f.key === 'has') {
-      if (f.value === 'attachment' || f.value === 'attachments') cond = `m.has_attachments = true`;
-    } else if (f.key === 'is') {
-      if (f.value === 'unread')  cond = `m.is_read = false`;
-      else if (f.value === 'read')    cond = `m.is_read = true`;
-      else if (f.value === 'starred') cond = `m.is_starred = true`;
-    } else if (f.key === 'after') {
-      const d = new Date(f.value);
-      if (!isNaN(d)) { params.push(d.toISOString()); cond = `m.date >= $${p++}`; }
-    } else if (f.key === 'before') {
-      const d = new Date(f.value);
-      if (!isNaN(d)) { params.push(d.toISOString()); cond = `m.date < $${p++}`; }
-    }
-
-    if (cond) conditions.push(f.negate ? negateCond(cond) : cond);
+  let search;
+  try {
+    search = buildSearchConditions(trimmed, { folder: req.query.folder || '' });
+  } catch (err) {
+    if (err instanceof SearchQueryError) return res.status(400).json({ error: err.message });
+    throw err;
   }
-
-  // ── Free-text terms ───────────────────────────────────────────────────────
-  // Each term must match at least one of: from, subject (ILIKE — good for names
-  // and partial words), or body content (FTS — good for large text with stemming).
-  // AND between all terms: every word must appear somewhere in the email.
-  // A negated term (-word) must appear nowhere.
-
-  for (const term of terms.slice(0, 10)) {
-    if (term.value.length < 2) continue; // single-char terms are too broad and expensive
-    params.push(`%${term.value}%`); // ILIKE pattern
-    const likeIdx = p++;
-
-    params.push(term.value); // raw term for plainto_tsquery
-    const ftsIdx = p++;
-
-    const cond = freeTextTermCondition(likeIdx, ftsIdx);
-    conditions.push(term.negate ? negateCond(cond) : cond);
-  }
-
-  // Require at least one real search condition before applying folder scope, so a
-  // bare `in:inbox` (or a lone folder param) never dumps an entire folder.
+  const conditions = search.conditions;
   if (!conditions.length) return res.json({ messages: [], query: q });
-
-  // Resolve folder scope: in: operator wins; otherwise use the param.
-  const { folderScope, folderFuzzy } = resolveSearchFolderScope(filters, req.query.folder || '');
-  if (folderScope) {
-    if (folderFuzzy) {
-      // in:<name> — case-insensitive match on a folder named exactly that, or a
-      // nested folder whose path ends in it (in:sent → "Sent" or "Personal/Sent").
-      // A multi-word leaf like "[Gmail]/Sent Mail" needs the quoted form in:"sent mail".
-      params.push(folderScope);
-      params.push(`%/${folderScope}`);
-      conditions.push(`(m.folder ILIKE $${p} OR m.folder ILIKE $${p + 1})`);
-      p += 2;
-    } else {
-      params.push(folderScope);
-      conditions.push(`m.folder = $${p++}`);
-    }
-  } else if (shouldExcludeTrashFromSearch(folderScope)) {
-    // Deleting moves mail into Trash, where it remains searchable by explicit
-    // folder queries like in:trash. Keep ordinary all-folder searches from
-    // resurfacing freshly-deleted messages after the optimistic UI guard expires.
-    conditions.push(trashFolderExclusionCondition());
-  }
+  if (search.excludeTrash) conditions.push(trashFolderExclusionCondition());
+  const params = [targetIds, ...search.params];
+  const p = params.length + 1;
 
   const off = Math.max(0, parseInt(offset) || 0);
   params.push(cap);

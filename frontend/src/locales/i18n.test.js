@@ -115,6 +115,7 @@ const dir = dirname(fileURLToPath(import.meta.url));
 // Two locales sharing a value is only allowed if both appear in the same group.
 // Any unlisted pair will still fail.
 const SAME_VALUE_ALLOWED = {
+  'messageList.layouts.gmail.label': 'any', // Gmail is a product name in every locale.
   // ── List sort menu (#528) ───────────────────────────────────────────────────
   'messageList.sortSummary':                'any', // "{{sort}}, {{dir}}": only the placeholders and a comma
   'messageList.sortDate':                   [['en', 'fr'], ['it', 'ptBR', 'pl'], ['cs', 'de']], // Date / Data / Datum
@@ -707,8 +708,8 @@ const HARDCODED_OK = new Set([
   // Tooltip label for a rich-text editor colour input — purely visual affordance,
   // identical concept in all languages
   'Emoji',
-  // "MailFlow" brand name split into two spans for typography styling
-  'Mail', 'Flow',
+  // MailFlow branding, rendered whole or split for typography styling.
+  'MailFlow', 'Mail', 'Flow',
   // Email header labels inside the handlePrint() HTML template literal —
   // translating them requires passing t() results into the template string
   'From:', 'Date:',

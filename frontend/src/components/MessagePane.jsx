@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
+import GmailReplyTarget from './GmailReplyTarget.jsx';
 import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
@@ -76,8 +77,9 @@ function linkifyText(text) {
   );
 }
 
-export default function MessagePane({ windowMessageId = null, onWindowClose = null } = {}) {
+export default function MessagePane({ windowMessageId = null, onWindowClose = null, onReplyDockTarget } = {}) {
   const { t } = useTranslation();
+  const gmailLayout = useStore(s => s.layout === 'gmail');
   const {
     messages, searchResults, searchQuery, selectedMessageId: globalSelectedId, setSelectedMessage,
     updateMessage, removeMessage, decrementUnread, incrementUnread, openCompose, accounts, addNotification,
@@ -1338,6 +1340,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   return (
     <div
       ref={paneRef}
+      className="mailflow-message-pane"
       style={{
         flex: 1, display: 'flex', flexDirection: 'column',
         overflow: 'hidden', background: 'var(--bg-primary)',
@@ -1415,7 +1418,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
           giving way down to TOUCH_MIN when a larger font size leaves the row too narrow.
           A labeled group of plain buttons, each its own Tab stop, rather than role="toolbar", which
           promises arrow-key movement between them that the pane has never had. */}
-      <div role="group" aria-label={t('shortcuts.groups.messageActions')} style={{
+      <div className="mailflow-message-toolbar" role="group" aria-label={t('shortcuts.groups.messageActions')} style={{
         padding: isMobile ? '0 8px' : '8px 16px', borderBottom: '1px solid var(--border-subtle)',
         display: 'flex', alignItems: 'center', gap: isMobile ? 0 : 6, flexShrink: 0,
         boxShadow: paneScrolled ? '0 1px 10px rgba(0,0,0,0.2)' : 'none',
@@ -1552,6 +1555,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       {/* Single scroll container — sender card + email body scroll together */}
       <div
         ref={scrollContainerRef}
+        className="mailflow-message-scroll"
         onScroll={e => setPaneScrolled(e.currentTarget.scrollTop > 4)}
         onContextMenu={handlePaneContextMenu}
         style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', background: 'var(--bg-primary)' }}
@@ -1559,7 +1563,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       <div style={{ padding: isMobile ? '12px 0 0' : '24px 28px 0' }}>
 
         {/* Sender card — subject lives here as the card header */}
-        <div className="msg-card" style={{
+        <div className="msg-card mailflow-message-header" style={{
           marginBottom: isMobile ? 12 : 24,
           marginLeft: isMobile ? 0 : undefined,
           marginRight: isMobile ? 0 : undefined,
@@ -1572,7 +1576,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
           boxShadow: isMobile ? 'none' : 'var(--shadow-soft), inset 0 1px 0 rgba(255,255,255,0.04)',
         }}>
           {/* Subject */}
-          <div style={{
+          <div className="mailflow-message-subject" style={{
             padding: '14px 16px 12px',
             borderBottom: '1px solid var(--border-subtle)',
             fontSize: 17, fontWeight: 600,
@@ -2005,6 +2009,13 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
           />
         </div>
       )}
+      {gmailLayout && <div className="mailflow-reader-replies">
+        <button type="button" onClick={() => handleReply(false)}>{t('message.reply')}</button>
+        <button type="button" onClick={() => handleReply(true)}>{t('message.replyAll')}</button>
+        <button type="button" onClick={handleForward}>{t('message.forward')}</button>
+      </div>}
+      {gmailLayout && !isMobile && !windowMode && <GmailReplyTarget onTarget={onReplyDockTarget}
+        messageId={message.id} messageMid={message.message_id} threadId={message.thread_id} accountId={message.account_id} />}
       </div>{/* end single scroll container */}
       </SwipePager>
 

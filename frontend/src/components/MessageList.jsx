@@ -1,4 +1,8 @@
+import GmailSelectionMenu from './GmailSelectionMenu.jsx';
 import { Fragment, useEffect, useLayoutEffect, useRef, useCallback, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
+import GmailSearch, { GmailSearchRefinements } from './GmailSearch.jsx';
+import { closeOpenMessage } from '../utils/closeMessage.js';
 import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
@@ -140,12 +144,37 @@ function SwipeBackground({ side, actionView, innerRef }) {
 // The center column: a mailbox's messages, or the Scheduled view (#543, design 5.2), whose rows are
 // not messages and which has a list of its own. It has no account selected, so its id cannot be a
 // folder's.
-export default function MessageList() {
+export default function MessageList({ gmailSearchTarget = null }) {
   const scheduledView = useStore(s => s.selectedAccountId === null && s.selectedFolder === SCHEDULED_VIEW);
-  return scheduledView ? <ScheduledList /> : <MailboxList />;
+  const focusMailboxSearch = useRef(false);
+  return scheduledView ? <>
+    <ScheduledList />
+    {gmailSearchTarget && createPortal(<ScheduledHeaderSearch onSearch={query => {
+      focusMailboxSearch.current = true;
+      useStore.getState().setSelectedAccount(null, 'INBOX');
+      useStore.getState().setSearchQuery(query);
+    }} />, gmailSearchTarget)}
+  </> : <MailboxList gmailSearchTarget={gmailSearchTarget} focusSearchOnMount={focusMailboxSearch.current} />;
 }
 
-function MailboxList() {
+function ScheduledHeaderSearch({ onSearch }) {
+  const { t } = useTranslation();
+  const gmailLayout = useStore(s => s.layout === 'gmail');
+  const searchRef = useRef(null);
+  const query = useStore(s => s.searchQuery);
+  useEffect(() => {
+    const focusSearch = () => searchRef.current?.focus();
+    shortcutBus.on('focusSearch', focusSearch);
+    return () => shortcutBus.off('focusSearch', focusSearch);
+  }, []);
+  if (gmailLayout) return <GmailSearch inputRef={searchRef} query={query} onChange={onSearch} />;
+  return <div className="mailflow-mail-search" style={{ position: 'relative' }}>
+    <input ref={searchRef} type="text" aria-label={t('messageList.search')} placeholder={t('messageList.search')}
+      value={query} onChange={event => onSearch(event.target.value)} />
+  </div>;
+}
+
+function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const { t } = useTranslation();
   const uiScale = useUiScale();
   const {
@@ -254,7 +283,10 @@ function MailboxList() {
   const [searchLoadingMore, setSearchLoadingMore] = useState(false);
   const searchFetchedOffsetRef = useRef(0);
   const listRef = useRef(null);
+  const gmailSearchOpeningRef = useRef(false);
+  useEffect(() => { gmailSearchOpeningRef.current = false; }, [selectedMessageId]);
   const searchInputRef = useRef(null); // for focusSearch shortcut
+  useLayoutEffect(() => { if (focusSearchOnMount) searchInputRef.current?.focus(); }, [focusSearchOnMount]);
   const pendingDeleteTimers = useRef(new Map()); // id/thread key -> pending delete metadata
   const recentMessageOpenUntilRef = useRef(0);
   const deferredRefreshTimerRef = useRef(null);
@@ -2806,8 +2838,113 @@ function MailboxList() {
   const bulkMoveFoldersEmpty = movePickerFoldersEmpty(bulkMoveSections, pickerFolders);
   const closeBulkPickerAfterAction = () => { setShowFolderPicker(false); clearSelection(); };
 
+  const gmailSearchChange = query => {
+    if (useStore.getState().selectedMessageId && !gmailSearchOpeningRef.current) {
+      gmailSearchOpeningRef.current = true;
+      closeOpenMessage();
+    }
+    setShowContacts(false);
+    setSearchQuery(query);
+  };
+  const desktopSearch = layout === 'gmail' ? <GmailSearch inputRef={searchInputRef} query={searchQuery} onChange={gmailSearchChange} /> : (
+        <div className="mailflow-mail-search" style={{ position: 'relative' }}>
+          <div style={{
+            position: 'absolute', left: 10, top: '50%',
+            transform: 'translateY(-50%)', color: 'var(--text-tertiary)',
+            pointerEvents: 'none',
+          }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </div>
+          <input
+            ref={searchInputRef}
+            type="text"
+            aria-label={t('messageList.search')}
+            placeholder={t('messageList.search')}
+            value={searchQuery}
+            onChange={e => {
+              if (gmailSearchTarget) {
+                if (useStore.getState().selectedMessageId && !gmailSearchOpeningRef.current) {
+                  gmailSearchOpeningRef.current = true;
+                  closeOpenMessage();
+                }
+                setShowContacts(false);
+              }
+              setSearchQuery(e.target.value);
+            }}
+            style={{
+              width: '100%', padding: '8px 10px 8px 32px',
+              background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
+              borderRadius: 8, color: 'var(--text-primary)', fontSize: 13,
+              outline: 'none', boxSizing: 'border-box',
+            }}
+            onFocus={e => { e.target.style.borderColor = 'var(--accent)'; setSearchFocused(true); }}
+            onBlur={e => { e.target.style.borderColor = 'var(--border)'; setSearchFocused(false); }}
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              aria-label={t('messageList.clearSearch')}
+              style={{
+                position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+                background: 'none', border: 'none', color: 'var(--text-tertiary)',
+                cursor: 'pointer', padding: 2, display: 'flex',
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          )}
+
+          {/* Operator hints — shown when focused with an empty query */}
+          {searchFocused && !searchQuery && (
+            <div style={{
+              position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 100,
+              background: 'var(--bg-elevated, var(--bg-secondary))',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              boxShadow: '0 6px 20px rgba(0,0,0,0.25)',
+              padding: '10px 12px',
+            }}>
+              <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', marginBottom: 8 }}>
+                {t('messageList.searchHelp.title')}
+              </div>
+              {[
+                { op: 'from:amazon',      desc: t('messageList.searchHelp.from') },
+                { op: 'subject:invoice',  desc: t('messageList.searchHelp.subject') },
+                { op: 'to:john',          desc: t('messageList.searchHelp.to') },
+                { op: 'has:attachment',   desc: t('messageList.searchHelp.hasAttachment') },
+                { op: 'is:unread',        desc: t('messageList.searchHelp.isUnread') },
+                { op: 'is:starred',       desc: t('messageList.searchHelp.isStarred') },
+                { op: 'after:2024-01-01', desc: t('messageList.searchHelp.after') },
+                { op: 'before:2024-12-31',desc: t('messageList.searchHelp.before') },
+                { op: 'in:all',           desc: t('messageList.searchHelp.inAll') },
+                { op: '-from:amazon',     desc: t('messageList.searchHelp.negate') },
+              ].map(({ op, desc }) => (
+                <div
+                  key={op}
+                  onMouseDown={e => { e.preventDefault(); setSearchQuery(op.endsWith(':') ? op : op.split(':')[0] + ':'); searchInputRef.current?.focus(); }}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '3px 0', cursor: 'pointer', borderRadius: 4,
+                  }}
+                >
+                  <code style={{ fontSize: 12, color: 'var(--accent)', fontFamily: 'monospace' }}>{op}</code>
+                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{desc}</span>
+                </div>
+              ))}
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border-subtle)', fontSize: 10, color: 'var(--text-tertiary)' }}>
+                {t('messageList.searchHelp.tip')} <code style={{ fontFamily: 'monospace' }}>from:amazon invoice</code>
+              </div>
+            </div>
+          )}
+        </div>
+  );
+
   return (
-    <div style={{
+    <div className="mailflow-message-list" style={{
       width: isMobile || isColumn || listFirst ? '100%' : 'var(--list-width)',
       minWidth: isMobile ? undefined : (isColumn ? undefined : 180),
       flex: isMobile ? 1 : (isColumn ? '0 0 42%' : undefined),
@@ -2979,7 +3116,7 @@ function MailboxList() {
       )}
 
       {/* ── Desktop header ──────────────────────────────────────────────── */}
-      {!isMobile && <div style={{
+      {!isMobile && <div className="mailflow-list-toolbar" style={{
         padding: '14px 16px 10px', borderBottom: '1px solid var(--border-subtle)',
         boxShadow: listScrolled ? '0 1px 10px rgba(0,0,0,0.2)' : 'none',
         transition: 'box-shadow 0.2s ease',
@@ -2989,6 +3126,7 @@ function MailboxList() {
             on the row below. In a list narrower still, the controls wrap below the title, right-aligned,
             instead of squeezing the title away (#766). */}
         <div ref={headerFit.rowRef} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: 6, rowGap: 6, marginBottom: headerCompact ? 6 : 10 }}>
+          {layout === 'gmail' && <GmailSelectionMenu messages={displayMessages} selectedIds={selectedIds} onSelect={rows => rows.length ? selectAll(rows) : clearSelection()} />}
           <h2 ref={headerFit.titleRef} style={{
             margin: 0, fontSize: 15, fontWeight: 600,
             color: 'var(--text-primary)',
@@ -3297,94 +3435,14 @@ function MailboxList() {
           </div>
         )}
 
-        {/* Search */}
-        <div style={{ position: 'relative' }}>
-          <div style={{
-            position: 'absolute', left: 10, top: '50%',
-            transform: 'translateY(-50%)', color: 'var(--text-tertiary)',
-            pointerEvents: 'none',
-          }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-            </svg>
-          </div>
-          <input
-            ref={searchInputRef}
-            type="text"
-            placeholder={t('messageList.search')}
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            style={{
-              width: '100%', padding: '8px 10px 8px 32px',
-              background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-              borderRadius: 8, color: 'var(--text-primary)', fontSize: 13,
-              outline: 'none', boxSizing: 'border-box',
-            }}
-            onFocus={e => { e.target.style.borderColor = 'var(--accent)'; setSearchFocused(true); }}
-            onBlur={e => { e.target.style.borderColor = 'var(--border)'; setSearchFocused(false); }}
-          />
-          {searchQuery && (
-            <button
-              onClick={() => setSearchQuery('')}
-              style={{
-                position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
-                background: 'none', border: 'none', color: 'var(--text-tertiary)',
-                cursor: 'pointer', padding: 2, display: 'flex',
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </button>
-          )}
-
-          {/* Operator hints — shown when focused with an empty query */}
-          {searchFocused && !searchQuery && (
-            <div style={{
-              position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 100,
-              background: 'var(--bg-elevated, var(--bg-secondary))',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              boxShadow: '0 6px 20px rgba(0,0,0,0.25)',
-              padding: '10px 12px',
-            }}>
-              <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                {t('messageList.searchHelp.title')}
-              </div>
-              {[
-                { op: 'from:amazon',      desc: t('messageList.searchHelp.from') },
-                { op: 'subject:invoice',  desc: t('messageList.searchHelp.subject') },
-                { op: 'to:john',          desc: t('messageList.searchHelp.to') },
-                { op: 'has:attachment',   desc: t('messageList.searchHelp.hasAttachment') },
-                { op: 'is:unread',        desc: t('messageList.searchHelp.isUnread') },
-                { op: 'is:starred',       desc: t('messageList.searchHelp.isStarred') },
-                { op: 'after:2024-01-01', desc: t('messageList.searchHelp.after') },
-                { op: 'before:2024-12-31',desc: t('messageList.searchHelp.before') },
-                { op: 'in:all',           desc: t('messageList.searchHelp.inAll') },
-                { op: '-from:amazon',     desc: t('messageList.searchHelp.negate') },
-              ].map(({ op, desc }) => (
-                <div
-                  key={op}
-                  onMouseDown={e => { e.preventDefault(); setSearchQuery(op.endsWith(':') ? op : op.split(':')[0] + ':'); searchInputRef.current?.focus(); }}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    padding: '3px 0', cursor: 'pointer', borderRadius: 4,
-                  }}
-                >
-                  <code style={{ fontSize: 12, color: 'var(--accent)', fontFamily: 'monospace' }}>{op}</code>
-                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{desc}</span>
-                </div>
-              ))}
-              <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border-subtle)', fontSize: 10, color: 'var(--text-tertiary)' }}>
-                {t('messageList.searchHelp.tip')} <code style={{ fontFamily: 'monospace' }}>from:amazon invoice</code>
-              </div>
-            </div>
-          )}
-        </div>
+        {gmailSearchTarget ? createPortal(desktopSearch, gmailSearchTarget) : desktopSearch}
       </div>}
 
+      {layout === 'gmail' && searchQuery && <GmailSearchRefinements query={searchQuery} onChange={gmailSearchChange} />}
+
       {/* Mobile search bar (rendered outside the scrollable list so it stays pinned) */}
-      {isMobile && (
+      {isMobile && layout === 'gmail' && <div style={{ padding: '8px 12px', flexShrink: 0 }}>{desktopSearch}</div>}
+      {isMobile && layout !== 'gmail' && (
         <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-subtle)', flexShrink: 0 }}>
           <div style={{ position: 'relative' }}>
             <div style={{
@@ -4607,8 +4665,37 @@ function EmptyState({ folderSyncing, searchQuery, searching, searchError, unread
   );
 }
 
+function GmailRowControls({ message, checked, onToggleSelect, onRangeSelect, onStar, t }) {
+  return (
+    <div className="mailflow-gmail-row-controls" onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}>
+      <input
+        type="checkbox"
+        checked={Boolean(checked)}
+        aria-label={`${t('messageList.selectMessages')}: ${message.subject || t('common.noSubject')}`}
+        onChange={() => {}}
+        onClick={e => {
+          e.stopPropagation();
+          if (e.shiftKey && onRangeSelect) onRangeSelect(message.id);
+          else onToggleSelect(message.id);
+        }}
+      />
+      <button
+        type="button"
+        aria-label={message.is_starred ? t('message.unstar', 'Unstar') : t('message.star', 'Star')}
+        aria-pressed={Boolean(message.is_starred)}
+        onClick={e => onStar(e, message)}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill={message.is_starred ? 'var(--amber)' : 'none'} stroke={message.is_starred ? 'var(--amber)' : 'currentColor'} strokeWidth="1.6" aria-hidden="true">
+          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onModifierSelect, onLongPress, onExplainSpam }) {
   const { t } = useTranslation();
+  const checkboxRow = useStore(s => s.layout === 'gmail') && !isMobile;
   const [hovered, setHovered] = useState(false);
   const messageCount = message.message_count || 1;
   const unreadCount  = parseInt(message.unread_count) || 0;
@@ -4653,7 +4740,10 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
       {/* Thread header row */}
       <div
         ref={isMobile ? contentRef : undefined}
-        className={isMobile ? 'no-callout' : undefined}
+        className={`mailflow-message-row${isMobile ? ' no-callout' : ''}`}
+        data-unread={unreadCount > 0}
+        data-selected={isLastViewed}
+        data-checked={isChecked}
         // Drag-to-folder (#130). Threading renders every row through ThreadRow, which never
         // had drag wired up — so with conversations on, no row was draggable and the browser
         // fell back to selecting the row's text. Never a regression: the two features simply
@@ -4687,8 +4777,9 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
           willChange: isMobile ? 'transform' : undefined,
         }}
       >
+        {checkboxRow && <GmailRowControls message={message} checked={isChecked} onToggleSelect={onToggleSelect} onRangeSelect={onRangeSelect} onStar={onStar} t={t} />}
         {/* Left indicator: checkbox in selection mode (narrow/mobile), unread dot otherwise */}
-        {!hasAvatar ? (
+        {!checkboxRow && (!hasAvatar ? (
           selectionMode ? (
             <div style={{
               position: 'absolute', left: 4, top: '50%', transform: 'translateY(-50%)',
@@ -4717,10 +4808,10 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
               width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)',
             }} />
           )
-        )}
+        ))}
 
         {/* Avatar — morphs into a checkbox when in selection mode (desktop); display-only on mobile */}
-        {showAvatar && (
+        {!checkboxRow && showAvatar && (
           <div
             onClick={selectionMode ? e => { e.stopPropagation(); onToggleSelect(message.id); } : undefined}
             style={{
@@ -4762,9 +4853,9 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
           </div>
         )}
 
-        <div style={{ paddingLeft: (!hasAvatar && selectionMode) ? 22 : 0, flex: 1, minWidth: 0 }}>
+        <div className="mailflow-row-content" style={{ paddingLeft: (!hasAvatar && selectionMode) ? 22 : 0, flex: 1, minWidth: 0 }}>
           {/* Row 1: sender + badge + date */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
+          <div className="mailflow-row-sender" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
               {showAccount && (
                 <AccountMark accountId={message.account_id} color={message.account_color || '#6366f1'} size={6} />
@@ -4806,7 +4897,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
                   <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 </svg>
               )}
-              {message.is_starred && (
+              {!checkboxRow && message.is_starred && (
                 <button
                   onClick={e => { e.stopPropagation(); onStar(e, message); }}
                   style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
@@ -4823,7 +4914,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
             </div>
           </div>
           {/* Row 2: subject */}
-          <div style={{
+          <div className="mailflow-row-subject" style={{
             display: 'flex', alignItems: 'center', gap: 4,
             fontSize: 12, fontWeight: unreadCount > 0 ? 500 : 400,
             color: unreadCount > 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -4838,7 +4929,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
           </div>
           {/* Row 3: snippet */}
           {showMessagePreviews && (
-            <div style={{
+            <div className="mailflow-row-preview" style={{
               fontSize: 12, color: 'var(--text-tertiary)',
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>
@@ -4930,6 +5021,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
 
 function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onModifierSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress, onExplainSpam }) {
   const { t } = useTranslation();
+  const checkboxRow = useStore(s => s.layout === 'gmail') && !isMobile;
   const [hovered, setHovered] = useState(false);
   const [avatarHovered, setAvatarHovered] = useState(false);
   const { contentRef, swipeBgLeftRef, swipeBgRightRef, tappedRef } = useSwipeRow({
@@ -5007,7 +5099,10 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
       {/* Foreground row content */}
       <div
         ref={isMobile ? contentRef : undefined}
-        className={isMobile ? 'no-callout' : undefined}
+        className={`mailflow-message-row${isMobile ? ' no-callout' : ''}`}
+        data-unread={!message.is_read}
+        data-selected={selected}
+        data-checked={isChecked}
         draggable={!isMobile}
         onDragStart={!isMobile ? (e) => onDragStart(e, message) : undefined}
         onClick={handleClick}
@@ -5033,7 +5128,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
       )}
       {/* Left indicator: for narrow/mobile layouts show checkbox or unread dot.
           Wide layouts use the avatar area instead (see below). */}
-      {(!hasInteractiveAvatar) && (
+      {!checkboxRow && (!hasInteractiveAvatar) && (
         selectionMode ? (
           <div style={{
             position: 'absolute', left: 4, top: '50%', transform: 'translateY(-50%)',
@@ -5058,7 +5153,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
         )
       )}
       {/* Unread dot for wide layouts — always shown (avatar is separate, doesn't conflict) */}
-      {hasInteractiveAvatar && !selectionMode && !message.is_read && (
+      {!checkboxRow && hasInteractiveAvatar && !selectionMode && !message.is_read && (
         <div style={{
           position: 'absolute', left: 3, top: '50%', transform: 'translateY(-50%)',
           width: 7, height: 7, borderRadius: '50%',
@@ -5066,10 +5161,11 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
         }} />
       )}
 
-      <div style={{ paddingLeft: (!hasInteractiveAvatar && selectionMode) ? 22 : 0, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+      <div className="mailflow-row-main" style={{ paddingLeft: (!hasInteractiveAvatar && selectionMode) ? 22 : 0, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+        {checkboxRow && <GmailRowControls message={message} checked={isChecked} onToggleSelect={onToggleSelect} onRangeSelect={onRangeSelect} onStar={onStar} t={t} />}
         {/* Sender avatar — desktop always, or opted-in on mobile (#213). Interactive (click-to-select,
             hover-to-checkbox) on desktop only; a plain display avatar on mobile. */}
-        {showAvatar && (
+        {!checkboxRow && showAvatar && (
           <div
             onClick={hasInteractiveAvatar ? handleAvatarAreaClick : undefined}
             onMouseEnter={hasInteractiveAvatar ? () => setAvatarHovered(true) : undefined}
@@ -5111,9 +5207,9 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
             )}
           </div>
         )}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="mailflow-row-content" style={{ flex: 1, minWidth: 0 }}>
         {/* Row 1: From + date */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
+        <div className="mailflow-row-sender" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
             {showAccount && (
               <AccountMark accountId={message.account_id} color={message.account_color || '#6366f1'} size={6} />
@@ -5133,7 +5229,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
               </svg>
             )}
-            {message.is_starred && (
+            {!checkboxRow && message.is_starred && (
               <button
                 onClick={e => { e.stopPropagation(); onStar(e, message); }}
                 style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
@@ -5153,7 +5249,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
         </div>
 
         {/* Row 2: Subject */}
-        <div style={{
+        <div className="mailflow-row-subject" style={{
           display: 'flex', alignItems: 'center', gap: 4,
           fontSize: 13, fontWeight: message.is_read ? 400 : 500,
           color: message.is_read ? 'var(--text-secondary)' : 'var(--text-primary)',
@@ -5169,7 +5265,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
 
         {/* Row 3: Snippet */}
         {showMessagePreviews && (
-          <div style={{ display: 'flex', alignItems: 'center' }}>
+          <div className="mailflow-row-preview" style={{ display: 'flex', alignItems: 'center' }}>
             <span style={{
               fontSize: 12, color: 'var(--text-tertiary)',
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',

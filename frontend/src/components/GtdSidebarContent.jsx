@@ -12,6 +12,8 @@ import GtdTriageRow from './GtdTriageRow.jsx';
 import GtdZeroPet from './GtdZeroPet.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import RightSidebar from './RightSidebar.jsx';
+import GmailGtdSection from './GmailGtdSection.jsx';
+import { buildGmailGtdSections } from '../utils/gmailGtd.js';
 
 // Section key -> the state color/chip-bg used for its header, count chip, and the
 // row's left border. Waiting rows override per gtdKind (watch/delegated).
@@ -19,6 +21,8 @@ const SECTION_STATE = { todo: 'todo', waiting: 'watch', reference: 'reference', 
 
 export default function GtdSidebarContent({ onCollapse, toggleHint }) {
   const { t } = useTranslation();
+  const gmail = useStore(s => s.layout) === 'gmail';
+  const selectedAccountId = useStore(s => s.selectedAccountId);
   const gtdSections = useStore(s => s.gtdSections);
   const gtdCollapsedSections = useStore(s => s.gtdCollapsedSections);
   const toggleGtdSection = useStore(s => s.toggleGtdSection);
@@ -34,7 +38,7 @@ export default function GtdSidebarContent({ onCollapse, toggleHint }) {
 
   // Sections are fetched by MailApp on context change (single owner); the sidebar
   // just renders the store slice and updates live via gtd_sections_updated.
-  const sections = buildGtdDisplaySections(gtdSections);
+  const sections = gmail ? buildGmailGtdSections(gtdSections) : buildGtdDisplaySections(gtdSections);
   const loaded = gtdSections != null;
   const allClear = loaded && sections.every(s => s.total === 0);
 
@@ -54,7 +58,12 @@ export default function GtdSidebarContent({ onCollapse, toggleHint }) {
       toggleHint={toggleHint}
     >
 
-      {allClear ? (
+      {gmail ? sections.map(section => (
+        <GmailGtdSection key={`${selectedAccountId ?? 'unified'}:${section.key}`} section={section} loaded={loaded}
+          collapsed={!!gtdCollapsedSections[section.key]} onToggle={() => toggleGtdSection(section.key)}
+          onOpenRow={openRow} rowActions={rowActions} selectedMessageId={selectedMessageId}
+          selectedMid={selectedMid} selectedAcct={selectedAcct} t={t} />
+      )) : allClear ? (
         <div style={{
           flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
           justifyContent: 'center', gap: 8, padding: 20, textAlign: 'center',

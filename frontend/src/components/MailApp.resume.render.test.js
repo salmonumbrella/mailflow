@@ -37,6 +37,7 @@ const STUBS = {
 
 registerHooks({
   load(url, context, nextLoad) {
+    if (url.endsWith('.css')) return { format: 'module', shortCircuit: true, source: '' };
     if (url.endsWith('react-i18next/dist/es/index.js') || url.endsWith('/react-i18next')) {
       return { format: 'module', shortCircuit: true, source: [
         'export const useTranslation = () => ({ t: (k) => k, i18n: { language: "en", changeLanguage: () => {} } });',

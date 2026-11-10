@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import AccountMark from './AccountMark.jsx';
+import GmailNavigation from './GmailNavigation.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { totalBadge, unreadBadge } from '../utils/unreadBadge.js';
@@ -282,15 +283,16 @@ function badgeStyle(badge) {
     : { fontSize: 10, color: 'var(--text-tertiary)', background: 'var(--bg-elevated)', padding: '1px 5px', borderRadius: 8 };
 }
 
-export default function Sidebar() {
+export default function Sidebar({ forceExpanded = false, onClose } = {}) {
   const { t } = useTranslation();
   const uiScale = useUiScale();
+  const mailboxNavRef = useRef(null);
   const {
-    accounts, unreadCounts, selectedAccountId, selectedFolder,
+    accounts, unreadCounts, selectedAccountId, selectedFolder, layout,
     setSelectedAccount, setShowAdmin, setAdminTab, setAccountsIntent, openCompose,
     folders, setFolders, setAccounts, user, signOut, lockScreen, sidebarCollapsed: sidebarCollapsedPref, toggleSidebar,
     blockRemoteImages, setBlockRemoteImages, setMobileSidebarOpen, addNotification,
-    searchAllFolders, setSearchAllFolders,
+    searchAllFolders, setSearchAllFolders, searchQuery,
     hiddenFolders, setHiddenFolders,
     folderOrder, setFolderOrder,
     favoriteFolders, addFavoriteFolder, removeFavoriteFolder, renameFavoriteFolder, reorderFavoriteFolders,
@@ -304,7 +306,7 @@ export default function Sidebar() {
 
   const isMobile = useMobile();
   // On mobile the sidebar is always expanded (shown as an overlay drawer)
-  const sidebarCollapsed = isMobile ? false : sidebarCollapsedPref;
+  const sidebarCollapsed = (isMobile || forceExpanded) ? false : sidebarCollapsedPref;
 
   // Close the mobile drawer whenever the user navigates to a different folder/account
   useEffect(() => {
@@ -538,6 +540,11 @@ export default function Sidebar() {
       }
     });
   }, [accountsReady]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (layout !== 'gmail' || !accountsReady || !selectedAccountId || folders[selectedAccountId]) return;
+    api.getFolders(selectedAccountId).then(f => setFolders(selectedAccountId, f)).catch(console.error);
+  }, [layout, accountsReady, selectedAccountId, folders, setFolders]);
 
   // Update-available check (#261). Reads the cached server-side status; the browser
   // never contacts GitHub. Silent on any failure.
@@ -876,7 +883,7 @@ export default function Sidebar() {
   };
 
   return (
-    <div style={{
+    <div className="mailflow-sidebar" data-collapsed={sidebarCollapsed ? 'true' : 'false'} style={{
       width: sidebarCollapsed ? 60 : sidebarWidth,
       minWidth: sidebarCollapsed ? 60 : sidebarWidth,
       height: isMobile ? '100%' : '100%',
@@ -887,8 +894,8 @@ export default function Sidebar() {
       transition: isSidebarResizing ? 'none' : 'width 0.2s ease, min-width 0.2s ease',
       overflow: 'hidden',
     }}>
-      {/* Header */}
-      <div style={{
+      {/* Gmail's desktop header owns the brand and menu; mobile retains its drawer header. */}
+      {(layout !== 'gmail' || isMobile) && <div className="mailflow-sidebar-header" style={{
         paddingTop: 'calc(var(--sat) + 16px)',
         paddingBottom: 'calc(16px - var(--sat-trim))', paddingLeft: 12, paddingRight: 12,
         display: 'flex', alignItems: 'center',
@@ -896,7 +903,7 @@ export default function Sidebar() {
         minHeight: 56, flexShrink: 0,
       }}>
         {!sidebarCollapsed && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <div className="mailflow-brand" style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
             <LogoMark size={24} />
             <span style={{ display: 'flex', alignItems: 'baseline', gap: 0 }}>
               <span style={{
@@ -919,7 +926,7 @@ export default function Sidebar() {
           </div>
         )}
         <button
-          onClick={isMobile ? () => setMobileSidebarOpen(false) : toggleSidebar}
+          onClick={onClose || (isMobile ? () => setMobileSidebarOpen(false) : toggleSidebar)}
           title={t('sidebar.toggleSidebar')}
           className="btn-press"
           style={{
@@ -941,13 +948,15 @@ export default function Sidebar() {
             </svg>
           )}
         </button>
-      </div>
+      </div>}
 
       {/* Compose button */}
-      <div style={{ padding: '12px 10px' }}>
+      <div className="mailflow-sidebar-compose" style={{ padding: '12px 10px' }}>
         <button
           onClick={() => openCompose({})}
-          className="btn-press"
+          title={t('sidebar.compose')}
+          aria-label={t('sidebar.compose')}
+          className="btn-press mailflow-compose-launcher"
           style={{
             width: '100%', padding: sidebarCollapsed ? '10px' : '10px 14px',
             background: 'var(--accent)', border: 'none', borderRadius: 8,
@@ -965,9 +974,46 @@ export default function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav data-mailbox-sidebar="" style={{ flex: 1, overflow: 'hidden auto', padding: '4px 8px' }}>
+      <nav ref={mailboxNavRef} data-mailbox-sidebar="" onClickCapture={event => {
+        if (layout === 'gmail' && !event.target.closest('.gmail-native-navigation') && event.target.closest('[data-mailbox-row]')) {
+          useStore.getState().setSearchQuery('');
+        }
+      }} onKeyDown={event => {
+        if (layout !== 'gmail' || event.target.closest('input, select, textarea')) return;
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          const toggle = event.target.matches('button[aria-expanded]') ? event.target
+            : event.target.querySelector('button[aria-expanded]');
+          if (toggle && toggle.getAttribute('aria-expanded') === String(event.key === 'ArrowLeft')) {
+            event.preventDefault();
+            event.stopPropagation();
+            toggle.click();
+          }
+          return;
+        }
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        const controls = [...event.currentTarget.querySelectorAll('button:not(:disabled), [tabindex="0"]')];
+        const current = controls.indexOf(event.target);
+        if (current < 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1
+          : (current + (event.key === 'ArrowDown' ? 1 : -1) + controls.length) % controls.length;
+        controls[next]?.focus();
+      }} style={{ flex: 1, overflow: 'hidden auto', padding: '4px 8px' }}>
+        {layout === 'gmail' && <GmailNavigation collapsed={sidebarCollapsed} onManageFolders={() => {
+          if (sidebarCollapsed) toggleSidebar();
+          setExpandedAccounts(prev => ({ ...prev, ...Object.fromEntries(accounts.filter(a => a.enabled).map(a => [a.id, true])) }));
+          accounts.filter(a => a.enabled && !folders[a.id]).forEach(a => {
+            api.getFolders(a.id).then(f => setFolders(a.id, f)).catch(console.error);
+          });
+          window.requestAnimationFrame(() => {
+            const accountRow = mailboxNavRef.current?.querySelector('[data-gmail-account]');
+            accountRow?.scrollIntoView({ block: 'nearest' });
+            accountRow?.focus();
+          });
+        }} />}
         {/* Unified Inbox — only shown with 2+ enabled accounts */}
-        {accounts.filter(a => a.enabled).length >= 2 && (
+        {layout !== 'gmail' && accounts.filter(a => a.enabled).length >= 2 && (
           <NavItem
             mailboxRow
             icon={ICONS.inbox}
@@ -983,7 +1029,7 @@ export default function Sidebar() {
         {/* Snoozed (#269): every account's snoozed mail in one place, soonest back first. Shown
             while something is snoozed, and while it is open, so unsnoozing the last message does
             not pull it away from under the reader. */}
-        {(snoozedCount > 0 || (isUnified && selectedFolder === SNOOZED_FOLDER)) && (
+        {layout !== 'gmail' && (snoozedCount > 0 || (isUnified && selectedFolder === SNOOZED_FOLDER)) && (
           <NavItem
             mailboxRow
             icon={ICONS.snoozed}
@@ -997,7 +1043,7 @@ export default function Sidebar() {
         {/* Scheduled (#543, design 5.2): every account's scheduled messages. Shown, like Snoozed,
             while there is any (pending or needing attention) and while it is open. The badge is the
             pending count; a red dot and the tooltip say how many need attention. */}
-        {(scheduledCount > 0 || scheduledAttention > 0 || isScheduledView) && (
+        {layout !== 'gmail' && (scheduledCount > 0 || scheduledAttention > 0 || isScheduledView) && (
           <NavItem
             mailboxRow
             icon={<SendLaterIcon size={16} />}
@@ -1036,6 +1082,7 @@ export default function Sidebar() {
                   <div
                     key={`${accountId}:${path}`}
                     data-mailbox-row=""
+                    data-active={isActive ? 'true' : undefined}
                     className="no-callout"
                     onDragOver={e => {
                       e.preventDefault();
@@ -1241,7 +1288,7 @@ export default function Sidebar() {
             hiddenPaths: accountHiddenPaths,
             showingHidden,
           });
-          const isAccountActive = isSelected && selectedFolder === 'INBOX' && !hasInbox;
+          const isAccountActive = isSelected && selectedFolder === 'INBOX' && !hasInbox && (layout !== 'gmail' || !searchQuery);
 
           return (
             <div key={account.id}>
@@ -1249,6 +1296,8 @@ export default function Sidebar() {
                   the expand toggle, and a button cannot nest inside a button. */}
               <div
                 data-mailbox-row=""
+                data-active={isAccountActive ? 'true' : undefined}
+                data-gmail-account={layout === 'gmail' ? account.id : undefined}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
                   padding: sidebarCollapsed ? '8px' : '7px 10px',
@@ -1271,8 +1320,8 @@ export default function Sidebar() {
                 title={rowLabel}
                 aria-label={rowLabel}
                 role={sidebarCollapsed ? 'button' : undefined}
-                tabIndex={sidebarCollapsed ? 0 : undefined}
-                onKeyDown={sidebarCollapsed ? activateOnKey(selectInbox) : undefined}
+                tabIndex={sidebarCollapsed || layout === 'gmail' ? 0 : undefined}
+                onKeyDown={sidebarCollapsed || layout === 'gmail' ? activateOnKey(selectInbox) : undefined}
               >
                 {/* Account indicator */}
                 {sidebarCollapsed ? (
@@ -1339,6 +1388,8 @@ export default function Sidebar() {
                       )}
                       {/* Expand toggle */}
                       <button
+                        aria-expanded={!!expanded}
+                        aria-label={t(expanded ? 'gmail.navigation.collapseAccount' : 'gmail.navigation.expandAccount', { defaultValue: `${expanded ? 'Collapse' : 'Expand'} ${account.email_address}` })}
                         onClick={e => { e.stopPropagation(); toggleAccount(account.id); }}
                         style={{
                           background: 'none', border: 'none', padding: 2,
@@ -1456,7 +1507,7 @@ export default function Sidebar() {
                   if (isHidden && !showingHidden) return null;
 
                   const isRenaming = renamingFolder?.accountId === account.id && renamingFolder?.path === folder.path;
-                  const isFolderSelected = selectedAccountId === account.id && selectedFolder === folder.path;
+                  const isFolderSelected = selectedAccountId === account.id && selectedFolder === folder.path && (layout !== 'gmail' || !searchQuery);
                   const visibleChildren = showingHidden ? children : children.filter(c => !accountHiddenPaths.includes(c.path));
                   const hasChildren = visibleChildren.length > 0;
                   const collapseKey = `${account.id}:${folder.path}`;
@@ -1478,6 +1529,14 @@ export default function Sidebar() {
                       <div
                         data-mailbox-row={folder.no_select || isHidden ? undefined : ''}
                         data-mailbox-available={folder.no_select || isHidden ? 'false' : 'true'}
+                        data-active={isFolderSelected ? 'true' : undefined}
+                        tabIndex={layout === 'gmail' && !folder.no_select && !isRenaming ? 0 : undefined}
+                        onKeyDown={layout === 'gmail' && !folder.no_select && !isRenaming ? event => {
+                          if (event.target === event.currentTarget) activateOnKey(() => {
+                            useStore.getState().setSearchQuery('');
+                            setSelectedAccount(account.id, folder.path);
+                          })(event);
+                        } : undefined}
                         style={{
                           pointerEvents: 'auto',
                           display: 'flex', alignItems: 'center', gap: 6,
@@ -1541,6 +1600,8 @@ export default function Sidebar() {
                         {/* Chevron toggle for parent folders; invisible spacer for leaf folders to align icons */}
                         {hasChildren ? (
                           <button
+                            aria-expanded={isExpanded}
+                            aria-label={t(isExpanded ? 'gmail.navigation.collapseFolder' : 'gmail.navigation.expandFolder', { defaultValue: `${isExpanded ? 'Collapse' : 'Expand'} ${folder.name || folder.path}` })}
                             onClick={e => { e.stopPropagation(); toggleCollapsedFolder(account.id, folder.path); }}
                             style={{
                               background: 'none', border: 'none', padding: 2, margin: 0, flexShrink: 0,
@@ -1928,7 +1989,7 @@ export default function Sidebar() {
               {ICONS.contacts}
             </button>
           </div>
-          <div style={{ padding: '8px', borderTop: '1px solid var(--border-subtle)' }}>
+          <div className="mailflow-sidebar-footer" style={{ padding: '8px', borderTop: '1px solid var(--border-subtle)' }}>
           <div
             ref={userMenuBtnRef}
             onClick={openUserMenu}
@@ -2163,6 +2224,7 @@ function NavItem({ icon, label, active, collapsed, badge, badgeStale = false, ba
   return (
     <div
       data-mailbox-row={mailboxRow ? '' : undefined}
+      data-active={active ? 'true' : undefined}
       className={active ? 'nav-item nav-item-active' : 'nav-item'}
       onClick={onClick}
       onKeyDown={activateOnKey(onClick)}

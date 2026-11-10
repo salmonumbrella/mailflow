@@ -311,6 +311,8 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
     <div
       // The pane scrolls to this when the reader picks this message in the list.
       data-message-id={message.id}
+      className="mailflow-conversation-card"
+      data-expanded={expanded}
       style={{
         border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
         borderRadius: 6, marginBottom: 8, background: 'var(--bg-primary)',

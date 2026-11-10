@@ -19,6 +19,7 @@ import { selectedPickerMessage } from '../utils/labelPicker.js';
 import { applyMarkRead } from '../utils/markRead.js';
 import { buildKeyMap, resolveShortcutAction, shortcutActionText, getEffectiveShortcuts, getGroupedActions, parseModKey, modLabel, SPECIAL_KEYS, SPECIAL_KEY_LABELS } from '../utils/defaultShortcuts.js';
 import Sidebar from './Sidebar.jsx';
+import GmailHeader from './GmailHeader.jsx';
 import MessageList from './MessageList.jsx';
 import ReadingPane from './ReadingPane.jsx';
 import NotificationToasts from './NotificationToasts.jsx';
@@ -117,6 +118,8 @@ export default function MailApp() {
 
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [gmailSearchTarget, setGmailSearchTarget] = useState(null);
+  const [gmailReplyTarget, setGmailReplyTarget] = useState(null);
   const [labelPickerMessage, setLabelPickerMessage] = useState(null);
   const labelPickerRef = useRef(null);
   useEffect(() => { labelPickerRef.current = labelPickerMessage; }, [labelPickerMessage]);
@@ -646,7 +649,8 @@ export default function MailApp() {
 
     const handler = (e) => {
       // Never intercept when the compose modal or admin panel is open, or an input is focused
-      if (composingRef.current || showAdminRef.current || paletteOpenRef.current) return;
+      if (e.defaultPrevented || composingRef.current || showAdminRef.current || paletteOpenRef.current) return;
+      if (document.querySelector('[aria-modal="true"]') || e.target.closest?.('[role="menu"], [role="dialog"]')) return;
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
       // The registry resolves the exact modifier set, including shifted punctuation.
@@ -766,6 +770,7 @@ export default function MailApp() {
   useEffect(() => {
     const handler = (e) => {
       if (e.defaultPrevented || composingRef.current || showAdminRef.current || labelPickerRef.current) return;
+      if (!paletteOpenRef.current && (document.querySelector('[aria-modal="true"]') || e.target.closest?.('[role="menu"], [role="dialog"]'))) return;
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target?.tagName) || e.target?.isContentEditable) return;
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k'
           && !resolveShortcutAction(e, useStore.getState().shortcuts)) {
@@ -836,11 +841,11 @@ export default function MailApp() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div style={{
+    <div className="mailflow-app" style={{
       width: '100vw', height: 'var(--app-height, 100svh)',
       overflow: 'hidden', background: 'var(--bg-primary)',
     }}>
-    <div style={{
+    <div className="mailflow-shell" data-mobile={isMobile ? 'true' : 'false'} style={{
       display: 'flex',
       // Sized in CSS from the 100dvh parent: an innerHeight read on resize is stale during
       // a rotation in an iOS home-screen app, and the sidebar's bottom fell off screen.
@@ -853,6 +858,10 @@ export default function MailApp() {
       overflow: 'hidden',
       background: 'var(--bg-primary)',
     }}>
+      {layout === 'gmail' && !isMobile && (
+        <GmailHeader searchTargetRef={setGmailSearchTarget} onShowShortcutHelp={() => setShowShortcutHelp(true)} />
+      )}
+      <div className="mailflow-mail-body" style={{ display: 'flex', width: '100%', height: '100%', minHeight: 0, flex: 1 }}>
       {isMobile ? (
         <>
           {/* Backdrop — covers full screen including status bar area */}
@@ -895,10 +904,10 @@ export default function MailApp() {
             <Suspense fallback={lazyFallback}><ContactsPage /></Suspense>
           </div>
           <div style={{ flex: 1, display: !showContacts && !selectedMessageId ? 'flex' : 'none', overflow: 'hidden', height: '100%' }}>
-            <MessageList />
+            <MessageList gmailSearchTarget={gmailSearchTarget} />
           </div>
           <div style={{ flex: 1, display: !showContacts && selectedMessageId ? 'flex' : 'none', overflow: 'hidden', height: '100%' }}>
-            <ReadingPane />
+            <ReadingPane onReplyDockTarget={layout === 'gmail' && !isMobile ? setGmailReplyTarget : undefined} />
           </div>
         </>
       ) : (
@@ -906,6 +915,7 @@ export default function MailApp() {
           <Sidebar />
           {!sidebarCollapsed && (
             <div
+              className="mailflow-sidebar-resizer"
               onMouseDown={handleSidebarResizeMouseDown}
               style={{
                 width: 4, flexShrink: 0, cursor: 'col-resize',
@@ -917,7 +927,7 @@ export default function MailApp() {
               onMouseLeave={e => { e.currentTarget.style.background = 'var(--border-subtle)'; }}
             />
           )}
-          <div style={{
+          <div className="mailflow-workspace" style={{
             flex: 1, display: 'flex', overflow: 'hidden',
             minWidth: 0, flexDirection: currentLayout.direction,
             height: '100%',
@@ -933,15 +943,15 @@ export default function MailApp() {
                 <>
                   {/* Both stay mounted, as on a phone, so the list keeps its place behind a message. */}
                   <div style={{ display: selectedMessageId ? 'none' : 'flex', flex: 1, minWidth: 0, overflow: 'hidden', height: '100%' }}>
-                    <MessageList />
+                    <MessageList gmailSearchTarget={gmailSearchTarget} />
                   </div>
                   <div style={{ display: selectedMessageId ? 'flex' : 'none', flex: 1, minWidth: 0, overflow: 'hidden', height: '100%' }}>
-                    <ReadingPane />
+                    <ReadingPane onReplyDockTarget={layout === 'gmail' && !isMobile ? setGmailReplyTarget : undefined} />
                   </div>
                 </>
               ) : (
               <>
-              <MessageList />
+              <MessageList gmailSearchTarget={gmailSearchTarget} />
               {currentLayout.direction === 'row' && (
                 <div
                   onMouseDown={handleListResizeMouseDown}
@@ -954,7 +964,7 @@ export default function MailApp() {
                   onMouseLeave={e => { e.currentTarget.style.background = 'var(--border-subtle)'; }}
                 />
               )}
-              <ReadingPane />
+              <ReadingPane onReplyDockTarget={layout === 'gmail' && !isMobile ? setGmailReplyTarget : undefined} />
               </>
               )}
               {/* Generic right-sidebar column, populated from the content seam above. */}
@@ -1020,8 +1030,10 @@ export default function MailApp() {
         </>
       )}
 
+      </div>
+
       <InboxReplyDraftObserver />
-      <Suspense fallback={lazyFallback}>{composing && <ComposeModal key={composeSession} />}</Suspense>
+      <Suspense fallback={lazyFallback}>{composing && <ComposeModal key={composeSession} gmailReplyTarget={gmailReplyTarget} />}</Suspense>
       <Suspense fallback={lazyFallback}>{showAdmin && <AdminPanel />}</Suspense>
       {/* Detached message windows (#219) — desktop only. */}
       {!isMobile && <Suspense fallback={null}><WindowLayer /></Suspense>}

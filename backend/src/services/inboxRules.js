@@ -150,15 +150,24 @@ function evaluateRule(rule, msg) {
 //                    Inbox (#588): filing mail used to make it silent, and these are alerted for
 //                    like inbox mail. Never mail a rule deleted. A notify rule also outranks a
 //                    mark_read rule's silencing for mail that stays in the Inbox.
-export async function applyInboxRules(messages, account, imapManager) {
+export async function applyInboxRules(messages, account, imapManager, options = {}) {
   const none = () => ({ remaining: messages, mutedIds: new Set(), notifyMessages: [] });
   if (!messages.length) return none();
 
   let rules;
   try {
-    rules = await getRulesForAccount(account.user_id, account.id);
+    if (options.rule) {
+      // This is a server-loaded snapshot, never a rule supplied by a client.
+      // Keep ownership and account checks here too, at the execution boundary.
+      const rule = options.rule;
+      if (rule.user_id !== account.user_id || (rule.account_id && rule.account_id !== account.id)) {
+        throw new Error('Rule does not belong to this account');
+      }
+      rules = [rule];
+    } else rules = await getRulesForAccount(account.user_id, account.id);
   } catch (err) {
     console.error('inboxRules: failed to load rules:', err.message);
+    if (options.rule) throw err;
     return none();
   }
   if (!rules.length) return none();
@@ -195,8 +204,12 @@ export async function applyInboxRules(messages, account, imapManager) {
   // Lazy resolver cache shared across the message loop. Populated on first actual use
   // inside applyAction so resolvers are never called for actions that are deduped or
   // skipped, but results are reused across messages to avoid N+1 DB queries.
-  const resolverCache = {};
+  const resolverCache = { historical: !!options.rule };
 
+  const matchedIds = new Set();
+  let failedCount = 0;
+  let processedCount = 0;
+  let cancelled = false;
   const remaining = [...messages];
   const removedIds = new Set();
   // A failed forward leaves the source in place for an intentional retry or
@@ -219,11 +232,14 @@ export async function applyInboxRules(messages, account, imapManager) {
   );
 
   for (const msg of messages) {
+    if (options.shouldContinue && !(await options.shouldContinue())) { cancelled = true; break; }
+    processedCount++;
     const deferredDestinations = [];
     let forwardBarrierPassed = lastForwardRuleIndex === -1;
 
     const executeNonForwardAction = async (action, ruleId, isDest) => {
       try {
+        if (cancelled || (options.shouldContinue && !(await options.shouldContinue()))) { cancelled = true; return; }
         const acted = await applyAction(
           action,
           msg,
@@ -232,12 +248,15 @@ export async function applyInboxRules(messages, account, imapManager) {
           ruleId,
           resolverCache
         );
+        if (options.rule && isDest && !acted) failedCount++;
         if (isDest && acted) removedIds.add(msg.id);
         if (action.type === 'delete' && acted) deletedIds.add(msg.id);
         // mark_read: add to mutedIds so caller suppresses sound/push.
         // star: intentionally NOT muted — a star-only rule should still alert.
         if (action.type === 'mark_read') mutedIds.add(msg.id);
       } catch (err) {
+        failedCount++;
+        if (options.rule) destinationBlockedIds.add(msg.id);
         console.error(`inboxRules: action ${action.type} failed for msg ${msg.id}:`, err.message);
       }
     };
@@ -256,6 +275,7 @@ export async function applyInboxRules(messages, account, imapManager) {
       try {
         matches = evaluateRule(rule, msg);
       } catch (err) {
+        failedCount++;
         console.error(`inboxRules: rule ${rule.id} evaluation error for msg ${msg.id}:`, err.message);
         if (!forwardBarrierPassed && ruleIndex === lastForwardRuleIndex) {
           forwardBarrierPassed = true;
@@ -271,7 +291,14 @@ export async function applyInboxRules(messages, account, imapManager) {
         continue;
       }
 
-      const actions = Array.isArray(rule.actions) ? rule.actions : [];
+      matchedIds.add(msg.id);
+      const actions = Array.isArray(rule.actions) ? [...rule.actions] : [];
+      if (options.rule) {
+        // Filing can remove the source row (Gmail All Mail) or leave its new UID
+        // unknown. Finish flags/category while that source identity still exists.
+        const destination = action => ['move', 'archive', 'delete'].includes(action.type);
+        actions.sort((a, b) => Number(destination(a)) - Number(destination(b)));
+      }
 
       // Forward first within the matching rule. A failed attempt does not stop
       // independent forwards or non-destination actions, but it permanently
@@ -287,6 +314,7 @@ export async function applyInboxRules(messages, account, imapManager) {
             resolverCache
           );
         } catch {
+          failedCount++;
           destinationBlockedIds.add(msg.id);
           console.error('inboxRules: forward action failed; destination actions suppressed');
         }
@@ -333,6 +361,7 @@ export async function applyInboxRules(messages, account, imapManager) {
   // Asked for explicitly, so a notify rule's alert wins over a mark_read rule's silence.
   for (const id of notifyIds) mutedIds.delete(id);
   return {
+    ...(options.rule ? { matchedCount: matchedIds.size, failedCount, processedCount, cancelled } : {}),
     remaining: remaining.filter(m => !removedIds.has(m.id)),
     mutedIds,
     notifyMessages: messages.filter(m => notifyIds.has(m.id) && removedIds.has(m.id) && !deletedIds.has(m.id)),
@@ -487,11 +516,13 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
         console.warn(`inboxRules: mark_read skipped for msg ${msg.id}: a move left its new uid unknown`);
         break;
       }
-      imapManager.setFlag(account, msg.uid, msg.folder, '\\Seen', true).catch(err => {
+      const readPush = imapManager.setFlag(account, msg.uid, msg.folder, '\\Seen', true).catch(err => {
         console.error('inboxRules: setFlag \\Seen failed:', err.message);
         // Durable retry so a later flag-sync pull can't silently revert the rule's effect.
         imapManager._enqueueFlagPush(account.id, msg.id, '\\Seen', true);
+        if (resolverCache.historical) throw err;
       });
+      if (resolverCache.historical) await readPush;
       // msg.isRead (camelCase from parseMessage) and msg.is_read (snake_case in test
       // fixtures) both represent the pre-action read state; use whichever is present.
       const wasUnread = !(msg.isRead ?? msg.is_read);
@@ -513,11 +544,13 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
         console.warn(`inboxRules: star skipped for msg ${msg.id}: a move left its new uid unknown`);
         break;
       }
-      imapManager.setFlag(account, msg.uid, msg.folder, '\\Flagged', true).catch(err => {
+      const starPush = imapManager.setFlag(account, msg.uid, msg.folder, '\\Flagged', true).catch(err => {
         console.error('inboxRules: setFlag \\Flagged failed:', err.message);
         // Durable retry so a later flag-sync pull can't silently revert the rule's effect.
         imapManager._enqueueFlagPush(account.id, msg.id, '\\Flagged', true);
+        if (resolverCache.historical) throw err;
       });
+      if (resolverCache.historical) await starPush;
       break;
     }
 
@@ -618,6 +651,9 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
       const allTrashPaths = resolverCache.allTrashPaths;
       const strategy = getDeleteStrategy(msg.folder, trashFolder, allTrashPaths);
       if (strategy.action === 'no_trash') return false;
+      // Historical application must never turn a mis-mapped Inbox into a
+      // permanent-delete sweep. Trash must be a distinct move destination.
+      if (resolverCache.historical && strategy.action === 'expunge') throw new Error('Historical filters cannot permanently delete messages');
       if (strategy.action === 'move') {
         const srcFolder = msg.folder;
         const srcUid = msg.uid;

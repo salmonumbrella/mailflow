@@ -571,6 +571,10 @@
       "list": {
         "label": "Liste zuerst",
         "description": "Liste in voller Breite; eine Nachricht öffnet sich für sich"
+      },
+      "gmail": {
+        "label": "Gmail",
+        "description": "Gmail-inspirierte Oberfläche mit Posteingang in voller Breite und konzentrierter Leseansicht"
       }
     },
     "snoozedUntil": "Zurückgestellt bis {{when}}",
@@ -2238,6 +2242,12 @@
       "delegated": "Delegiert",
       "someday": "Irgendwann",
       "reference": "Referenz"
+    },
+    "gmail": {
+      "action": "Aktion / Antwort nötig",
+      "awaiting": "Antwort ausstehend",
+      "reference": "Referenz / Termine",
+      "bounded": "Neueste {{available}} von {{total}}. Ältere E-Mails sind im Label-Ordner."
     }
   },
   "window": {

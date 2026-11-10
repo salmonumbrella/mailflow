@@ -15,7 +15,7 @@ import MessagePane from './MessagePane.jsx';
 // Pop-out windows deliberately keep MessagePane: a pop-out is one message by definition.
 //
 // Design from #317 by YunQue0912.
-export default function ReadingPane() {
+export default function ReadingPane({ onReplyDockTarget } = {}) {
   const conversationMode = useStore(s => s.conversationMode);
   const selectedMessageId = useStore(s => s.selectedMessageId);
   const messages = useStore(s => s.messages);
@@ -31,7 +31,7 @@ export default function ReadingPane() {
   const shownRef = useRef(null);
 
   const mode = resolveConversationMode({ conversationMode });
-  if (!selectedMessageId) return <MessagePane />;
+  if (!selectedMessageId) return <MessagePane onReplyDockTarget={onReplyDockTarget} />;
 
   // threadMessages is consulted too, because a message opened from a deep link or a
   // notification tap is parked there and never enters the list: looking only at the list
@@ -54,9 +54,10 @@ export default function ReadingPane() {
 
   // A message with no thread of its own is just a message, and a search deliberately shows
   // the one matched message rather than its conversation.
-  const pane = !shouldUseConversationPane({ mode, searchQuery, message: selected }) ? <MessagePane /> : (
+  const pane = !shouldUseConversationPane({ mode, searchQuery, message: selected }) ? <MessagePane onReplyDockTarget={onReplyDockTarget} /> : (
 
     <ConversationPane
+      onReplyDockTarget={onReplyDockTarget}
       threadId={selected.thread_id}
       folder={selectedFolder}
       unified={!selectedAccountId}

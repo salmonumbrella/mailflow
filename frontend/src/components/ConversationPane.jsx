@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { useListFirst } from '../hooks/useListFirst.js';
+import { openReplyFromMessage, openForwardFromMessage } from '../utils/composeFromMessage.js';
 import { closeOpenMessage } from '../utils/closeMessage.js';
 import { useStore } from '../store/index.js';
 import {
@@ -15,6 +16,7 @@ import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../u
 import { useSwipeBack } from '../hooks/useSwipeBack.js';
 import SwipePager from './SwipePager.jsx';
 import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/printMessage.js';
+import GmailReplyTarget from './GmailReplyTarget.jsx';
 import ConversationMessageCard from './ConversationMessageCard.jsx';
 import { aiReplyAvailable } from '../utils/aiReply.js';
 import ContextMenu from './ContextMenu.jsx';
@@ -54,8 +56,9 @@ const NOTHING_TO_TAKE_DRAFT = {
 // the actions and the card that opens to that account's copies; null keeps every copy.
 //
 // Design from #317 by YunQue0912.
-export default function ConversationPane({ threadId, folder, unified = false, accountId = null, selectedMessageId = null, openedFromRow = false }) {
+export default function ConversationPane({ threadId, folder, unified = false, accountId = null, selectedMessageId = null, openedFromRow = false, onReplyDockTarget }) {
   const { t } = useTranslation();
+  const gmailLayout = useStore(s => s.layout === 'gmail');
   const isMobile = useMobile();
   const listFirst = useListFirst();
   const withShortcut = useShortcutTitle();
@@ -339,13 +342,13 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   if (!messages.length) return null;
 
   return (
-    <div ref={paneRef} style={{ ...fill, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div ref={paneRef} className="mailflow-conversation-pane" style={{ ...fill, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {mobileBackBar}
       {/* Thread-level actions, the way Gmail does it: archiving a conversation archives all of it,
           so the reader does not file the same thread message by message. The reading pane's buttons,
           in its order and pinned at the top as its toolbar is (#650); snooze, which the reading pane
           keeps in its menu, sits with the other ways of putting the conversation away. */}
-      <div role="group" aria-label={t('message.conversationActions')} style={{
+      <div className="mailflow-message-toolbar" role="group" aria-label={t('message.conversationActions')} style={{
         padding: isMobile ? '0 8px' : '8px 16px', borderBottom: '1px solid var(--border-subtle)',
         display: 'flex', alignItems: 'center', gap: isMobile ? 0 : 6, flexShrink: 0,
         background: 'var(--bg-primary)',
@@ -407,6 +410,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
         // cards stay on screen until the next one lands, and a remount would mark them read again.
         key={loadedConversation ?? ''}
         ref={stackRef}
+        className="mailflow-conversation-scroll"
         // flex: 1 and minWidth: 0 are load-bearing. The reading area is a flex row, so
         // without them this pane is sized shrink-to-fit by its contents: collapsed cards
         // are narrow, an expanded newsletter is as wide as the newsletter, and the pane
@@ -419,6 +423,13 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
           background: 'var(--bg-primary)',
         }}
       >
+        {gmailLayout && <div className="mailflow-conversation-heading">
+          <h1>{newestConversationMessage(messages)?.subject || t('common.noSubject')}</h1>
+          <button type="button" onClick={() => setExpanded(previous => previous.size === messages.length ? new Set() : new Set(messages.map(message => message.id)))}
+            aria-label={expanded.size === messages.length ? t('message.collapseAll', 'Collapse all') : t('message.expandAll', 'Expand all')}>
+            {expanded.size === messages.length ? t('message.collapseAll', 'Collapse all') : t('message.expandAll', 'Expand all')}
+          </button>
+        </div>}
         {messages.map(message => (
           <ConversationMessageCard
             key={message.id}
@@ -431,6 +442,13 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
             aiReplyEnabled={aiReplyEnabled}
           />
         ))}
+        {gmailLayout && headerMessage && <div className="mailflow-reader-replies">
+          <button type="button" onClick={() => openReplyFromMessage(headerMessage, { accounts, folders: useStore.getState().folders, openCompose: useStore.getState().openCompose, getMessageBody: api.getMessageBody })}>{t('message.reply')}</button>
+          <button type="button" onClick={() => openReplyFromMessage(headerMessage, { accounts, folders: useStore.getState().folders, openCompose: useStore.getState().openCompose, getMessageBody: api.getMessageBody, replyAll: true })}>{t('message.replyAll')}</button>
+          <button type="button" onClick={() => openForwardFromMessage(headerMessage, { accounts, folders: useStore.getState().folders, openCompose: useStore.getState().openCompose, getMessageBody: api.getMessageBody })}>{t('message.forward')}</button>
+        </div>}
+        {gmailLayout && !isMobile && <GmailReplyTarget onTarget={onReplyDockTarget}
+          messageId={headerMessage?.id} messageMid={headerMessage?.message_id} threadId={threadId} accountId={accountId} />}
       </div>
       </SwipePager>
     </div>

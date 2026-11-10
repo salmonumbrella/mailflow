@@ -571,6 +571,10 @@
       "list": {
         "label": "List first",
         "description": "Full-width list; a message opens on its own"
+      },
+      "gmail": {
+        "label": "Gmail",
+        "description": "Gmail-inspired shell with a full-width inbox and focused reading"
       }
     },
     "snoozedUntil": "Snoozed until {{when}}",
@@ -2238,6 +2242,12 @@
       "delegated": "Delegated",
       "someday": "Someday",
       "reference": "Reference"
+    },
+    "gmail": {
+      "action": "Needs action / reply",
+      "awaiting": "Awaiting reply",
+      "reference": "Reference / events",
+      "bounded": "Latest {{available}} of {{total}}. Older mail is in the label folder."
     }
   },
   "window": {

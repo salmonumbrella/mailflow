@@ -571,6 +571,10 @@
       "list": {
         "label": "列表优先",
         "description": "全宽列表；邮件单独打开"
+      },
+      "gmail": {
+        "label": "Gmail",
+        "description": "Gmail 风格界面，配备全宽收件箱和专注阅读视图"
       }
     },
     "snoozedUntil": "暂停至 {{when}}",
@@ -2238,6 +2242,12 @@
       "delegated": "已委派",
       "someday": "将来",
       "reference": "参考"
+    },
+    "gmail": {
+      "action": "需要处理 / 回复",
+      "awaiting": "等待回复",
+      "reference": "参考资料 / 活动",
+      "bounded": "共 {{total}} 封中的最新 {{available}} 封。更早的邮件在标签文件夹中。"
     }
   },
   "window": {

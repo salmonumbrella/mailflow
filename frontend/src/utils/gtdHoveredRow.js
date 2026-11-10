@@ -1,5 +1,5 @@
 import { resolveGtdHotkeyTarget, runGtdHotkey } from './gtdHotkeys.js';
-import { buildGtdDisplaySections } from './gtd.js';
+import { buildGtdActionSections } from './gmailGtd.js';
 
 let hoveredRow = null;
 const HOVER_ACTIONS = { gtdTodo: 'gtdTodo', gtdWatch: 'gtdWatch', archive: 'gtdDone' };
@@ -22,7 +22,7 @@ function resolveHoveredTarget(action, state) {
   if (!kind || !actions?.message || state?.rightSidebarHidden) return null;
   if (typeof (action === 'archive' ? actions.archive : actions.classify) !== 'function') return null;
   const { message, sectionKey } = actions;
-  const section = buildGtdDisplaySections(state?.gtdSections).find(section => section.key === sectionKey);
+  const section = buildGtdActionSections(state?.gtdSections).find(section => section.key === sectionKey);
   if (!section?.threads.some(row => row.id === message.id && row.account_id === message.account_id)) return null;
   const railSelection = { id: message.id, sectionKey };
   const targetedState = { ...state, selectedMessageId: message.id, activeGtdTab: sectionKey };

@@ -571,6 +571,10 @@
       "list": {
         "label": "Prima l'elenco",
         "description": "Elenco a tutta larghezza; un messaggio si apre da solo"
+      },
+      "gmail": {
+        "label": "Gmail",
+        "description": "Interfaccia ispirata a Gmail con posta in arrivo a tutta larghezza e lettura senza distrazioni"
       }
     },
     "snoozedUntil": "Posticipato fino a {{when}}",
@@ -2238,6 +2242,12 @@
       "delegated": "Delegato",
       "someday": "Un giorno",
       "reference": "Riferimento"
+    },
+    "gmail": {
+      "action": "Richiede azione / risposta",
+      "awaiting": "In attesa di risposta",
+      "reference": "Riferimenti / eventi",
+      "bounded": "Ultimi {{available}} di {{total}}. I messaggi precedenti sono nella cartella etichettata."
     }
   },
   "window": {

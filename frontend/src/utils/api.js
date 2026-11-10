@@ -533,6 +533,9 @@ export const api = {
   deleteRule:  (id)       => request('DELETE', `/rules/${id}`),
   reorderRules:(ids)      => request('PATCH',  '/rules/reorder', { ids }),
   runRules:    (accountId) => request('POST',  '/rules/run', accountId ? { accountId } : {}),
+  runRule:     (id, scope) => request('POST', `/rules/${id}/run`, scope),
+  getRuleRun:  (id, runId) => request('GET', `/rules/${id}/run${runId ? `?runId=${encodeURIComponent(runId)}` : ''}`),
+  cancelRuleRun: (id, runId) => request('POST', `/rules/${id}/run/cancel`, { runId }),
 
   // Undo send: a send held on the server for the undo window (backend/src/services/sendHold.js)
   getSendStatus: (id) => request('GET',  `/mail/send/${encodeURIComponent(id)}`),

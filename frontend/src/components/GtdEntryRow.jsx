@@ -3,6 +3,7 @@ import {
   GTD_COLORS, GTD_CHIP_BG, agingLabel, resolveRowDisplay,
 } from '../utils/gtd.js';
 import { clearHoveredGtdRow } from '../utils/gtdHoveredRow.js';
+import { GMAIL_GTD_SYMBOLS } from '../utils/gmailGtd.js';
 import { formatDate } from '../utils/formatDate.js';
 
 // One GTD entry row, shared by both display surfaces: the GTD browse list that
@@ -48,11 +49,11 @@ const ROW_VARIANTS = {
 };
 
 export default function GtdEntryRow({
-  thread, sectionKey, variant, selected, t,
+  thread, sectionKey, variant, selected, compact = false, t,
   onClick, onContextMenu, onHoverTargetEnter, renderHoverActions,
 }) {
   const v = ROW_VARIANTS[variant];
-  const isWaiting = sectionKey === 'waiting';
+  const isWaiting = sectionKey === 'waiting' || sectionKey === 'watch' || sectionKey === 'delegated';
   const hoverBackground = variant === 'sidebar' ? 'var(--bg-tertiary)' : 'var(--bg-hover)';
   const selectedBackground = variant === 'sidebar' ? 'var(--accent-glow)' : 'var(--bg-tertiary)';
   const { rowState, unread, days, stale, sender } = resolveRowDisplay(thread, sectionKey);
@@ -73,13 +74,29 @@ export default function GtdEntryRow({
 
   return (
     <div
+      className={compact ? 'gmail-gtd-row' : undefined}
+      data-gtd-section={sectionKey}
+      title={compact ? [sender, thread.subject || t('common.noSubject'), thread.gist || thread.snippet].filter(Boolean).join(' · ') : undefined}
+      role={compact ? 'button' : undefined}
+      tabIndex={compact ? 0 : undefined}
+      aria-label={compact ? `${sender}: ${thread.subject || t('common.noSubject')}` : undefined}
+      onKeyDown={compact ? e => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick?.(e); }
+        if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+          e.preventDefault();
+          const bounds = e.currentTarget.getBoundingClientRect();
+          onContextMenu?.({ preventDefault() {}, clientX: bounds.left, clientY: bounds.bottom });
+        }
+      } : undefined}
       onClick={onClick}
       onContextMenu={onContextMenu}
       style={{
         // Relative only when there's a hover cluster to anchor; a row without one
         // (hoverQuickActions off, on the list surface) renders byte-identically static.
         ...(trackHover ? { position: 'relative' } : {}),
-        padding: v.padding, borderBottom: v.borderBottom,
+        padding: compact ? '6px 10px' : v.padding, borderBottom: compact ? '1px solid var(--border-subtle)' : v.borderBottom,
+        ...(compact ? { display: 'flex', alignItems: 'center', gap: 8, minHeight: 32, boxSizing: 'border-box' } : {}),
         cursor: 'pointer', borderLeft: `2px solid ${GTD_COLORS[rowState] || 'transparent'}`,
         background: selected ? selectedBackground : 'transparent',
       }}
@@ -95,7 +112,8 @@ export default function GtdEntryRow({
         if (!selected) e.currentTarget.style.background = 'transparent';
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: v.headerGap }}>
+      {compact && <span aria-hidden="true" style={{ color: GTD_COLORS[rowState], width: 14, flexShrink: 0, textAlign: 'center', fontWeight: 700 }}>{GMAIL_GTD_SYMBOLS[rowState]}</span>}
+      <div style={{ display: 'flex', alignItems: 'center', gap: v.headerGap, ...(compact ? { flex: '0 1 30%', minWidth: 40 } : {}) }}>
         {v.showUnreadDot && unread && (
           <span style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: 'var(--accent)' }} />
         )}
@@ -108,7 +126,7 @@ export default function GtdEntryRow({
         </span>
         {/* Aging pill carries the row's kind color (watch yellow / delegated orange),
             except when stale — staleness outranks kind and keeps the red styling. */}
-        {isWaiting && days != null && (
+        {!compact && isWaiting && days != null && (
           <span style={{
             fontSize: 10, fontWeight: 600, padding: '0 5px', borderRadius: 7, flexShrink: 0,
             color: stale ? '#ff9b9b' : GTD_COLORS[rowState],
@@ -117,9 +135,9 @@ export default function GtdEntryRow({
             {agingLabel(days)}
           </span>
         )}
-        <span style={{ fontSize: v.dateSize, color: 'var(--text-tertiary)', flexShrink: 0 }}>
+        {!compact && <span style={{ fontSize: v.dateSize, color: 'var(--text-tertiary)', flexShrink: 0 }}>
           {formatDate(thread.date)}
-        </span>
+        </span>}
       </div>
 
       {/* Shared hover cluster — same buttons the inbox rows get, overlaid (absolute) so it
@@ -130,7 +148,8 @@ export default function GtdEntryRow({
       {trackHover && hovered && renderHoverActions()}
 
       <div style={{
-        fontSize: v.subjectSize, marginTop: 1,
+        fontSize: v.subjectSize, marginTop: compact ? 0 : 1,
+        ...(compact ? { flex: 1, minWidth: 0, fontWeight: unread ? 600 : 400 } : {}),
         color: v.subjectUnreadAware && unread ? 'var(--text-primary)' : 'var(--text-secondary)',
         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
       }}>
@@ -138,14 +157,15 @@ export default function GtdEntryRow({
       </div>
       {/* Message preview: Mailflow's native inbox line — the gray one-liner under the
           subject — on every GTD row. A cached AI gist (Waiting rows) wins over the raw
-          snippet. Always rendered (native parity): rows keep a constant height even when
-          neither gist nor snippet is populated yet. */}
-      <div style={{
+          snippet. Native rows keep a constant preview-line height; compact rows expose
+          the preview in their tooltip instead. */}
+      {!compact && <div style={{
         fontSize: v.previewSize, color: 'var(--text-tertiary)', marginTop: 1,
         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
       }}>
         {thread.gist || thread.snippet || ' '}
-      </div>
+      </div>}
+      {compact && <span style={{ fontSize: 10.5, color: 'var(--text-tertiary)', flexShrink: 0 }}>{formatDate(thread.date)}</span>}
     </div>
   );
 }

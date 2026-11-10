@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, forwardRef } from 'react';
-import { flushSync } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
 import { createComposeSwitch } from '../utils/composeSwitch.js';
 import { shouldAutosave, isAutosaveDue } from '../utils/draftAutosave.js';
 import { useTranslation } from 'react-i18next';
@@ -41,6 +41,9 @@ import {
   DUE_MARGIN_MS, SCHEDULE_UNDO_MS, UNDO_FOR, createEditHold, isScheduledEdit, needsConfirmation, newClientKey, once,
   openScheduledView, scheduleErrorText, sendNowUndoMs, undoSchedule, undoSendNow, withScheduledAttachments,
 } from '../utils/scheduledCompose.js';
+import { normalizeComposeLink } from '../utils/composeLink.js';
+import { splitRecipientTokens, mergeRecipientTokens } from '../utils/recipientTokens.js';
+import GmailContactPicker from './GmailContactPicker.jsx';
 import { ComposeQuestion, ScheduledStrip, SendLaterIcon, SendLaterMenu, SendLaterSheet } from './SendLater.jsx';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
@@ -209,7 +212,7 @@ function resolveFrom(val) {
   return { accountId: val.replace('account:', ''), aliasId: null };
 }
 
-export default function ComposeModal() {
+export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const { t, i18n } = useTranslation();
   const { closeCompose, composeData, accounts, addNotification, plaintextEmail, setThreadMessages, setPrepareComposeSwitch, updateComposePersistedKey } = useStore();
   const composeSession = useRef(useStore.getState().composeSession).current;
@@ -258,6 +261,10 @@ export default function ComposeModal() {
   });
   const autoRef = useRef(autoInit.auto);
 
+  const gmailLayout = useStore(s => s.layout === 'gmail');
+  const [contactPickerField, setContactPickerField] = useState(null);
+  const [showGmailFormatting, setShowGmailFormatting] = useState(true);
+  useEffect(() => { if (!gmailLayout) setContactPickerField(null); }, [gmailLayout]);
   const [toChips, setToChips] = useState(() => parseChips(composeData?.to));
   const [toInput, setToInput] = useState('');
   const [ccChips, setCcChips] = useState(autoInit.cc);
@@ -369,6 +376,14 @@ export default function ComposeModal() {
   const [minimized, setMinimized] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [pos, setPos] = useState(null);
+  const [inlineDetached, setInlineDetached] = useState(false);
+  const inlineReply = Boolean(gmailLayout && !isMobile && !inlineDetached && !maximized && !pos
+    && (isReply || isForward) && gmailReplyTarget?.element?.isConnected
+    && (!gmailReplyTarget.accountId || gmailReplyTarget.accountId === composeData?.accountId)
+    && ((composeData?.sourceMessageId && composeData.sourceMessageId === gmailReplyTarget.messageId)
+      || (composeData?.inReplyTo && composeData.inReplyTo === gmailReplyTarget.messageMid)
+      || (composeData?.threadId && composeData.threadId === gmailReplyTarget.threadId)));
+  useEffect(() => { if (inlineReply) gmailReplyTarget.element.scrollIntoView?.({ block: 'nearest' }); }, [inlineReply, gmailReplyTarget]);
   const [customSize, setCustomSize] = useState(() => {
     try {
       const saved = localStorage.getItem('mailflow_compose_size');
@@ -644,6 +659,11 @@ export default function ComposeModal() {
     const startX = start.x;
     const startY = start.y;
     const { w, h } = start;
+    if (useStore.getState().layout === 'gmail') {
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      setCustomSize({ width: w, height: h });
+    }
     // Immediately switch from bottom/right to top/left in the DOM — no re-render
     // needed, so there is no frame where the window jumps to a stale position.
     el.style.bottom = '';
@@ -702,6 +722,11 @@ export default function ComposeModal() {
     const startMouseY = e.clientY;
     const startWidth = start.w;
     const startHeight = start.h;
+    if (useStore.getState().layout === 'gmail') {
+      el.style.width = startWidth + 'px';
+      el.style.height = startHeight + 'px';
+      setCustomSize({ width: startWidth, height: startHeight });
+    }
     // Switch to top/left positioning if not already positioned.
     el.style.bottom = '';
     el.style.right = '';
@@ -2928,8 +2953,13 @@ export default function ComposeModal() {
   };
 
   if (minimized) {
-    return (
+    const minimizedCompose = (
       <div
+        className="mailflow-compose-minimized"
+        data-inline={inlineReply}
+        role="button"
+        tabIndex={0}
+        onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setMinimized(false); } }}
         onClick={() => setMinimized(false)}
         style={{
           position: 'fixed', bottom: 0, right: 24,
@@ -2948,10 +2978,16 @@ export default function ComposeModal() {
         {subject || modeLabel}
       </div>
     );
+    return inlineReply ? createPortal(minimizedCompose, gmailReplyTarget.element) : minimizedCompose;
   }
 
-  return (
+  const desktopCompose = (
     <>
+      {contactPickerField && <GmailContactPicker onClose={() => setContactPickerField(null)} onInsert={contacts => {
+        const setChips = contactPickerField === 'cc' ? setCcChips : contactPickerField === 'bcc' ? setBccChips : setToChips;
+        setChips(previous => mergeRecipientTokens(previous, contacts.map(contact => contact.name ? `${contact.name} <${contact.email}>` : contact.email)));
+        setContactPickerField(null);
+      }} />}
       {maximized && (
         <div
           onClick={() => setMaximized(false)}
@@ -2965,6 +3001,8 @@ export default function ComposeModal() {
     <div
       ref={composeWindowRef}
       className="compose-window"
+      data-docked={!inlineReply && !maximized && !pos && !customSize}
+      data-inline={inlineReply}
       onKeyDown={handleKeyDown}
       {...dropHandlers}
       style={maximized ? {
@@ -2997,6 +3035,7 @@ export default function ComposeModal() {
       {/* Title bar */}
       <div
         onPointerDown={handleTitleDragStart}
+        className="mailflow-compose-title"
         style={{
           padding: '10px 14px', display: 'flex', alignItems: 'center',
           justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)',
@@ -3077,6 +3116,9 @@ export default function ComposeModal() {
         )}
 
         <div style={{ display: 'flex', gap: 4 }}>
+          {inlineReply && <TitleBtn onClick={() => setInlineDetached(true)} title={t('compose.openPopup', 'Open in pop-up')}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M14 3h7v7M21 3l-10 10M10 3H3v18h18v-7" /></svg>
+          </TitleBtn>}
           <TitleBtn onClick={() => setMinimized(true)} title={t('compose.toolbar.minimize')}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <line x1="5" y1="12" x2="19" y2="12"/>
@@ -3106,7 +3148,7 @@ export default function ComposeModal() {
       {scheduledStrip}
 
       {/* Fields — fixed height, not scrollable so toolbar dropdowns aren't clipped */}
-      <div style={{ flexShrink: 0 }}>
+      <div className="mailflow-compose-fields" style={{ flexShrink: 0 }}>
         {/* From */}
         <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border-subtle)', padding: '0 12px' }}>
           <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0 }}>{t('compose.from')}</span>
@@ -3144,7 +3186,7 @@ export default function ComposeModal() {
 
         {/* To */}
         <div style={{ display: 'flex', alignItems: 'flex-start', borderBottom: '1px solid var(--border-subtle)', padding: '0 12px' }}>
-          <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.to')}</span>
+          {gmailLayout ? <button type="button" className="mailflow-recipient-picker-label" onClick={() => setContactPickerField('to')} aria-label={`${t('compose.selectContacts', 'Select contacts')}: ${t('compose.to')}`}>{t('compose.to')}</button> : <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.to')}</span>}
           <ChipInput
             chips={toChips} onChipsChange={setToChips}
             value={toInput} onChange={setToInput}
@@ -3172,7 +3214,7 @@ export default function ComposeModal() {
         {/* Cc */}
         {showCc && (
           <div style={{ display: 'flex', alignItems: 'flex-start', borderBottom: '1px solid var(--border-subtle)', padding: '0 12px' }}>
-            <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.cc')}</span>
+            {gmailLayout ? <button type="button" className="mailflow-recipient-picker-label" onClick={() => setContactPickerField('cc')} aria-label={`${t('compose.selectContacts', 'Select contacts')}: ${t('compose.cc')}`}>{t('compose.cc')}</button> : <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.cc')}</span>}
             <ChipInput
               chips={ccChips} onChipsChange={setCcChips}
               value={ccInput} onChange={setCcInput}
@@ -3187,7 +3229,7 @@ export default function ComposeModal() {
         {/* Bcc */}
         {showBcc && (
           <div style={{ display: 'flex', alignItems: 'flex-start', borderBottom: '1px solid var(--border-subtle)', padding: '0 12px' }}>
-            <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.bcc')}</span>
+            {gmailLayout ? <button type="button" className="mailflow-recipient-picker-label" onClick={() => setContactPickerField('bcc')} aria-label={`${t('compose.selectContacts', 'Select contacts')}: ${t('compose.bcc')}`}>{t('compose.bcc')}</button> : <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.bcc')}</span>}
             <ChipInput
               chips={bccChips} onChipsChange={setBccChips}
               value={bccInput} onChange={setBccInput}
@@ -3211,7 +3253,7 @@ export default function ComposeModal() {
       </div>
 
       {/* Toolbar — sits outside overflow container so dropdowns are never clipped */}
-      {!plaintextEmail && <RichToolbar editor={editor} onAttach={() => fileInputRef.current?.click()} onInsertImage={() => imageInputRef.current?.click()}
+      {!plaintextEmail && (!gmailLayout || showGmailFormatting) && <RichToolbar editor={editor} onAttach={() => fileInputRef.current?.click()} onInsertImage={() => imageInputRef.current?.click()}
         signatureControl={renderSignatureToggle()}
         htmlMode={htmlMode}
         onToggleHtml={() => {
@@ -3327,12 +3369,12 @@ export default function ComposeModal() {
       </div>
 
       {/* Footer */}
-      <div style={{
+      <div className="mailflow-compose-footer" style={{
         padding: '10px 14px', borderTop: '1px solid var(--border-subtle)',
         display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
       }}>
         {/* Split Send button: the chevron opens Send later (design 5.1, 5.4). */}
-        <div style={{ position: 'relative', display: 'flex', flexShrink: 0 }}>
+        <div className="mailflow-compose-send" style={{ position: 'relative', display: 'flex', flexShrink: 0 }}>
           <button
             onClick={() => handleSend()}
             disabled={sendDisabled}
@@ -3387,7 +3429,10 @@ export default function ComposeModal() {
           )}
         </div>
 
-        {plaintextEmail && (
+        {gmailLayout && !plaintextEmail && <button type="button" className="mailflow-formatting-toggle"
+          aria-label={t('compose.formattingOptions', 'Formatting options')} aria-pressed={showGmailFormatting}
+          onClick={() => setShowGmailFormatting(value => !value)}>A</button>}
+        {(plaintextEmail || gmailLayout) && (
           <button
             type="button"
             title={t('compose.toolbar.attachFile')}
@@ -3605,6 +3650,7 @@ export default function ComposeModal() {
     {scheduleOverlays}
     </>
   );
+  return inlineReply ? createPortal(desktopCompose, gmailReplyTarget.element) : desktopCompose;
 }
 
 const COLORS = ['#000000','#444444','#888888','#ffffff','#e03131','#f76707','#f59f00','#2f9e44','#1971c2','#7048e8','#c2255c'];
@@ -3862,6 +3908,7 @@ function ComposeAiPanel({ panel, mobile = false, onInstructionChange, onGenerate
 
 function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMode, onToggleHtml, isMobile, aiEnabled, aiReplyEnabled, onAiAction, aiPanelOpen }) {
   const { t } = useTranslation();
+  const gmailLayout = useStore(s => s.layout === 'gmail');
   const uiScale = useUiScale();
   const savedSelectionRef = useRef(null);
   const [aiMenuPos, setAiMenuPos] = useState(null);
@@ -3873,6 +3920,8 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
   const [linkPos, setLinkPos] = useState(null);
   const [tablePos, setTablePos] = useState(null);
   const [linkUrl, setLinkUrl] = useState('');
+  const [linkText, setLinkText] = useState('');
+  const [linkError, setLinkError] = useState(false);
   const typeMenuBtnRef = useRef(null);
   const emojiBtnRef = useRef(null);
   const linkBtnRef = useRef(null);
@@ -3987,6 +4036,13 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
   const openLink = (e) => {
     e.preventDefault();
     if (linkPos) { setLinkPos(null); return; }
+    if (gmailLayout) {
+      if (editor.isActive('link')) editor.chain().extendMarkRange('link').run();
+      saveSelection();
+      const { from, to } = editor.state.selection;
+      setLinkText(editor.state.doc.textBetween(from, to, ' '));
+      setLinkError(false);
+    }
     const r = linkBtnRef.current.getBoundingClientRect();
     const left = Math.max(4, Math.min(r.left, window.innerWidth - 300));
     setLinkPos({ top: r.bottom + 4, left });
@@ -3994,9 +4050,19 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
     setLinkUrl(editor.getAttributes('link').href || '');
   };
   const submitLink = () => {
-    if (linkUrl) {
-      const href = linkUrl.startsWith('http') ? linkUrl : 'https://' + linkUrl;
-      editor.chain().focus().setLink({ href }).run();
+    if (gmailLayout ? linkUrl.trim() : linkUrl) {
+      const href = gmailLayout ? normalizeComposeLink(linkUrl) : (linkUrl.startsWith('http') ? linkUrl : 'https://' + linkUrl);
+      if (href === null) { setLinkError(true); return; }
+      if (gmailLayout) {
+        const selection = restoreSelection();
+        const text = linkText || href;
+        const currentText = editor.state.doc.textBetween(selection.from, selection.to, ' ');
+        if (text === currentText) editor.chain().focus().setTextSelection(selection).setLink({ href }).run();
+        else {
+          const marks = (editor.state.storedMarks || editor.state.selection.$from.marks()).filter(mark => mark.type.name !== 'link').map(mark => mark.toJSON());
+          editor.chain().focus().setTextSelection(selection).insertContent({ type: 'text', text, marks: [...marks, { type: 'link', attrs: { href } }] }).run();
+        }
+      } else editor.chain().focus().setLink({ href }).run();
       // unsetMark() skips collapsed selections and never touches storedMarks,
       // so we go through the ProseMirror transaction API directly to remove
       // the link mark from storedMarks — otherwise the next typed char is linked.
@@ -4132,7 +4198,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
           )}
         </>
       ) : (
-      <div ref={desktopBarRef} style={{ borderBottom: '1px solid var(--border-subtle)', display: 'flex', gap: 2, padding: '4px 10px', flexWrap: 'wrap', alignItems: 'center' }}>
+      <div ref={desktopBarRef} className="mailflow-compose-formatting" style={{ borderBottom: '1px solid var(--border-subtle)', display: 'flex', gap: 2, padding: '4px 10px', flexWrap: 'wrap', alignItems: 'center' }}>
         {onAttach && (
           <button title={t('compose.toolbar.attachFile')} onMouseDown={e => { e.preventDefault(); onAttach(); }}
             style={{ background: 'none', border: 'none', borderRadius: 4, padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', color: 'var(--text-secondary)' }}>
@@ -4321,12 +4387,16 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
           display: 'flex', flexDirection: 'column', gap: 8, width: 280,
         }}>
           <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontWeight: 500 }}>{t('compose.toolbar.insertLink')}</span>
+          {gmailLayout && <input value={linkText} onChange={event => setLinkText(event.target.value)} aria-label={t('compose.linkText', 'Text to display')}
+            placeholder={t('compose.linkText', 'Text to display')} onKeyDown={event => { if (event.key === 'Escape') setLinkPos(null); }}
+            style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 5, padding: '6px 8px', color: 'var(--text-primary)', fontSize: 12 }} />}
+          {gmailLayout && linkError && <span role="alert" style={{ color: 'var(--red)', fontSize: 12 }}>{t('compose.invalidLink', 'Enter a valid web or email link.')}</span>}
           <div style={{ display: 'flex', gap: 6 }}>
-            <input ref={linkInputRef} value={linkUrl} onChange={e => setLinkUrl(e.target.value)}
+            <input aria-label={t('compose.toolbar.insertLink')} ref={linkInputRef} value={linkUrl} onChange={e => setLinkUrl(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); submitLink(); } if (e.key === 'Escape') setLinkPos(null); }}
               placeholder="https://..."
               style={{ flex: 1, background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 5, padding: '6px 8px', color: 'var(--text-primary)', fontSize: 12, outline: 'none' }} />
-            <button onMouseDown={e => { e.preventDefault(); submitLink(); }}
+            <button onMouseDown={e => { e.preventDefault(); if (!gmailLayout) submitLink(); }} onClick={gmailLayout ? submitLink : undefined}
               style={{ background: 'var(--accent)', border: 'none', borderRadius: 5, color: 'var(--accent-text)', fontSize: 12, padding: '6px 12px', cursor: 'pointer', flexShrink: 0 }}>{t('compose.toolbar.apply')}</button>
           </div>
           {es.link && (
@@ -4503,6 +4573,7 @@ function AttachmentChips({ attachments, onRemove, mobile }) {
 
 function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFocus, inputRef: givenInputRef, inputStyle, getSuggestions, containerStyle }) {
   const { t } = useTranslation();
+  const gmailLayout = useStore(s => s.layout === 'gmail');
   const uiScale = useUiScale();
   const [suggestions, setSuggestions] = useState([]);
   const [suggIdx, setSuggIdx] = useState(-1);
@@ -4544,7 +4615,7 @@ function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFoc
 
   const commitInput = () => {
     const trimmed = value.trim();
-    if (trimmed) { onChipsChange([...chips, trimmed]); onChange(''); }
+    if (trimmed) { onChipsChange(gmailLayout ? mergeRecipientTokens(chips, splitRecipientTokens(trimmed)) : [...chips, trimmed]); onChange(''); }
     clearSuggestions();
   };
 
@@ -4573,7 +4644,7 @@ function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFoc
         return;
       }
     }
-    if (e.key === ',' || e.key === 'Enter' || e.key === 'Tab') {
+    if (e.key === ',' || (gmailLayout && e.key === ';') || e.key === 'Enter' || e.key === 'Tab') {
       if (value.trim()) { e.preventDefault(); commitInput(); }
     } else if (e.key === 'Backspace' && !value && chips.length) {
       onChipsChange(chips.slice(0, -1));
@@ -4627,10 +4698,18 @@ function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFoc
   ] : [];
 
   return (
-    <div ref={wrapperRef} style={{ display: 'flex', flexWrap: 'wrap', gap: 4, flex: 1, alignItems: 'center', padding: '5px 0', minWidth: 0, ...containerStyle }}>
+    <div ref={wrapperRef} className="mailflow-recipient-chips" style={{ display: 'flex', flexWrap: 'wrap', gap: 4, flex: 1, alignItems: 'center', padding: '5px 0', minWidth: 0, ...containerStyle }}>
       {chips.map((chip, i) => (
         <span key={i}
           title={chip}
+          role={gmailLayout ? 'group' : undefined}
+          tabIndex={gmailLayout ? 0 : undefined}
+          aria-label={gmailLayout ? `${t('common.edit')}: ${chip}` : undefined}
+          onKeyDown={gmailLayout ? event => {
+            if (event.target !== event.currentTarget) return;
+            if (event.key === 'Enter') { event.preventDefault(); startEdit(i); }
+            if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); onChipsChange(chips.filter((_, j) => j !== i)); }
+          } : undefined}
           onDoubleClick={() => startEdit(i)}
           onContextMenu={(e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, i); }}
           onTouchStart={(e) => onChipTouchStart(e, i)}
@@ -4645,6 +4724,7 @@ function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFoc
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{chip}</span>
           <button
             type="button"
+            aria-label={`${t('common.remove')}: ${chip}`}
             onClick={() => onChipsChange(chips.filter((_, j) => j !== i))}
             style={{ background: 'none', border: 'none', padding: '0 0 0 2px', cursor: 'pointer', color: 'var(--accent)', display: 'flex', lineHeight: 1, flexShrink: 0 }}
           >
@@ -4660,6 +4740,16 @@ function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFoc
         value={value}
         onChange={e => onChange(e.target.value)}
         onKeyDown={handleKeyDown}
+        onPaste={gmailLayout ? event => {
+          const text = event.clipboardData?.getData('text/plain') || '';
+          if (!/[,;\r\n]/.test(text)) return;
+          event.preventDefault();
+          const input = event.currentTarget;
+          const merged = value.slice(0, input.selectionStart ?? value.length) + text + value.slice(input.selectionEnd ?? value.length);
+          onChipsChange(mergeRecipientTokens(chips, splitRecipientTokens(merged)));
+          onChange('');
+          clearSuggestions();
+        } : undefined}
         onBlur={commitInput}
         placeholder={chips.length ? '' : placeholder}
         autoFocus={autoFocus}

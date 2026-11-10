@@ -568,6 +568,10 @@
       "list": {
         "label": "목록 우선",
         "description": "전체 너비 목록, 메시지는 따로 열림"
+      },
+      "gmail": {
+        "label": "Gmail",
+        "description": "전체 너비 받은편지함과 집중해서 읽을 수 있는 Gmail 스타일 화면"
       }
     },
     "noAccountsDesc": "시작하려면 이메일 계정을 추가하세요",
@@ -2234,7 +2238,13 @@
     "onlyCopy": "이 메시지의 유일한 사본이므로 라벨을 삭제하면 메시지도 삭제됩니다. 대신 보관하거나 이동하세요.",
     "labelChanged": "이 라벨이 서버에서 변경되어 삭제되지 않았습니다. 새로고침한 후 다시 시도하세요.",
     "doneArchiveFailed": "완료로 표시했지만 보관에 실패했습니다. 여전히 받은편지함에 있습니다.",
-    "doneThreadRemains": "이 대화의 일부 메시지를 정리하지 못해 GTD 섹션에 그대로 남아 있습니다"
+    "doneThreadRemains": "이 대화의 일부 메시지를 정리하지 못해 GTD 섹션에 그대로 남아 있습니다",
+    "gmail": {
+      "action": "조치 / 답장 필요",
+      "awaiting": "답장 대기 중",
+      "reference": "참고 / 일정",
+      "bounded": "전체 {{total}}개 중 최근 {{available}}개입니다. 이전 메일은 라벨 폴더에 있습니다."
+    }
   },
   "rightSidebar": {
     "show": "오른쪽 사이드바 표시",

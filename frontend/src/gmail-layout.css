@@ -1,0 +1,282 @@
+/* Opt-in Gmail-inspired chrome. The existing palette, mail primitives and plugin
+   slots remain authoritative; switching layouts removes every rule below. */
+html[data-mailflow-layout="gmail"] {
+  --gmail-shell: var(--bg-primary);
+  --gmail-surface: var(--bg-secondary);
+  --gmail-selected: var(--accent-dim);
+  --gmail-hover: var(--bg-hover);
+  --gmail-row-read: var(--bg-tertiary);
+  --gmail-row-unread: var(--bg-secondary);
+  --gmail-compose-background: var(--accent-dim);
+  --gmail-compose-color: var(--text-primary);
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-app,
+html[data-mailflow-layout="gmail"] .mailflow-shell {
+  background: var(--gmail-shell) !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-shell[data-mobile="false"] {
+  flex-direction: column;
+  padding: 0;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-workspace {
+  border-radius: 20px;
+  background: var(--gmail-surface);
+  isolation: isolate;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar {
+  background: var(--gmail-shell) !important;
+  border-right: 0 !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar-header {
+  min-height: 64px !important;
+  border-bottom: 0 !important;
+  gap: 8px;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar-header > button {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50% !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-brand {
+  min-width: 0;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar-compose {
+  padding: 8px 12px 20px !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-compose-launcher {
+  width: auto !important;
+  max-width: 100%;
+  min-height: 56px;
+  padding: 16px 22px !important;
+  gap: 14px !important;
+  border-radius: 16px !important;
+  background: var(--gmail-compose-background) !important;
+  color: var(--gmail-compose-color) !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  box-shadow: none;
+  transition: box-shadow var(--motion-fast), opacity var(--motion-fast) !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-compose-launcher:hover {
+  box-shadow: var(--shadow-soft);
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-compose-launcher > svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar [data-mailbox-sidebar] {
+  padding: 4px 12px 12px 8px !important;
+  scrollbar-width: thin;
+}
+
+/* Retain each folder's inline left indent, drag highlight, badge and icon color. */
+html[data-mailflow-layout="gmail"] .mailflow-sidebar [data-mailbox-row],
+html[data-mailflow-layout="gmail"] .mailflow-sidebar .nav-item {
+  min-height: 32px;
+  border-radius: 0 20px 20px 0 !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar [data-mailbox-row][data-active="true"],
+html[data-mailflow-layout="gmail"] .mailflow-sidebar .nav-item-active {
+  background: var(--gmail-selected) !important;
+  color: var(--text-primary) !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar [data-mailbox-row]:focus-visible,
+html[data-mailflow-layout="gmail"] .mailflow-sidebar .nav-item:focus-visible {
+  outline-offset: -2px;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar-footer {
+  border-top: 0 !important;
+}
+
+/* Keep the resize target's full width and its hover affordance. */
+html[data-mailflow-layout="gmail"] .mailflow-sidebar-resizer {
+  border-radius: 4px;
+  margin-right: 8px;
+  opacity: 0.35;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar-resizer:hover {
+  opacity: 1;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-right-sidebar {
+  background: var(--gmail-surface) !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar[data-collapsed="true"] .mailflow-sidebar-compose {
+  padding: 8px 8px 20px !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar[data-collapsed="true"] .mailflow-compose-launcher {
+  width: 44px !important;
+  min-height: 48px;
+  padding: 12px !important;
+  border-radius: 16px !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar[data-collapsed="true"] [data-mailbox-sidebar] {
+  padding: 4px 6px 12px !important;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-sidebar[data-collapsed="true"] [data-mailbox-row],
+html[data-mailflow-layout="gmail"] .mailflow-sidebar[data-collapsed="true"] .nav-item {
+  border-radius: 16px !important;
+}
+
+/* Mobile keeps the existing edge-to-edge panes and translated sidebar drawer. */
+html[data-mailflow-layout="gmail"] .mailflow-shell[data-mobile="true"] .mailflow-sidebar {
+  background: var(--gmail-surface) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-mailflow-layout="gmail"] .mailflow-compose-launcher {
+    transition: none !important;
+  }
+}
+
+/* Persistent desktop chrome mirrors the reference's 64px header, flexible
+   search region and right-aligned controls. Native menus remain functional. */
+html[data-mailflow-layout="gmail"] .mailflow-gmail-header {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-height: calc(64px + var(--sat));
+  padding: var(--sat) 16px 0 0;
+  gap: 0;
+  position: relative;
+  z-index: 30;
+  background: var(--gmail-shell);
+  color: var(--text-primary);
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-header-brand {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-width: 0;
+  gap: 4px;
+  padding-left: 12px;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-icon-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  padding: 8px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-icon-button:hover,
+html[data-mailflow-layout="gmail"] .mailflow-gmail-icon-button[aria-pressed="true"] {
+  background: var(--gmail-hover);
+  color: var(--text-primary);
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-home {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 28px;
+  cursor: pointer;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-search-host {
+  flex: 1 1 720px;
+  min-width: 120px;
+  max-width: 720px;
+  position: relative;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding-left: 16px;
+  flex-shrink: 0;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-account {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 4px;
+  margin-left: 8px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-account:hover {
+  background: var(--gmail-hover);
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-account > img,
+html[data-mailflow-layout="gmail"] .mailflow-gmail-account > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-shell[data-mobile="false"] > .mailflow-mail-body {
+  padding: 0 12px 12px 0;
+  height: auto !important;
+  overflow: hidden;
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-shell[data-mobile="false"] .mailflow-workspace {
+  padding-top: 0 !important;
+}
+
+@media (max-width: 1050px) {
+  html[data-mailflow-layout="gmail"] .mailflow-gmail-header-brand {
+    flex-basis: 200px !important;
+  }
+
+  html[data-mailflow-layout="gmail"] .mailflow-gmail-header-controls {
+    gap: 0;
+    padding-left: 8px;
+  }
+}
