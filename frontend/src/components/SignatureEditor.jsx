@@ -1,3 +1,4 @@
+import DOMPurify from 'dompurify';
 import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
@@ -14,6 +15,7 @@ function ToolBtn({ onClick, title, active, children }) {
   const [hov, setHov] = useState(false);
   return (
     <button
+      type="button"
       title={title}
       onMouseDown={e => { e.preventDefault(); onClick(); }}
       onMouseEnter={() => setHov(true)}
@@ -33,7 +35,7 @@ function Sep() {
   return <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 3px', flexShrink: 0 }} />;
 }
 
-export default function SignatureEditor({ value, onChange }) {
+export default function SignatureEditor({ value, onChange, disabled = false }) {
   const { t } = useTranslation();
   const { addNotification } = useStore();
   const editorRef = useRef(null);
@@ -44,15 +46,16 @@ export default function SignatureEditor({ value, onChange }) {
   // Seed the contenteditable on first mount only
   useEffect(() => {
     if (editorRef.current) {
-      editorRef.current.innerHTML = value || '';
+      editorRef.current.innerHTML = DOMPurify.sanitize(value || '', { FORBID_TAGS: ['style'] });
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const emit = () => onChange(editorRef.current?.innerHTML || '');
+  const emit = () => { if (!disabled) onChange(editorRef.current?.innerHTML || ''); };
 
   // onMouseDown + e.preventDefault() keeps focus in the contenteditable so
   // execCommand acts on the current selection rather than on nothing.
   const exec = (cmd, val) => {
+    if (disabled) return;
     document.execCommand(cmd, false, val ?? null);
     editorRef.current?.focus();
     emit();
@@ -67,7 +70,7 @@ export default function SignatureEditor({ value, onChange }) {
 
   const insertImageFromUrl = () => {
     const url = window.prompt(t('signatureEditor.imageUrlPrompt'));
-    if (url) exec('insertImage', url);
+    if (url && /^(https:\/\/|data:image\/(png|jpeg|gif|webp);base64,)/i.test(url)) exec('insertImage', url);
   };
 
   const handleFileUpload = (e) => {
@@ -85,6 +88,7 @@ export default function SignatureEditor({ value, onChange }) {
   };
 
   const toggleSource = () => {
+    if (disabled) return;
     if (!showSource) {
       // Visual → Source: capture current HTML
       const html = editorRef.current?.innerHTML || '';
@@ -96,14 +100,16 @@ export default function SignatureEditor({ value, onChange }) {
       // Use a microtask so the div is back in the DOM before we write to it
       setTimeout(() => {
         if (editorRef.current) {
-          editorRef.current.innerHTML = sourceVal;
-          onChange(sourceVal);
+          const safe = DOMPurify.sanitize(sourceVal, { FORBID_TAGS: ['style'] });
+          editorRef.current.innerHTML = safe;
+          onChange(safe);
         }
       }, 0);
     }
   };
 
   const handleSourceChange = (e) => {
+    if (disabled) return;
     setSourceVal(e.target.value);
     onChange(e.target.value);
   };
@@ -188,6 +194,8 @@ export default function SignatureEditor({ value, onChange }) {
       {/* Editor area */}
       {showSource ? (
         <textarea
+          disabled={disabled}
+          aria-label={t('signatureLibrary.html', 'Signature HTML')}
           value={sourceVal}
           onChange={handleSourceChange}
           spellCheck={false}
@@ -203,7 +211,11 @@ export default function SignatureEditor({ value, onChange }) {
       ) : (
         <div
           ref={editorRef}
-          contentEditable
+          contentEditable={!disabled}
+          aria-disabled={disabled}
+          role="textbox"
+          aria-multiline="true"
+          aria-label={t('signatureLibrary.text', 'Signature text')}
           suppressContentEditableWarning
           onInput={emit}
           onPaste={pasteWithoutPageColors}

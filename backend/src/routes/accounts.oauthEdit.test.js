@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => { const query = vi.fn(); return { query, withTransaction: fn => fn({ query }) }; });
+vi.mock('../services/messageIdentity.js', () => ({ applyStorageIdentityDecision: vi.fn(async () => ({})), getIdentityStatus: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
@@ -34,12 +35,13 @@ describe('PUT /api/accounts/:id for an OAuth account', () => {
   beforeEach(() => {
     query.mockReset().mockImplementation(async (sql) => {
       if (/^SELECT id, oauth_provider FROM email_accounts/.test(sql)) return { rows: [{ id: ID, oauth_provider: provider }] };
+      if (/^SELECT \* FROM email_accounts/.test(sql)) return { rows: [{ id: ID, oauth_provider: provider, auth_user: 'me', imap_host: 'imap.example.com', imap_port: 993, storage_generation: ID }] };
       if (/^UPDATE email_accounts/.test(sql)) return { rows: [{ id: ID }] };
       return { rows: [] };
     });
   });
 
-  const put = (body) => fetch(`${base}/${ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const put = (body) => fetch(`${base}/${ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedStorageGeneration: ID, storageIdentityDecision: 'preserve', ...body }) });
   const updateSql = () => query.mock.calls.find(([sql]) => /^UPDATE email_accounts/.test(sql))?.[0] || '';
   const everything = {
     name: 'Maria', imap_host: 'evil.example.com', imap_port: 993, imap_skip_tls_verify: true,

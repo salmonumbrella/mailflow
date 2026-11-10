@@ -1,3 +1,4 @@
+import { CURRENT_MESSAGE_IDENTITY_SQL } from '../services/messageReadScope.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { query } from '../services/db.js';
 import { recordSyncSignal } from '../services/diagnosticsRing.js';
@@ -204,7 +205,7 @@ export async function folderRoles(accountId, path) {
             ${mapped('drafts')} AS mapped_drafts,
             ${mapped('spam')} AS mapped_spam,
             COALESCE(lower(name) = 'snoozed' AND ${TOP_LEVEL_FOLDER_SQL}, false) AS snoozed_rule,
-            EXISTS (SELECT 1 FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.snoozed_folder = $2) AS snooze_record
+            EXISTS (SELECT 1 FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.storage_generation=(SELECT storage_generation FROM email_accounts WHERE id=$1) AND sm.snoozed_folder = $2) AS snooze_record
        FROM folders WHERE account_id = $1 AND path = $2`,
     [accountId, path]
   );
@@ -235,14 +236,15 @@ export async function resolveSentFolder(accountId, folderMappings) {
 
 // Adjust cached folder row counts after local message mutations so that pagination
 // totals stay accurate without waiting for the next IMAP sync. Fire-and-forget —
-// errors are logged but never block the caller; sync will correct any discrepancy.
-export function adjustFolderCounts(accountId, path, totalDelta, unreadDelta) {
+// errors are logged but never block default callers; sync corrects discrepancies.
+// An explicit query executor joins the caller's transaction and propagates failures.
+export function adjustFolderCounts(accountId, path, totalDelta, unreadDelta, queryFn = query) {
   if (totalDelta === 0 && unreadDelta === 0) return;
   // Snapshot the pre-update counters (prev) so RETURNING can tell whether the GREATEST(0, …)
   // clamp actually fired. A clamp means the cached counter was already below the applied
   // delta — i.e. the incremental count had drifted under the true value, which is exactly the
   // phantom-badge mechanism. The clamped writes are unchanged; this only observes them.
-  query(
+  return queryFn(
     `WITH prev AS (
        SELECT total_count AS ot, unread_count AS ou
          FROM folders WHERE account_id = $3 AND path = $4
@@ -259,7 +261,11 @@ export function adjustFolderCounts(accountId, path, totalDelta, unreadDelta) {
     if (row && (row.unread_clamped || row.total_clamped)) {
       recordSyncSignal('badge_count_clamp', { accountId });
     }
-  }).catch(err => console.error('Folder count adjust failed:', err.message));
+  }).catch(err => {
+    console.error('Folder count adjust failed:', err.message);
+    // A transaction must roll back its cache write too when a count write fails.
+    if (queryFn !== query) throw err;
+  });
 }
 
 // Fan a read-state change out to a message's sibling label rows. Under GTD a single
@@ -269,16 +275,17 @@ export function adjustFolderCounts(accountId, path, totalDelta, unreadDelta) {
 // (already at the target state), so only rows that genuinely flip are returned — and
 // each returned folder gets its unread count adjusted. Callers gate on the message
 // actually having siblings, so a plain single-folder message never reaches here.
-export async function fanOutReadToSiblings(accountId, messageId, read) {
+export async function fanOutReadToSiblings(accountId, messageId, read, { queryFn = query, storageGeneration } = {}) {
   if (!messageId) return []; // no shared header → no siblings to fan out to
-  const res = await query(
+  const res = await queryFn(
     `UPDATE messages SET is_read = $1, read_changed_at = NOW()
       WHERE account_id = $2 AND message_id = $3 AND is_read <> $1
-      RETURNING id, account_id, uid, folder, message_id, is_deleted`,
-    [read, accountId, messageId]
+      ${storageGeneration ? `AND storage_generation=$4 AND ${CURRENT_MESSAGE_IDENTITY_SQL}` : ''}
+      RETURNING id, account_id, uid, folder, message_id, is_deleted, storage_generation, uid_validity, entity_id`,
+    [read, accountId, messageId, ...(storageGeneration ? [storageGeneration] : [])]
   );
   for (const row of res.rows) {
-    adjustFolderCounts(accountId, row.folder, 0, read ? -1 : 1);
+    await adjustFolderCounts(accountId, row.folder, 0, read ? -1 : 1, queryFn);
   }
   return res.rows;
 }
@@ -286,12 +293,13 @@ export async function fanOutReadToSiblings(accountId, messageId, read) {
 // Star fan-out counterpart. Stars never contribute to folder unread counts (the star
 // route has never touched adjustFolderCounts), so this only mirrors the flag across
 // sibling rows.
-export async function fanOutStarToSiblings(accountId, messageId, starred) {
+export async function fanOutStarToSiblings(accountId, messageId, starred, { queryFn = query, storageGeneration } = {}) {
   if (!messageId) return;
-  await query(
+  await queryFn(
     `UPDATE messages SET is_starred = $1, star_changed_at = NOW()
-      WHERE account_id = $2 AND message_id = $3 AND is_starred <> $1`,
-    [starred, accountId, messageId]
+      WHERE account_id = $2 AND message_id = $3 AND is_starred <> $1
+      ${storageGeneration ? `AND storage_generation=$4 AND ${CURRENT_MESSAGE_IDENTITY_SQL}` : ''}`,
+    [starred, accountId, messageId, ...(storageGeneration ? [storageGeneration] : [])]
   );
 }
 
@@ -332,22 +340,24 @@ export async function fanOutBulkReadToSiblings(actedIds, read) {
 // Header identity and a configured label relationship are conservative copy evidence.
 // Check every live row, not just flipped rows, and require an unchanged acted witness.
 // Display bodies are mutable caches, so their representation cannot disprove a copy.
-export async function readCopyTargets(accountId, messageId, actedRows) {
+export async function readCopyTargets(accountId, messageId, actedRows, { queryFn = query, storageGeneration } = {}) {
   if (typeof messageId !== 'string') return [];
   const bare = messageId.trim().replace(/^<([^<>]+)>$/, '$1');
   if (!/^[^<>\s@]+@[^<>\s@]+$/.test(bare)) return [];
   const folders = new Set((await pluginRegistry.collectHook('relocateExemptFolders', { accountId })).flat());
   if (!folders.size) return [];
-  const { rows } = await query(
+  const { rows } = await queryFn(
     `SELECT id, account_id, uid, folder, message_id, is_deleted, is_read, from_email, date, subject,
-            to_addresses, cc_addresses
-       FROM messages WHERE account_id = $1 AND message_id = $2 AND is_deleted = false LIMIT 65`,
-    [accountId, messageId]
+            to_addresses, cc_addresses, storage_generation, uid_validity, entity_id
+       FROM messages WHERE account_id = $1 AND message_id = $2 AND is_deleted = false
+       ${storageGeneration ? `AND storage_generation=$3 AND ${CURRENT_MESSAGE_IDENTITY_SQL}` : ''} LIMIT 65`,
+    [accountId, messageId, ...(storageGeneration ? [storageGeneration] : [])]
   );
   if (rows.length < 2 || rows.length > 64 || new Set(rows.map(r => r.folder)).size !== rows.length) return [];
   if (!rows.some(r => folders.has(r.folder))) return [];
   const witnesses = Array.isArray(actedRows) ? actedRows : [actedRows];
-  if (!witnesses.some(w => w && !w.is_deleted && rows.some(r => r.id === w.id && r.folder === w.folder && Number(r.uid) === Number(w.uid)))) return [];
+  if (!witnesses.some(w => w && !w.is_deleted && rows.some(r => r.id === w.id && r.folder === w.folder && Number(r.uid) === Number(w.uid)
+    && (!storageGeneration || (r.storage_generation === w.storage_generation && r.entity_id === w.entity_id && String(r.uid_validity) === String(w.uid_validity)))))) return [];
   if (rows.some(r => !r.from_email || !r.date || !Number.isSafeInteger(Number(r.uid)) || Number(r.uid) <= 0)) return [];
   for (const field of ['from_email', 'date', 'subject', 'to_addresses', 'cc_addresses']) {
     if (new Set(rows.map(r => JSON.stringify(r[field] ?? null))).size > 1) return [];
@@ -362,12 +372,13 @@ export async function pushSeen(manager, account, accountId, rows, read) {
   const pushedIds = [];
   await Promise.all(unique.map(async row => {
     try {
-      await manager.setFlag(account, row.uid, row.folder, '\\Seen', read);
+      await manager.setFlag(account, row.uid, row.folder, '\\Seen', read,
+        ...(row.storage_generation ? [{ expectedSource: { ...row } }] : []));
       manager._resolveFlagPush(accountId, row.id, '\\Seen');
       pushedIds.push(row.id);
     } catch (err) {
       console.warn(`Read-copy push failed for ${row.id}:`, err.message);
-      manager._enqueueFlagPush(accountId, row.id, '\\Seen', read);
+      if (!/^(identity_|storage_generation_)/.test(err.code || '')) manager._enqueueFlagPush(accountId, row.id, '\\Seen', read, { expectedSource: { ...row } });
     }
   }));
   return pushedIds;

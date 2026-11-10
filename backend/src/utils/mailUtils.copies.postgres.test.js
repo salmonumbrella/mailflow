@@ -24,7 +24,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('copy eligibility on Po
       id uuid PRIMARY KEY, account_id uuid, uid bigint, folder text, message_id text,
       is_deleted boolean DEFAULT false, is_read boolean DEFAULT false, from_email text,
       date timestamptz, subject text, body_text text, body_html text,
-      to_addresses jsonb, cc_addresses jsonb
+      to_addresses jsonb, cc_addresses jsonb,
+      storage_generation uuid, uid_validity bigint, entity_id uuid
     )`);
     query.mockImplementation((sql, params) => db.query(sql, params));
   });
@@ -38,8 +39,12 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('copy eligibility on Po
       [id, account, uid, folder, mid]);
     }
   });
-  it('returns both identical copies using the real SQL projection', async () => {
-    expect((await readCopyTargets(account, mid, acted)).map(r => r.id).sort()).toEqual([A, B]);
+  it('returns both legacy eligible copies without manufacturing durable identity', async () => {
+    const copies = await readCopyTargets(account, mid, acted);
+    expect(copies.map(r => r.id).sort()).toEqual([A, B]);
+    expect(copies).toEqual(expect.arrayContaining([A, B].map(id => expect.objectContaining({
+      id, storage_generation: null, uid_validity: null, entity_id: null,
+    }))));
   });
   it.each([
     ['to_addresses', '[{"email":"another@example.test"}]'], ['cc_addresses', '[{"email":"copy@example.test"}]'],

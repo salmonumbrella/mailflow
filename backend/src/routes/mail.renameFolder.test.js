@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/messageIdentity.js', async () => await import('../services/testSupport/identityTestAdapter.js'));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
@@ -21,7 +22,7 @@ const OTHER_ACCOUNT_ID = 'e5e5e5e5-5555-4555-8555-e5e5e5e5e5e5';
 let tables;
 
 function fakeQuery(rawSql, params = []) {
-  const sql = rawSql.replace(/\s+/g, ' ').trim();
+  const sql = rawSql.replace(/\s+/g, ' ').trim().replace(' AND storage_generation=(SELECT storage_generation FROM email_accounts WHERE id=$1)', '');
   if (sql.includes('FROM email_accounts WHERE id = $1 AND user_id = $2')) {
     return Promise.resolve({ rows: [{ id: ACCOUNT_ID, user_id: 'user-1' }] });
   }
@@ -60,7 +61,7 @@ describe('POST /api/mail/folders/rename — pending snoozes', () => {
     query.mockReset();
     query.mockImplementation(fakeQuery);
     imapManager.renameFolder.mockReset();
-    imapManager.renameFolder.mockResolvedValue(undefined);
+    imapManager.renameFolder.mockResolvedValue({ identityContext: { accountId: ACCOUNT_ID, storageGeneration: 'test-generation', folderPath: 'INBOX.Snoozed', uidValidity: '10', revision: '1' } });
   });
 
   const rename = (oldPath, newName) => fetch(`${base}/api/mail/folders/rename`, {

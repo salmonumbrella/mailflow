@@ -67,6 +67,20 @@ describe('apply only one saved filter to existing Inbox messages', () => {
     await tick();
     expect(imap.broadcast.mock.calls[0][0]).toMatchObject({ ok: false, failed: 1, matched: 1 });
   });
+  it('reports pending identity recovery without failure or replaying the same run', async () => {
+    applyInboxRules.mockResolvedValue({ remaining: [{ id: 'message-1' }], matchedCount: 1, failedCount: 0,
+      identityPending: true, pendingIds: ['message-1'] });
+    const started = await (await run()).json();
+    await tick();
+    const status = await (await fetch(`${base}/${ID}/run?runId=${started.runId}`)).json();
+    expect(status).toMatchObject({ status: 'pending_recovery', processed: 1, matched: 1, failed: 0,
+      pendingCount: 1, identityPending: true });
+    expect(imap.broadcast.mock.calls[0][0]).toMatchObject({ ok: false, status: 'pending_recovery', pendingCount: 1 });
+    const repeated = await run(ID, { accountIds: [ACCOUNT], runId: started.runId });
+    expect(repeated.status).toBe(200);
+    expect(await repeated.json()).toMatchObject({ status: 'pending_recovery', pendingCount: 1 });
+    expect(applyInboxRules).toHaveBeenCalledOnce();
+  });
   it('excludes simultaneous targeted or all-rule sweeps', async () => {
     let release;
     applyInboxRules.mockImplementation(() => new Promise(resolve => { release = resolve; }));

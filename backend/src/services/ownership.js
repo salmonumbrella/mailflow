@@ -49,7 +49,7 @@ export function checkColumns(columns) {
 }
 
 // One of the user's accounts. `enabled` adds enabled = true; `protocol` limits it to one protocol.
-export async function findOwnedAccount(userId, accountId, { columns = '*', enabled = false, protocol, client = pool } = {}) {
+export async function findOwnedAccount(userId, accountId, { columns = '*', enabled = false, protocol, forUpdate = false, client = pool } = {}) {
   const params = [accountId, userId];
   let sql = `SELECT ${checkColumns(columns)} FROM email_accounts WHERE id = $1 AND user_id = $2`;
   if (enabled) sql += ' AND enabled = true';
@@ -57,6 +57,7 @@ export async function findOwnedAccount(userId, accountId, { columns = '*', enabl
     params.push(protocol);
     sql += ` AND protocol = $${params.length}`;
   }
+  if (forUpdate) sql += ' FOR UPDATE';
   const { rows } = await client.query(sql, params);
   return rows[0] || null;
 }

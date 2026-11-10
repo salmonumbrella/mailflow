@@ -117,7 +117,9 @@ describe('GET /api/mail/unread-counts unified total', () => {
     const [sql, params] = query.mock.calls[1];
     expect(params).toEqual(['user-1']);
     expect(sql).toContain('a.enabled');
-    expect(sql).toContain('m.folder = sm.snoozed_folder');
+    expect(sql).toContain('sm.snoozed_folder=m.folder');
+    expect(sql).toContain('sl.entity_id=m.entity_id');
+    expect(sql).toContain("sm.wake_state='ready'");
   });
 
   it('still answers the counts when the snoozed count fails', async () => {

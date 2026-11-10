@@ -15,6 +15,7 @@ import {
 } from '../services/scheduledSend.js';
 import { attachmentDisposition } from '../utils/contentDisposition.js';
 import { imapManager } from '../index.js';
+import { accountJobGenerationConflict } from '../services/accountJobGeneration.js';
 
 // The scheduled messages API (#543, design section 2). Every route is the signed-in user's:
 // a message is looked up through findOwnedScheduledMessage, and every change is one UPDATE that
@@ -120,6 +121,8 @@ function checkTimeZone(value) {
 }
 
 const answerSendError = (res, err) => {
+  const conflict = accountJobGenerationConflict(err, 'scheduled message');
+  if (conflict) return fail(res, 409, conflict.error, { code: conflict.code });
   if (!(err instanceof SendError)) throw err;
   return fail(res, err.status, err.message, {
     ...(err.code ? { code: err.code } : {}), ...(err.serverNow ? { serverNow: err.serverNow } : {}),
@@ -324,7 +327,7 @@ router.post('/scheduled', async (req, res) => {
       if (again) return { existing: again };
       await checkUserLimits(client, userId, { adding: 1, addingBytes: bytesOf(spec.payload, spec.attachments) });
       return storeScheduledMessage(client, {
-        id, userId, accountId: spec.account.id, clientKey: body.clientKey, sendAt, timeZone,
+        id, userId, accountId: spec.account.id, storageGeneration: spec.account.storage_generation, clientKey: body.clientKey, sendAt, timeZone,
         payload: spec.payload, summary: summaryOf(spec.input, spec.attachments.length), attachments: spec.attachments,
       });
     });
@@ -590,12 +593,13 @@ router.put('/scheduled/:id', validId, async (req, res) => {
       const at = sendNow ? SEND_NOW_AT : '$2';
       const { rows: [updated] } = await client.query(
         `UPDATE scheduled_messages
-            SET status = 'scheduled', account_id = $4, send_at = ${at}, due_at = ${at}, time_zone = $3, attempts = 0,
+            SET status = 'scheduled', account_id = $4,
+                storage_generation = CASE WHEN account_id = $4 THEN storage_generation ELSE $5::uuid END, send_at = ${at}, due_at = ${at}, time_zone = $3, attempts = 0,
                 failure_code = NULL, pause_reason = NULL, status_before = NULL,
                 edit_token = NULL, edit_lease_until = NULL, smtp_started_at = NULL, updated_at = NOW()
           ${sendNow ? sendNowFrom(2) : ''}
           WHERE id = $1 RETURNING scheduled_messages.*`,
-        [row.id, sendNow ? SEND_NOW_INTERVAL : sendAt, timeZone, spec.account.id],
+        [row.id, sendNow ? SEND_NOW_INTERVAL : sendAt, timeZone, spec.account.id, spec.account.storage_generation],
       );
       return { version, ...(sendNow ? { previous: { ...row, status: row.status_before || 'scheduled' }, updated } : {}) };
     });
@@ -851,6 +855,13 @@ router.delete('/scheduled/:id', validId, async (req, res) => {
   if (!rows.length) return noChange(res, req.session.userId, req.params.id);
   changed(req.session.userId, req.params.id, 'deleted');
   res.status(204).end();
+});
+
+// Includes activation paths without a local catch, such as resume and send-now.
+router.use((err, _req, res, next) => {
+  const conflict = accountJobGenerationConflict(err, 'scheduled message');
+  if (conflict) return fail(res, 409, conflict.error, { code: conflict.code });
+  next(err);
 });
 
 export default router;

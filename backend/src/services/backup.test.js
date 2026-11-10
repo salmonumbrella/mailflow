@@ -284,7 +284,7 @@ describe('writeBackup', () => {
 describe('restoreBackup', () => {
   const rows = [
     manifest(),
-    { table: 'users', rows: [{ id: 'u1', username: 'ann', preferences: '{"a": 1}' }] },
+    { table: 'users', rows: [{ id: 'u1', username: 'ann', preferences: '{"a": 1}', created_at: null }] },
     { table: 'email_accounts', rows: [{ id: 'a1', user_id: 'u1', name: 'Work', folder_mappings: null }, { id: 'a2', user_id: 'u1', name: 'Home', folder_mappings: 'null' }] },
     { end: true, rowCounts: { users: 1, email_accounts: 2 } },
   ];
@@ -306,10 +306,11 @@ describe('restoreBackup', () => {
       'BEGIN',
       'SET LOCAL statement_timeout = 0',
       "SET LOCAL lock_timeout = '30s'",
-      'TRUNCATE "auth_events", "email_accounts", "plugin_data", "users", "folders", "messages" RESTART IDENTITY CASCADE',
+      'TRUNCATE "auth_events", "email_accounts", "plugin_data", "users", "folders", "messages", "email_otp_tokens" RESTART IDENTITY',
+      'SET CONSTRAINTS ALL DEFERRED',
       // A jsonb value is the text inside its JSON string, so a JSON null ('null') and SQL NULL
       // (null) each go back as what they were.
-      'INSERT INTO "users" ("id", "username", "preferences") OVERRIDING SYSTEM VALUE SELECT "id", "username", ("preferences" #>> \'{}\')::jsonb FROM json_populate_recordset(NULL::"users", $1::json)',
+      'INSERT INTO "users" ("id", "username", "preferences", "created_at") OVERRIDING SYSTEM VALUE SELECT "id", "username", ("preferences" #>> \'{}\')::jsonb, "created_at" FROM json_populate_recordset(NULL::"users", $1::json)',
       'INSERT INTO "email_accounts" ("id", "user_id", "name", "folder_mappings") OVERRIDING SYSTEM VALUE SELECT "id", "user_id", "name", ("folder_mappings" #>> \'{}\')::jsonb FROM json_populate_recordset(NULL::"email_accounts", $1::json)',
       'COMMIT',
     ]);
@@ -321,7 +322,7 @@ describe('restoreBackup', () => {
     const client = restoreClient();
     await restoreBackup(client, file([
       manifest({ tables: ['users'] }),
-      { table: 'users', rows: [{ id: 'u1', username: name, preferences: '{}' }] },
+      { table: 'users', rows: [{ id: 'u1', username: name, preferences: '{}', created_at: null }] },
       { end: true, rowCounts: { users: 1 } },
     ]));
     expect(JSON.parse(inserts(client)[0].params[0])[0].username).toBe(name);
@@ -331,7 +332,7 @@ describe('restoreBackup', () => {
     const client = restoreClient();
     await restoreBackup(client, file([
       manifest({ tables: ['auth_events'] }),
-      { table: 'auth_events', rows: [{ id: 7, event_type: 'login' }] },
+      { table: 'auth_events', rows: [{ id: 7, event_type: 'login', blob: null }] },
       { end: true, rowCounts: { auth_events: 1 } },
     ]));
     const at = client.log.findIndex(l => l.text.startsWith("SELECT format('ALTER SEQUENCE"));
@@ -394,6 +395,7 @@ describe('restoreBackup', () => {
     ['malformed sequence positions', () => file([manifest({ sequences: { folder_status_revision: 'abc' } })]), /not a MailFlow backup/],
     ['a table this installation does not have', () => file([manifest({ tables: ['users', 'old_table'] })]), /does not have: old_table/],
     ['a table that is never restored', () => file([manifest({ tables: ['schema_migrations'] })]), /does not have: schema_migrations/],
+    ['a manifest with a repeated table', () => file([manifest({ tables: ['users', 'users'] })]), /more than once/],
     ['a manifest without a table list', () => file([manifest({ tables: 'users' })]), /not a MailFlow backup/],
   ])('rejects %s before touching the database', async (_label, input, message) => {
     const client = restoreClient();
@@ -404,10 +406,26 @@ describe('restoreBackup', () => {
     expect(client.statements()).not.toContain('BEGIN');
   });
 
+  it.each(['message_entities', 'mail_signature_defaults', 'mail_labels'])('rejects omitted durable %s before calling beforeWrite', async table => {
+    const client = restoreClient({ tables: [...PRESENT, table] });
+    const beforeWrite = vi.fn();
+    await expect(restoreBackup(client, file([manifest()]), { beforeWrite })).rejects.toThrow(/missing durable metadata/);
+    expect(beforeWrite).not.toHaveBeenCalled();
+    expect(client.statements()).not.toContain('BEGIN');
+  });
+
+  it('rejects an unclassified installed table before calling beforeWrite', async () => {
+    const client = restoreClient({ tables: [...PRESENT, 'future_metadata'] });
+    const beforeWrite = vi.fn();
+    await expect(restoreBackup(client, file([manifest()]), { beforeWrite })).rejects.toThrow(/not classified.*future_metadata/);
+    expect(beforeWrite).not.toHaveBeenCalled();
+    expect(client.statements()).not.toContain('BEGIN');
+  });
+
   it('lets the caller read off the rest of an upload it refused, instead of leaving it stuck behind gunzip', async () => {
     const input = new PassThrough();
     // Random text barely compresses, so most of the upload is still unread when the manifest is refused.
-    const filler = Array.from({ length: 60 }, (_, i) => ({ table: 'users', rows: [{ id: `u${i}`, username: randomBytes(30000).toString('base64'), preferences: '{}' }] }));
+    const filler = Array.from({ length: 60 }, (_, i) => ({ table: 'users', rows: [{ id: `u${i}`, username: randomBytes(30000).toString('base64'), preferences: '{}', created_at: null }] }));
     // Written in socket-sized pieces, so backpressure can hold the rest back.
     const body = gz([manifest({ schemaVersion: '0999_future' }), ...filler, { end: true, rowCounts: { users: 60 } }]);
     for (let at = 0; at < body.length; at += 16384) input.write(body.subarray(at, at + 16384));
@@ -420,7 +438,7 @@ describe('restoreBackup', () => {
 
   it('gives up with a rollback when the upload stops half way, instead of waiting on it for ever', async () => {
     const whole = gz([manifest({ tables: ['users'] }),
-      ...Array.from({ length: 40 }, (_, i) => ({ table: 'users', rows: [{ id: `u${i}`, username: `${i} ${'w'.repeat(3000)}`, preferences: '{}' }] })),
+      ...Array.from({ length: 40 }, (_, i) => ({ table: 'users', rows: [{ id: `u${i}`, username: `${i} ${'w'.repeat(3000)}`, preferences: '{}', created_at: null }] })),
       { end: true, rowCounts: { users: 40 } }]);
     const input = new PassThrough();
     input.complete = false; // as on an http.IncomingMessage whose client went away
@@ -440,12 +458,12 @@ describe('restoreBackup', () => {
     ['data after the end marker', [...rows, rows[1]], /after its end marker/],
     ['rows of different shapes in one batch', [manifest({ tables: ['users'] }), { table: 'users', rows: [{ id: 'u1', username: 'a' }, { username: 'b' }] }, { end: true, rowCounts: { users: 2 } }], /malformed rows for users/],
     // With the schema versions equal, a column the database lacks means one of the two was changed by hand.
-    ['a column this installation does not have', [manifest({ tables: ['users'] }), { table: 'users', rows: [{ id: 'u1', username: 'a', gone: 1, preferences: '{}' }] }, { end: true, rowCounts: { users: 1 } }], /users rows have columns this installation does not: gone/],
+    ['a column this installation does not have', [manifest({ tables: ['users'] }), { table: 'users', rows: [{ id: 'u1', username: 'a', gone: 1, preferences: '{}', created_at: null }] }, { end: true, rowCounts: { users: 1 } }], /users rows have columns this installation does not: gone/],
     ['a stream cut off in the middle', null, /could not be read/],
   ])('rolls back on %s', async (_label, entries, message) => {
     const client = restoreClient();
     // The cut file is a large one: it ends after the manifest and part of the rows went in.
-    const big = [manifest({ tables: ['users'] }), ...Array.from({ length: 40 }, (_, i) => ({ table: 'users', rows: Array.from({ length: 50 }, (_, j) => ({ id: `u${i}-${j}`, username: `user ${i} ${j} ${'x'.repeat(40)}`, preferences: '{}' })) })), { end: true, rowCounts: { users: 2000 } }];
+    const big = [manifest({ tables: ['users'] }), ...Array.from({ length: 40 }, (_, i) => ({ table: 'users', rows: Array.from({ length: 50 }, (_, j) => ({ id: `u${i}-${j}`, username: `user ${i} ${j} ${'x'.repeat(40)}`, preferences: '{}', created_at: null })) })), { end: true, rowCounts: { users: 2000 } }];
     const cut = gz(big);
     const input = entries ? file(entries) : Readable.from([cut.subarray(0, Math.floor(cut.length / 2))]);
     await expect(restoreBackup(client, input)).rejects.toThrow(message);

@@ -57,20 +57,24 @@ export function rememberDroppedRows(folder, rows, overrides = {}, now = Date.now
     const key = keyOf(row.account_id, folder, row.message_id);
     const kept = (carries.get(key) ?? []).filter(carry => carry.until > now);
     carries.delete(key);
-    carries.set(key, [...kept, { date: timeOf(row.date), columns, until: now + CARRY_MS }]);
+    carries.set(key, [...kept, { date: timeOf(row.date), columns,
+      storageGeneration: row.storage_generation ?? row.account_storage_generation ?? null,
+      until: now + CARRY_MS }]);
   }
 }
 
 export const hasCarries = () => carries.size > 0;
 
 // The kept state of a message the sync just inserted, or null when no move dropped it. Taken
-// once: a second copy of the same message is new mail.
-export function takeCarry(accountId, folder, messageId, date, now = Date.now()) {
+// once: a second copy of the same message is new mail. Verified generations never
+// consume unverified legacy carries or carries left by a replaced mailbox.
+export function takeCarry(accountId, folder, messageId, date, now = Date.now(), storageGeneration = null) {
   if (!messageId || !carries.size) return null;
   const key = keyOf(accountId, folder, messageId);
   const list = (carries.get(key) ?? []).filter(carry => carry.until > now);
   const t = timeOf(date);
-  const i = list.findIndex(carry => carry.date == null || t == null || Math.abs(carry.date - t) <= DATE_SLACK_MS);
+  const i = list.findIndex(carry => carry.storageGeneration === storageGeneration
+    && (carry.date == null || t == null || Math.abs(carry.date - t) <= DATE_SLACK_MS));
   const carry = i === -1 ? null : list.splice(i, 1)[0];
   if (list.length) carries.set(key, list);
   else carries.delete(key);

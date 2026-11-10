@@ -3,7 +3,8 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } 
 // Alias CRUD is exercised through the mounted accounts router so these tests cover the
 // ownership checks, successful mutations, and the owner-address cache boundary together.
 // The DB, app entrypoint, and auth middleware are stubbed to keep the harness isolated.
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => { const query = vi.fn(); return { query, withTransaction: fn => fn({ query }) }; });
+vi.mock('../services/signatureLibrary.js', () => ({ syncLegacyAccountSignature: vi.fn(), syncLegacyAliasSignature: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); },
 }));
@@ -175,7 +176,7 @@ describe('account alias mutation failures do not invalidate the cache', () => {
     const res = await request('POST', `${URL_ACCOUNT_ID}/aliases`, aliasBody);
 
     expect(res.status).toBe(500);
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(3); // ownership read, transactional row lock, failed INSERT
     expectNoIdentityInvalidation();
   });
 });

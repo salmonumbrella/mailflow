@@ -1,9 +1,12 @@
 import { publicFolderCounts } from '../services/folderStatus.js';
 import { Router } from 'express';
-import { query } from '../services/db.js';
+import { query, withTransaction } from '../services/db.js';
+import { applyStorageIdentityDecision, getIdentityStatus } from '../services/messageIdentity.js';
+import { STORAGE_SELECTOR_FIELDS, normalizeStorageHost, storageSelectorsChanged } from '../services/accountStorageIdentity.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { encrypt } from '../services/encryption.js';
+import { syncLegacyAccountSignature, syncLegacyAliasSignature } from '../services/signatureLibrary.js';
 import { sanitizeSignature } from '../services/emailSanitizer.js';
 import { validateHost } from '../services/hostValidation.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
@@ -76,7 +79,7 @@ export const SAFE_FIELDS = [
   'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify',
   'smtp_host', 'smtp_port', 'smtp_tls',
   'auth_user', 'smtp_auth_user', 'oauth_provider', 'oauth_public_client', 'enabled',
-  'include_in_unified_inbox',
+  'include_in_unified_inbox', 'storage_generation',
   'last_sync', 'sync_error', 'sync_error_code', 'sort_order', 'folder_mappings',
   'signature', 'signature_enabled', 'created_at', 'categorization_enabled', 'antispam_enabled',
   'trusted_authserv_id', 'auto_cc_addresses', 'auto_bcc_addresses',
@@ -247,6 +250,13 @@ router.patch('/order', async (req, res) => {
   }
 });
 
+router.get('/:id/identity-status', async (req, res) => {
+  if (!(await findOwnedAccount(req.session.userId, req.params.id, { columns: 'id' }))) {
+    return res.status(404).json({ error: 'Account not found' });
+  }
+  res.json(await getIdentityStatus(req.params.id));
+});
+
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
   const updates = { ...req.body };
@@ -258,6 +268,12 @@ router.put('/:id', async (req, res) => {
     for (const field of OAUTH_OWNED_FIELDS) delete updates[field];
     // An empty mailbox is not a login: ignored, the stored one stays.
     if ('auth_user' in updates && !String(updates.auth_user ?? '').trim()) delete updates.auth_user;
+  }
+
+  if ('imap_host' in updates) updates.imap_host = normalizeStorageHost(updates.imap_host);
+  if ('auth_user' in updates) updates.auth_user = String(updates.auth_user ?? '').trim();
+  if ('storageIdentityDecision' in updates && !['preserve', 'replace'].includes(updates.storageIdentityDecision)) {
+    return res.status(400).json({ code: 'invalid_storage_identity_decision', error: 'Choose whether this is the same mailbox or a different mailbox.' });
   }
 
   if ('name' in updates && hasHeaderInjectionChars(updates.name)) {
@@ -367,16 +383,41 @@ router.put('/:id', async (req, res) => {
   // plugin fields (e.g. the GTD enable toggle), in which case there are no core columns to write —
   // re-read the row for the response base instead of running an empty UPDATE.
   let updated;
-  if (sets.length) {
-    values.push(id);
-    const result = await query(
-      `UPDATE email_accounts SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`,
-      values
-    );
-    updated = result.rows[0];
-  } else {
-    const reread = await query('SELECT * FROM email_accounts WHERE id = $1', [id]);
-    updated = reread.rows[0];
+  const guardedEdit = STORAGE_SELECTOR_FIELDS.some(key => key in updates) || 'expectedStorageGeneration' in updates;
+  const writeCore = async client => {
+    if (guardedEdit) {
+      const current = await findOwnedAccount(req.session.userId, id, { client, forUpdate: true });
+      if (!current) throw Object.assign(new Error('Account not found'), { status: 404 });
+      if ('expectedStorageGeneration' in updates && (!isUuid(updates.expectedStorageGeneration)
+        || updates.expectedStorageGeneration.toLowerCase() !== current.storage_generation)) {
+        throw Object.assign(new Error('This mailbox changed since you opened it. Refresh and review your changes.'), { status: 409, code: 'storage_generation_conflict' });
+      }
+      if (storageSelectorsChanged(current, updates)) {
+        if (!updates.storageIdentityDecision) {
+          throw Object.assign(new Error('Choose whether this is the same mailbox or a different mailbox before saving.'), { status: 409, code: 'storage_identity_decision_required' });
+        }
+        await applyStorageIdentityDecision(client, {
+          accountId: id, expectedGeneration: updates.expectedStorageGeneration?.toLowerCase(), decision: updates.storageIdentityDecision,
+        });
+      }
+    }
+    if (sets.length) {
+      const result = await client.query(
+        `UPDATE email_accounts SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`,
+        [...values, id]
+      );
+      await syncLegacyAccountSignature(client, id, { signatureChanged: 'signature' in updates, enabledChanged: 'signature_enabled' in updates });
+      return result.rows[0];
+    }
+    return (await client.query('SELECT * FROM email_accounts WHERE id = $1', [id])).rows[0];
+  };
+  try {
+    updated = (guardedEdit || 'signature' in updates || 'signature_enabled' in updates) ? await withTransaction(writeCore) : await writeCore({ query });
+  } catch (err) {
+    if (err.status === 400 || err.status === 404 || err.status === 409) {
+      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    }
+    throw err;
   }
 
   // Persist plugin-owned fields into their own stores; each returns { patch } (the saved values) to
@@ -499,10 +540,14 @@ router.post('/:id/aliases', async (req, res) => {
 
   if (!(await findOwnedAccount(req.session.userId, id, { columns: 'id' }))) return res.status(404).json({ error: 'Account not found' });
 
-  const result = await query(
-    'INSERT INTO account_aliases (account_id, name, email, reply_to, signature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-    [id, name, email, reply_to || null, sanitizeSignature(signature) || null]
-  );
+  const result = await withTransaction(async client => {
+    await findOwnedAccount(req.session.userId, id, { client, columns: 'id', forUpdate: true });
+    const saved = await client.query(
+      'INSERT INTO account_aliases (account_id, name, email, reply_to, signature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [id, name, email, reply_to || null, sanitizeSignature(signature) || null]);
+    await syncLegacyAliasSignature(client, id, saved.rows[0].id);
+    return saved;
+  });
   pluginRegistry.runHook('onAccountIdentityChanged', { accountId: id }).catch(err => console.warn('onAccountIdentityChanged hook failed:', err.message));
   res.json(result.rows[0]);
 });
@@ -518,10 +563,14 @@ router.put('/:id/aliases/:aliasId', async (req, res) => {
   const alias = await findOwnedAlias(req.session.userId, id, aliasId);
   if (!alias) return res.status(404).json({ error: 'Alias not found' });
 
-  const result = await query(
-    'UPDATE account_aliases SET name = $1, email = $2, reply_to = $3, signature = $4 WHERE id = $5 RETURNING *',
-    [name, email, reply_to || null, sanitizeSignature(signature) || null, aliasId]
-  );
+  const result = await withTransaction(async client => {
+    await findOwnedAccount(req.session.userId, id, { client, columns: 'id', forUpdate: true });
+    const saved = await client.query(
+      'UPDATE account_aliases SET name = $1, email = $2, reply_to = $3, signature = $4 WHERE id = $5 AND account_id = $6 RETURNING *',
+      [name, email, reply_to || null, sanitizeSignature(signature) || null, aliasId, id]);
+    await syncLegacyAliasSignature(client, id, aliasId);
+    return saved;
+  });
   pluginRegistry.runHook('onAccountIdentityChanged', { accountId: alias.account_id }).catch(err => console.warn('onAccountIdentityChanged hook failed:', err.message));
   res.json(result.rows[0]);
 });

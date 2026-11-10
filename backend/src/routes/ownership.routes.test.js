@@ -15,7 +15,7 @@ const imap = vi.hoisted(() => {
   });
   return { fns, manager };
 });
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => { const query = vi.fn(); return { query, withTransaction: fn => fn({ query }) }; });
 vi.mock('../middleware/auth.js', () => {
   const signIn = (req, _res, next) => { req.session = { userId: session.userId }; next(); };
   return { requireAuth: signIn, requireAdmin: signIn };
@@ -54,8 +54,8 @@ const CONTACT_ID = 'd4d4d4d4-4444-4444-8444-d4d4d4d4d4d4';
 const BOOK_ID = 'e5e5e5e5-5555-4555-8555-e5e5e5e5e5e5';
 
 const ACCOUNTS = {
-  [ACCOUNT_ID]: { id: ACCOUNT_ID, user_id: OWNER, name: 'Me', email_address: 'me@example.com', protocol: 'imap', enabled: true, folder_mappings: { drafts: 'Drafts' }, oauth_provider: null, trusted_authserv_id: 'mx.example' },
-  [SECOND_ACCOUNT_ID]: { id: SECOND_ACCOUNT_ID, user_id: OWNER, name: 'Me too', email_address: 'me2@example.com', protocol: 'imap', enabled: true, folder_mappings: { drafts: 'Drafts' }, oauth_provider: null },
+  [ACCOUNT_ID]: { id: ACCOUNT_ID, storage_generation: '11111111-1111-4111-8111-111111111111', user_id: OWNER, name: 'Me', email_address: 'me@example.com', protocol: 'imap', enabled: true, folder_mappings: { drafts: 'Drafts' }, oauth_provider: null, trusted_authserv_id: 'mx.example' },
+  [SECOND_ACCOUNT_ID]: { id: SECOND_ACCOUNT_ID, storage_generation: '22222222-2222-4222-8222-222222222222', user_id: OWNER, name: 'Me too', email_address: 'me2@example.com', protocol: 'imap', enabled: true, folder_mappings: { drafts: 'Drafts' }, oauth_provider: null },
 };
 const message = () => ({ id: MESSAGE_ID, account_id: ACCOUNT_ID, uid: 7, folder: 'INBOX', message_id: '<m1@example.com>', subject: 'Weekly', from_email: 'news@example.com', snippet: 'Hi', spam_details: null, owner_id: OWNER, folder_mappings: {} });
 const contact = () => ({ id: CONTACT_ID, uid: 'u-1', user_id: OWNER, address_book_id: BOOK_ID, display_name: 'Ann', first_name: null, last_name: null, primary_email: 'ann@example.com', emails: [{ value: 'ann@example.com' }], phones: [], organization: null, notes: null, source: 'local', book_source: 'local', read_only: false });
@@ -232,8 +232,8 @@ const LOOKUPS = {
   'GET /spam/authserv-ids': ['findOwnedAccount', ACCOUNT_ID, { columns: 'id, trusted_authserv_id' }],
   'GET /spam/explain': ['findOwnedMessage', MESSAGE_ID, { columns: 'm.*, a.user_id AS owner_id, a.folder_mappings' }],
   'POST /rules/run': ['findOwnedAccount', ACCOUNT_ID, { columns: 'id' }],
-  'POST /rules': ['findOwnedAccount', ACCOUNT_ID, { columns: 'id' }],
-  'PUT /rules/:id': ['findOwnedAccount', ACCOUNT_ID, { columns: 'id' }],
+  'POST /rules': ['findOwnedAccount', ACCOUNT_ID, { columns: 'id, storage_generation' }],
+  'PUT /rules/:id': ['findOwnedAccount', ACCOUNT_ID, { columns: 'id, storage_generation' }],
   'POST /rules/sender-category': ['findOwnedMessage', MESSAGE_ID, { columns: 'm.from_email' }],
   'POST /mail/draft': ['findOwnedAccount', ACCOUNT_ID, { columns: 'id' }],
   'DELETE /mail/draft/:uid': ['findOwnedAccount', ACCOUNT_ID],

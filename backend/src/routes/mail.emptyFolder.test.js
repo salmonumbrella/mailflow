@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('../services/messageIdentity.js', () => import('../services/testSupport/identityTestAdapter.js'));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
@@ -12,7 +13,8 @@ import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 
 const ACCOUNT_ID = 'c3c3c3c3-3333-4333-8333-c3c3c3c3c3c3';
-const ACCOUNT = { id: ACCOUNT_ID, user_id: 'user-1' };
+const ACCOUNT = { id: ACCOUNT_ID, storage_generation: 'test-generation', user_id: 'user-1' };
+const EMPTY_RESULT = { identityContext: { accountId: ACCOUNT_ID, storageGeneration: ACCOUNT.storage_generation, folderPath: 'Trash', uidValidity: '10', revision: '1' } };
 
 function buildApp() {
   const app = express();
@@ -42,7 +44,7 @@ describe('POST /api/mail/folders/empty — async background empty', () => {
   });
 
   it('returns 202 immediately and finishes the delete in the background', async () => {
-    imapManager.emptyFolder.mockResolvedValue(undefined);
+    imapManager.emptyFolder.mockResolvedValue(EMPTY_RESULT);
     const res = await empty('Trash');
     expect(res.status).toBe(202);
     expect((await res.json()).started).toBe(true);
@@ -70,7 +72,7 @@ describe('POST /api/mail/folders/empty — async background empty', () => {
     expect(first.status).toBe(202);
     const second = await empty('Junk');   // same folder still in flight
     expect(second.status).toBe(409);
-    release();                            // let the first complete so the guard clears
+    release(EMPTY_RESULT);                // let the first complete so the guard clears
     await tick();
   });
 });

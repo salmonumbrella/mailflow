@@ -54,6 +54,24 @@ describe('movedRowCarry', () => {
     expect(hasCarries()).toBe(false);
   });
 
+  it('never carries across storage generations or from an unverified legacy row', () => {
+    const now = Date.now();
+    rememberDroppedRows('Archive', [row({ storage_generation: 'old-generation', category: 'old' }), row({ category: 'legacy' })]);
+    expect(takeCarry(ACC, 'Archive', '<m1@x>', row().date, now, 'new-generation')).toBeNull();
+    expect(takeCarry(ACC, 'Archive', '<m1@x>', row().date, now, 'old-generation')).toMatchObject({ category: 'old' });
+    expect(takeCarry(ACC, 'Archive', '<m1@x>', row().date, now, 'new-generation')).toBeNull();
+    expect(takeCarry(ACC, 'Archive', '<m1@x>', row().date, now)).toMatchObject({ category: 'legacy' });
+  });
+
+  it('never transfers durable identity or metadata through the legacy carry', () => {
+    const now = Date.now();
+    rememberDroppedRows('Archive', [row({ account_storage_generation: 'captured', entity_id: 'entity',
+      uid_validity: '10', native_labels: ['custom'], durable_metadata: { note: 'private' } })]);
+    expect(takeCarry(ACC, 'Archive', '<m1@x>', row().date, now, 'captured')).toEqual({
+      spam_user_override: null, spam_verdict: 'spam', category: 'promotions',
+    });
+  });
+
   it('builds the UPDATE that puts the columns back', () => {
     const u = carryUpdate('row-1', { spam_user_override: 'ham', spam_details: { a: 1 }, plugin_annotations: null, bcc_addresses: [{ email: 'b@x' }] });
     expect(u.text).toBe('UPDATE messages SET spam_details = $2::jsonb, spam_user_override = $3, plugin_annotations = COALESCE($4::jsonb, plugin_annotations), bcc_addresses = $5::jsonb WHERE id = $1');

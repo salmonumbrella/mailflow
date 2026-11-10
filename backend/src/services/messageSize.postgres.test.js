@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 
+vi.mock('./messageIdentity.js', () => import('./testSupport/identityTestAdapter.js'));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./encryption.js', () => ({ decrypt: vi.fn() }));

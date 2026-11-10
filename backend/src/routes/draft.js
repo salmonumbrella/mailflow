@@ -391,7 +391,7 @@ router.post('/draft', async (req, res) => {
     }
 
     // APPEND the new draft first so we never lose the message
-    let { uid } = await imapManager.appendToFolder(account, draftsFolder, rawMessage, ['\\Draft', '\\Seen']);
+    let { uid, identityContext } = await imapManager.appendToFolder(account, draftsFolder, rawMessage, ['\\Draft', '\\Seen']);
     // A server without UIDPLUS does not name the new uid. The composer then had nothing to replace
     // on its next save, and every autosave left one more copy in Drafts. The Message-ID is new for
     // every save, so a SEARCH for it finds this copy and no other.
@@ -407,6 +407,7 @@ router.post('/draft', async (req, res) => {
       try {
         await imapManager.upsertDraftMessageRecord(account, draftsFolder, uid, {
           messageId: meta.messageId,
+          identityContext,
           subject,
           fromName: meta.fromName,
           fromEmail: meta.fromEmail,

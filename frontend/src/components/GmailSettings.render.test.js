@@ -45,6 +45,7 @@ let calls;
 let closed;
 let savedRules;
 let folderList;
+let signatureLibrary;
 const account = { id: 'account-one', name: 'Personal', email_address: 'me@example.invalid', signature: '<p>Original signature</p>', signature_enabled: true };
 const button = text => [...host.querySelectorAll('button')].find(el => el.textContent === text);
 const click = el => act(async () => { assert.ok(el, 'click target exists'); el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
@@ -65,6 +66,9 @@ beforeEach(() => {
   folderList = [{ path: 'INBOX', name: 'Inbox', total_count: 8 }, { path: 'Projects', name: 'Projects', total_count: 2 }];
   useStore.setState({ user: { id: 'user-one', username: 'Tester' }, accounts: [account], accountsReady: true, selectedAccountId: account.id, selectedFolder: 'INBOX', folders: { [account.id]: folderList }, hiddenFolders: {}, shortcuts: {}, showMessagePreviews: true, replyDefault: 'reply', pageSize: 50, theme: 'nord', font: 'system', layout: 'gmail' });
   api.savePreferences = async data => { calls.push(['preferences', data]); return {}; };
+  signatureLibrary = { accountId: account.id, revision: '1', signatures: [{ id: '55555555-5555-4555-8555-555555555555', name: 'My signature', content: account.signature, isPlainText: false }], defaults: [{ senderKey: 'main', newSignatureId: '55555555-5555-4555-8555-555555555555', replySignatureId: '55555555-5555-4555-8555-555555555555' }] };
+  api.getSignatureLibrary = async () => structuredClone(signatureLibrary);
+  api.saveSignatureLibrary = async (id, data) => { calls.push(['signatureLibrary', id, structuredClone(data)]); signatureLibrary = { ...structuredClone(data), revision: String(Number(data.revision) + 1) }; return structuredClone(signatureLibrary); };
   api.updateAccount = async (id, data) => { calls.push(['signature', id, data]); return { ...account, ...data }; };
   api.getNativeLabels = async () => ({ labels: [], treeRevision: '0', assignmentSupported: false, coverage: 'not_indexed' });
   api.getFolders = async id => { calls.push(['getFolders', id]); return folderList; };
@@ -100,7 +104,7 @@ test('Cancel discards snippets, shortcuts, and signature edits without writes', 
   await mount();
   await click(host.querySelectorAll('input[name=snippets]')[1]);
   await click(host.querySelector('input[name=shortcuts]'));
-  await click(button('Clear signature'));
+  await act(async () => { const editor = host.querySelector('[contenteditable=true]'); editor.innerHTML = ''; editor.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
   assert.equal(host.querySelector('[contenteditable=true]').innerHTML, '');
   assert.equal(useStore.getState().showMessagePreviews, true);
   await click(button('Cancel'));
@@ -144,13 +148,16 @@ test('failed save remains dirty, shows error and does not alter store', async ()
   assert.doesNotMatch(host.textContent, /Changes saved/);
 });
 
-test('account signature uses native API and real editor, then appears on reopening', async () => {
+test('named signature uses native library API and real editor, then appears on reopening', async () => {
   await mount();
   const editor = host.querySelector('[contenteditable=true]');
   await act(async () => { editor.innerHTML = '<p>Updated sign-off</p>'; editor.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
   await click(button('Save Changes'));
-  assert.deepEqual(calls, [['signature', account.id, { signature: '<p>Updated sign-off</p>', signature_enabled: true }]]);
-  assert.equal(useStore.getState().accounts[0].signature, '<p>Updated sign-off</p>');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'signatureLibrary');
+  assert.equal(calls[0][1], account.id);
+  assert.equal(calls[0][2].signatures[0].content, '<p>Updated sign-off</p>');
+  assert.equal(signatureLibrary.signatures[0].content, '<p>Updated sign-off</p>');
   await click(button('Back to mail'));
   await act(async () => root.unmount());
   await mount();
@@ -397,4 +404,100 @@ test('uncertain native label mutation locks account, tabs and settings close unt
   await click(button('Retry pending label request'));
   const mutations = calls.filter(call => call[0] === 'createNativeLabel'); assert.deepEqual(mutations[0][1], mutations[1][1]);
   assert.equal(button('Back to mail').disabled, false); assert.equal(host.querySelector('[aria-label="Label account"]').disabled, false);
+});
+
+
+test('signature manager validates names, creates and renames stable records, and deletes defaults only on save', async () => {
+  await mount();
+  await click(button('Create new'));
+  let form = host.querySelector('[data-signature-editor]');
+  await change(form.querySelector('input'), 'My signature');
+  await submit(form);
+  assert.match(form.textContent, /already exists/);
+  await change(form.querySelector('input'), 'Work'); await submit(form);
+  assert.equal(calls.length, 0);
+  const created = [...host.querySelectorAll('.mf-signature-library-names button')].find(el => el.textContent === 'Work');
+  assert.ok(created);
+  await click(host.querySelector('[aria-label="Rename signature Work"]'));
+  form = host.querySelector('[data-signature-editor]');
+  await change(form.querySelector('input'), 'Office'); await submit(form);
+  const officeId = [...host.querySelector('[aria-label="For new emails use"]').options].find(o => o.textContent === 'Office').value;
+  await change(host.querySelector('[aria-label="For new emails use"]'), officeId);
+  await change(host.querySelector('[aria-label="On reply/forward use"]'), '');
+  await click(button('Save Changes'));
+  assert.equal(signatureLibrary.signatures.find(s => s.id === officeId).name, 'Office');
+  assert.equal(signatureLibrary.defaults[0].newSignatureId, officeId);
+  assert.equal(signatureLibrary.defaults[0].replySignatureId, null);
+  await click(host.querySelector('[aria-label="Delete signature Office"]'));
+  assert.ok(host.querySelector('[role="alert"]'));
+  await click(button('Delete signature'));
+  assert.equal(host.querySelector('[aria-label="For new emails use"]').value, '');
+  assert.equal(signatureLibrary.signatures.length, 2, 'local delete is not persisted before Save Changes');
+  await click(button('Save Changes'));
+  assert.equal(signatureLibrary.signatures.length, 1);
+  assert.equal(signatureLibrary.defaults[0].newSignatureId, null);
+});
+
+test('signature load failure is retryable and never silently submits an empty library', async () => {
+  api.getSignatureLibrary = async () => { throw new Error('Unavailable'); };
+  await mount(); assert.match(host.textContent, /Unavailable/);
+  assert.equal(host.querySelector('.mf-signature-library'), null);
+  assert.equal(calls.length, 0);
+  api.getSignatureLibrary = async () => structuredClone(signatureLibrary);
+  await click(button('Retry')); assert.ok(host.querySelector('.mf-signature-library'));
+});
+
+test('signature editor sanitizes source before rendering executable markup', async () => {
+  signatureLibrary.signatures[0].content = '<p onclick="alert(1)">Safe</p><script>alert(2)</script><style>body{display:none}</style>';
+  await mount();
+  const editor = host.querySelector('[contenteditable=true]');
+  assert.equal(editor.querySelector('script, style'), null);
+  assert.equal(editor.querySelector('[onclick]'), null);
+});
+
+
+test('rich signature editor is locked while Save Changes is pending and cannot lose a later edit', async () => {
+  let finish;
+  api.saveSignatureLibrary = (_id, data) => new Promise(resolve => { finish = () => resolve({ ...data, revision: '2' }); });
+  await mount();
+  let editor = host.querySelector('[contenteditable=true]');
+  await act(async () => { editor.innerHTML = '<p>Sent version</p>'; editor.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+  await click(button('Save Changes'));
+  editor = host.querySelector('[role=textbox][aria-label="Signature text"]');
+  assert.equal(editor.getAttribute('contenteditable'), 'false');
+  assert.equal(editor.getAttribute('aria-disabled'), 'true');
+  assert.equal(button('Create new').closest('fieldset').disabled, true);
+  await act(async () => finish());
+  assert.equal(host.querySelector('[contenteditable=true]').innerHTML, '<p>Sent version</p>');
+});
+
+
+test('library save refreshes legacy account and alias editor values from the exact server projection', async () => {
+  useStore.setState({ accounts: [{ ...account, aliases: [{ id: 'alias-one', email: 'alias@example.invalid', name: 'Alias', signature: 'Old' }] }] });
+  api.saveSignatureLibrary = async (_id, data) => ({ ...data, revision: '2', legacy: { signature: 'Me &lt;me@example.invalid&gt;<br>', signature_enabled: true, aliases: [{ id: 'alias-one', signature: '' }] } });
+  await mount();
+  await act(async () => { const editor = host.querySelector('[contenteditable=true]'); editor.innerHTML = '<p>Changed</p>'; editor.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+  await click(button('Save Changes'));
+  const updated = useStore.getState().accounts[0];
+  assert.equal(updated.signature, 'Me &lt;me@example.invalid&gt;<br>');
+  assert.equal(updated.aliases[0].signature, ''); assert.equal(updated.aliases[0].email, 'alias@example.invalid');
+});
+
+
+test('Reload signatures reconciles an acknowledged server commit after its save response was lost', async () => {
+  const projected = '<p>Committed despite lost response</p>';
+  api.saveSignatureLibrary = async (_id, data) => {
+    signatureLibrary = { ...structuredClone(data), revision: '2', legacy: { signature: projected, signature_enabled: true, aliases: [] } };
+    throw new TypeError('Network response lost');
+  };
+  await mount();
+  await act(async () => { const editor = host.querySelector('[contenteditable=true]'); editor.innerHTML = projected; editor.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+  await click(button('Save Changes'));
+  assert.match(host.textContent, /Network response lost/);
+  assert.equal(useStore.getState().accounts[0].signature, account.signature, 'uncertain response must not be claimed as saved');
+  const oldConfirm = window.confirm; window.confirm = () => true;
+  try { await click(button('Reload signatures')); } finally { window.confirm = oldConfirm; }
+  assert.equal(useStore.getState().accounts[0].signature, projected);
+  assert.equal(host.querySelector('[contenteditable=true]').innerHTML, projected);
+  assert.equal(signatureLibrary.revision, '2');
 });

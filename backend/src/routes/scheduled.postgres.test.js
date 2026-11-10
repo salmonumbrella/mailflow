@@ -34,6 +34,7 @@ vi.mock('../services/draftCopies.js', () => ({ deleteSentDraft: vi.fn(async () =
 vi.mock('../services/rateLimiter.js', () => ({ consume: vi.fn(async () => ({ limited: false, resetMs: 60_000 })) }));
 vi.mock('../services/pushNotifications.js', () => ({ sendPushToUser: vi.fn(async () => {}) }));
 
+import 'express-async-errors';
 import express from 'express';
 import { runMigrations } from '../services/migrations.js';
 import routes from './scheduled.js';
@@ -123,13 +124,26 @@ describe.skipIf(!ADMIN_URL)('scheduled messages API on PostgreSQL (#543)', () =>
     await sender.idle();
   };
 
+  it('keeps cancelled mail from the previous mailbox held when Undo would activate it', async () => {
+    const id = await create();
+    await call('POST', `/${id}/cancel`, {});
+    const nextGeneration = randomUUID();
+    await h.pool.query('UPDATE email_accounts SET storage_generation=$2 WHERE id=$1', [account.id, nextGeneration]);
+    try {
+      expect(await call('POST', `/${id}/restore`, {})).toMatchObject({ status: 409, body: { code: 'storage_generation_conflict' } });
+      expect(await rowOf(id)).toMatchObject({ status: 'cancelled', storage_generation: account.storage_generation });
+    } finally {
+      await h.pool.query('UPDATE email_accounts SET storage_generation=$2 WHERE id=$1', [account.id, account.storage_generation]);
+    }
+  });
+
   describe('create', () => {
     it('stores the message encrypted, deletes the draft after the commit, and says so', async () => {
       const r = await call('POST', '', draftBody({ draft: { uid: 9, folder: 'Drafts', accountId: account.id } }));
       expect(r.status).toBe(201);
       expect(r.body).toEqual({ id: expect.any(String), sendAt: expect.any(String), status: 'scheduled' });
       const row = await rowOf(r.body.id);
-      expect(row).toMatchObject({ status: 'scheduled', time_zone: 'Europe/Berlin', attempts: 0, version: 1 });
+      expect(row).toMatchObject({ storage_generation: account.storage_generation, status: 'scheduled', time_zone: 'Europe/Berlin', attempts: 0, version: 1 });
       expect(row.due_at).toEqual(row.send_at);
       const payload = openJson(row.payload_enc, aad.payload(row));
       expect(payload).toMatchObject({ v: 1, to: ['you@example.net'], subject: 'Q4 numbers', aliasId: null });

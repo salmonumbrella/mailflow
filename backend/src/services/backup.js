@@ -28,13 +28,21 @@ export const SETUP_TABLES = [
   'category_list_sources',
   'contacts',
   'email_accounts',
+  'entity_locations',
+  'entity_provider_keys',
   'inbox_rule_forwards',
   'inbox_rules',
   'integration_config',
   'invites',
+  'mail_identity_operations',
   'mail_label_mutations',
   'mail_label_state',
   'mail_labels',
+  'mail_signature_defaults',
+  'mail_signature_state',
+  'mail_signatures',
+  'mailbox_identity_epochs',
+  'message_entities',
   'oidc_providers',
   'plugin_account_config',
   'plugin_data',
@@ -56,14 +64,21 @@ export const SETUP_TABLES = [
 export const MAIL_CACHE_TABLES = ['folders', 'messages', 'unfetchable_uids'];
 // Sessions, rate limits and other short-lived keys, tokens that are worthless minutes later,
 // and API tokens: a restore signs everyone out, and must never
-// bring back a token revoked after the backup was taken. A restore also truncates users with
-// CASCADE, so it deletes every API token there is, and their owners have to create new ones.
+// bring back a token revoked after the backup was taken. Restore explicitly clears these
+// tables too, so API token owners have to create new ones.
 export const TRANSIENT_TABLES = ['ai_codex_device_flows', 'api_tokens', 'email_otp_tokens', 'kv_store', 'password_reset_tokens', 'sessions'];
 // The record of which migrations shaped the schema the rows are written back into.
 export const SCHEMA_TABLES = ['schema_migrations'];
 
 const KNOWN_TABLES = new Set([...SETUP_TABLES, ...MAIL_CACHE_TABLES, ...TRANSIENT_TABLES, ...SCHEMA_TABLES]);
 const RESTORABLE_TABLES = new Set([...SETUP_TABLES, ...MAIL_CACHE_TABLES]);
+// These tables are user-owned metadata, even when the mail cache is absent. A same-schema
+// file cannot omit one: treating it as an empty optional table would silently erase content.
+const DURABLE_METADATA_TABLES = [
+  'message_entities', 'entity_provider_keys', 'entity_locations', 'mailbox_identity_epochs',
+  'mail_identity_operations', 'mail_labels', 'mail_label_state', 'mail_label_mutations',
+  'mail_signatures', 'mail_signature_state', 'mail_signature_defaults', 'snoozed_messages',
+];
 
 // Encrypted with the installation's ENCRYPTION_KEY and stored in the manifest, so a restore can
 // tell before it writes anything whether the credentials in the file will decrypt here.
@@ -410,6 +425,11 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
   checkManifest(manifest, await schemaVersion(client));
 
   const present = new Set(await listTables(client));
+  const unclassified = [...present].filter(t => !KNOWN_TABLES.has(t));
+  if (unclassified.length) throw new BackupFileError(`Tables not classified for backup: ${unclassified.join(', ')}.`);
+  if (new Set(manifest.tables).size !== manifest.tables.length) throw new BackupFileError('The backup lists a table more than once.');
+  const missing = DURABLE_METADATA_TABLES.filter(t => present.has(t) && !manifest.tables.includes(t));
+  if (missing.length) throw new BackupFileError(`The backup is missing durable metadata tables: ${missing.join(', ')}.`);
   for (const table of manifest.tables) {
     if (!RESTORABLE_TABLES.has(table) || !present.has(table)) {
       throw new BackupFileError(`The backup contains a table this installation does not have: ${table}.`);
@@ -418,7 +438,7 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
   const { columns, sequences } = await listColumns(client);
   const standalone = new Set(await standaloneSequenceNames(client));
   const manifestTables = new Set(manifest.tables);
-  const restoreSet = [...SETUP_TABLES, ...MAIL_CACHE_TABLES].filter(t => present.has(t));
+  const restoreSet = [...SETUP_TABLES, ...MAIL_CACHE_TABLES, ...TRANSIENT_TABLES].filter(t => present.has(t));
   const inserted = Object.fromEntries(manifest.tables.map(t => [t, 0]));
 
   if (beforeWrite) await beforeWrite();
@@ -428,7 +448,10 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
     // that stays busy for long is a real conflict, and reported instead of waited out.
     await client.query('SET LOCAL statement_timeout = 0');
     await client.query("SET LOCAL lock_timeout = '30s'");
-    await client.query(`TRUNCATE ${restoreSet.map(ident).join(', ')} RESTART IDENTITY CASCADE`);
+    // No CASCADE: a new/unclassified dependency must fail closed instead of losing data.
+    // Metadata is restored before cache rows, with the real cache identity guard still active.
+    await client.query(`TRUNCATE ${restoreSet.map(ident).join(', ')} RESTART IDENTITY`);
+    await client.query('SET CONSTRAINTS ALL DEFERRED');
 
     let footer = null;
     for (let line = await nextLine(); line !== null; line = await nextLine()) {
@@ -453,17 +476,38 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
       const known = new Map(columns.get(entry.table).map(c => [c.name, c]));
       const unknown = rowColumns.filter(c => !known.has(c));
       if (unknown.length) throw new BackupFileError(`The backup's ${entry.table} rows have columns this installation does not: ${unknown.join(', ')}.`);
+      if (entry.table === 'email_accounts' && known.has('storage_generation') && !rowColumns.includes('storage_generation')) {
+        throw new BackupFileError('The backup account rows are missing their storage generation.');
+      }
+      // A same-schema export contains every non-generated column, including nullable
+      // and defaulted values. Omitting one is data loss, not a request to apply its default.
+      // The shape check above covers every row, and this check runs for every batch.
+      const omitted = [...known.keys()].filter(column => !rowColumns.includes(column));
+      if (omitted.length) throw new BackupFileError(`The backup's ${entry.table} rows are missing columns: ${omitted.join(', ')}.`);
       const cols = rowColumns.map(c => known.get(c));
       // A json or jsonb value travels as PostgreSQL's text for it, in a JSON string, and SQL NULL
       // as JSON null. json_populate_recordset hands such a column the JSON string itself, and
       // #>> '{}' unwraps the text inside, which the cast then reads exactly as it was written.
       const values = cols.map(c => (JSON_TYPES.has(c.type) ? `(${ident(c.name)} #>> '{}')::${c.type}` : ident(c.name)));
       // The rows keep their ids, so an identity column takes the file's value rather than a new one.
+      const verifyIdentity = entry.table === 'messages' && rowColumns.includes('entity_id');
+      const returning = verifyIdentity ? ' RETURNING id, entity_id, storage_generation, uid_validity' : '';
       const result = await client.query(
         `INSERT INTO ${ident(entry.table)} (${cols.map(c => ident(c.name)).join(', ')}) OVERRIDING SYSTEM VALUE
-         SELECT ${values.join(', ')} FROM json_populate_recordset(NULL::${ident(entry.table)}, $1::json)`,
+         SELECT ${values.join(', ')} FROM json_populate_recordset(NULL::${ident(entry.table)}, $1::json)${returning}`,
         [JSON.stringify(entry.rows)],
       );
+      if (verifyIdentity) {
+        const restored = new Map(result.rows.map(row => [row.id, row]));
+        for (const row of entry.rows) {
+          if (row.entity_id == null) continue;
+          const actual = restored.get(row.id);
+          if (!actual || actual.entity_id !== row.entity_id || actual.storage_generation !== row.storage_generation
+            || String(actual.uid_validity) !== String(row.uid_validity)) {
+            throw new BackupFileError('The backup contains mail cache identity without a current verified location.');
+          }
+        }
+      }
       inserted[entry.table] += result.rowCount;
       if (onProgress) onProgress({ table: entry.table, rows: Object.values(inserted).reduce((a, b) => a + b, 0) });
     }

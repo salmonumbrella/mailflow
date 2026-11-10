@@ -4,7 +4,7 @@ import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { moveHiddenPaths } from '../utils/sidebar.js';
 import { ACTION_DEFS, getEffectiveShortcuts } from '../utils/defaultShortcuts.js';
-import SignatureEditor from './SignatureEditor.jsx';
+import SignatureLibraryEditor from './SignatureLibraryEditor.jsx';
 import GmailLabelManager from './GmailLabelManager.jsx';
 import './GmailSettings.css';
 
@@ -26,7 +26,17 @@ function sameRuleValue(left, right) {
   return keys.length === Object.keys(right).length
     && keys.every(key => Object.prototype.hasOwnProperty.call(right, key) && sameRuleValue(left[key], right[key]));
 }
-const signatureOf = account => ({ signature: account.signature || '', signature_enabled: account.signature_enabled !== false });
+// Use the exact server projection after both saves and reads (including recovery from a
+// lost save response). Otherwise an unrelated edit in the legacy account form can restore
+// stale signature fields from Zustand.
+function applyLegacySignatureProjection(accountId, library) {
+  if (!library.legacy) return;
+  const current = useStore.getState();
+  const source = current.accounts.find(a => a.id === accountId);
+  if (!source) return;
+  current.updateAccount(accountId, { signature: library.legacy.signature, signature_enabled: library.legacy.signature_enabled,
+    aliases: (source.aliases || []).map(alias => ({ ...alias, signature: library.legacy.aliases.find(a => a.id === alias.id)?.signature ?? null })) });
+}
 const preferencesOf = state => ({ showMessagePreviews: state.showMessagePreviews, replyDefault: state.replyDefault, pageSize: state.pageSize, shortcuts: clone(state.shortcuts || {}) });
 
 function Row({ title, children, note }) {
@@ -36,7 +46,7 @@ function Choice({ name, value, selected, onChange, children, disabled = false })
   return <label className="mf-gmail-settings-choice"><input type="radio" name={name} checked={selected === value} onChange={() => onChange(value)} disabled={disabled} />{children}</label>;
 }
 
-export default function GmailSettings({ onClose }) {
+export default function GmailSettings({ onClose, initialAccountId }) {
   const { t } = useTranslation();
   const state = useStore();
   const panel = useRef(null);
@@ -45,10 +55,11 @@ export default function GmailSettings({ onClose }) {
   const [tab, setTab] = useState('general');
   const [prefs, setPrefs] = useState(() => preferencesOf(state));
   const [savedPrefs, setSavedPrefs] = useState(() => preferencesOf(state));
-  const [signatures, setSignatures] = useState(() => Object.fromEntries(state.accounts.map(a => [a.id, signatureOf(a)])));
-  const [savedSignatures, setSavedSignatures] = useState(() => Object.fromEntries(state.accounts.map(a => [a.id, signatureOf(a)])));
-  const [accountId, setAccountId] = useState(state.selectedAccountId || state.accounts[0]?.id || '');
-  const [signatureRevision, setSignatureRevision] = useState(0);
+  const [signatures, setSignatures] = useState({});
+  const [savedSignatures, setSavedSignatures] = useState({});
+  const [accountId, setAccountId] = useState(initialAccountId || state.selectedAccountId || state.accounts[0]?.id || '');
+  const [signatureLoad, setSignatureLoad] = useState(0);
+  const [signatureError, setSignatureError] = useState('');
   const [busy, setBusy] = useState(false);
   const [labelLocked, setLabelLocked] = useState(false);
   const busyRef = useRef(false);
@@ -75,6 +86,7 @@ export default function GmailSettings({ onClose }) {
     panel.current?.querySelector('button')?.focus();
     const onKey = event => {
       if (event.key === 'Escape') {
+        if (panel.current?.querySelector('.mf-signature-library [data-signature-editor]')?.contains(event.target)) return;
         const labelEditor = panel.current?.querySelector('.mf-native-labels [data-label-editor]');
         if (labelEditor && labelEditor.closest('.mf-native-labels')?.contains(event.target)) return;
         event.preventDefault(); event.stopPropagation();
@@ -115,6 +127,19 @@ export default function GmailSettings({ onClose }) {
     return () => { cancelled = true; };
   }, [ruleForm?.accountId]);
 
+  useEffect(() => {
+    if (!accountId || signatures[accountId]) return;
+    let cancelled = false; setSignatureError('');
+    api.getSignatureLibrary(accountId).then(data => {
+      if (!Array.isArray(data.signatures) || !Array.isArray(data.defaults)) throw new Error(t('signatureLibrary.loadFailed', 'Signatures could not be loaded.'));
+      if (cancelled) return;
+      applyLegacySignatureProjection(accountId, data);
+      setSignatures(previous => ({ ...previous, [accountId]: data }));
+      setSavedSignatures(previous => ({ ...previous, [accountId]: clone(data) }));
+    }).catch(err => { if (!cancelled) setSignatureError(err.message); });
+    return () => { cancelled = true; };
+  }, [accountId, signatureLoad]); // eslint-disable-line react-hooks/exhaustive-deps -- do not reload over unsaved edits
+
   async function run(action) {
     setBusy(true); setError(''); setNotice('');
     try { await action(); } catch (err) { setError(err.message || 'The change could not be saved. Please try again.'); }
@@ -136,9 +161,11 @@ export default function GmailSettings({ onClose }) {
       }
       for (const [id, draft] of Object.entries(signatures)) {
         if (JSON.stringify(draft) === JSON.stringify(savedSignatures[id])) continue;
-        const updated = await api.updateAccount(id, draft);
-        useStore.getState().updateAccount(id, updated);
-        setSavedSignatures(previous => ({ ...previous, [id]: clone(draft) }));
+        const updated = await api.saveSignatureLibrary(id, draft);
+        setSignatures(previous => ({ ...previous, [id]: updated }));
+        setSavedSignatures(previous => ({ ...previous, [id]: clone(updated) }));
+        applyLegacySignatureProjection(id, updated);
+        window.dispatchEvent(new CustomEvent('mailflow:signatures-changed', { detail: { accountId: id } }));
       }
       setNotice('Changes saved.');
     });
@@ -280,11 +307,15 @@ export default function GmailSettings({ onClose }) {
             <Row title={t("gmail.settings.signature", "Signature")} note={t("gmail.settings.appended_to_outgoing_messages_from_the_selected_account", "Appended to outgoing messages from the selected account.")}>
               {!state.accounts.length ? <p>{t("gmail.settings.connect_a_mail_account_to_set_a_signature", "Connect a mail account to set a signature.")}</p> : <>
                 <label>{t("gmail.settings.signature_for", "Signature for")} <select aria-label={t("gmail.settings.signature_account", "Signature account")} value={accountId} onChange={e => setAccountId(e.target.value)}>{state.accounts.map(a => <option key={a.id} value={a.id}>{a.name || a.email_address}</option>)}</select></label>
-                <p>{t("gmail.settings.each_mailflow_account_has_one_signature_edit_or_clear", "Each MailFlow account has one signature. Edit or clear it below; compose uses the selected sender’s signature.")}</p>
-                {signature && <><SignatureEditor key={`${accountId}:${signatureRevision}`} value={signature.signature} onChange={value => setSignatures(current => ({ ...current, [accountId]: { ...current[accountId], signature: value } }))} />
-                  <label className="mf-gmail-settings-choice"><input type="checkbox" checked={signature.signature_enabled} onChange={e => setSignatures(current => ({ ...current, [accountId]: { ...current[accountId], signature_enabled: e.target.checked } }))} />{t("gmail.settings.use_this_signature_by_default", "Use this signature by default")}</label>
-                  <button type="button" onClick={() => { setSignatures(current => ({ ...current, [accountId]: { ...current[accountId], signature: '' } })); setSignatureRevision(r => r + 1); setNotice('Signature cleared in this draft. Save Changes to apply.'); }}>{t("gmail.settings.clear_signature", "Clear signature")}</button>
-                </>}
+                {!signature && !signatureError && <p role="status">{t('signatureLibrary.loading', 'Loading signatures…')}</p>}
+                {signatureError && <p role="alert">{signatureError} <button type="button" onClick={() => setSignatureLoad(n => n + 1)}>{t('signatureLibrary.retry', 'Retry')}</button></p>}
+                {signature && <button type="button" disabled={busy} onClick={() => {
+                  if (JSON.stringify(signature) !== JSON.stringify(savedSignatures[accountId]) && !window.confirm(t('signatureLibrary.reloadConfirm', 'Discard unsaved signature changes and reload?'))) return;
+                  setSignatures(current => { const next = { ...current }; delete next[accountId]; return next; });
+                  setSavedSignatures(current => { const next = { ...current }; delete next[accountId]; return next; });
+                  setSignatureLoad(n => n + 1);
+                }}>{t('signatureLibrary.reload', 'Reload signatures')}</button>}
+                {signature && <SignatureLibraryEditor key={`${accountId}:${savedSignatures[accountId]?.revision}`} account={account} value={signature} disabled={busy} onChange={value => setSignatures(current => ({ ...current, [accountId]: value }))} />}
               </>}
             </Row>
             <Row title={t("gmail.settings.default_reply_behavior", "Default reply behavior")}>{[['reply', 'Reply'], ['replyAll', 'Reply all']].map(([value, text]) => <Choice key={value} name="reply" value={value} selected={prefs.replyDefault} onChange={v => patchPref('replyDefault', v)}>{text}</Choice>)}</Row>

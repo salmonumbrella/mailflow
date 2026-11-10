@@ -9,7 +9,7 @@ import { matchApiTokenRoute } from '../services/apiTokenAllowlist.js';
 
 // #617: the API token guards' SQL, which tells drafts among the messages a request would move
 // (draftMessageSql) and the roles of the folder bulk-move would move them into (folderRoles). CI
-// does not run this. Uses only connection-local temporary tables in an explicitly supplied database.
+// runs these checks when given a test database. Uses only connection-local temporary tables.
 describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards PostgreSQL', () => {
   let database;
   const USER = '00000000-0000-4000-8000-0000000000aa';
@@ -30,14 +30,19 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards Postg
     database = new pg.Client({ connectionString: process.env.MAILFLOW_TEST_DATABASE_URL });
     await database.connect();
     await database.query(`
-      CREATE TEMP TABLE email_accounts (id uuid PRIMARY KEY, user_id uuid, imap_host text, oauth_provider text,
+      CREATE TEMP TABLE email_accounts (storage_generation uuid DEFAULT gen_random_uuid(), id uuid PRIMARY KEY, user_id uuid, imap_host text, oauth_provider text,
         folder_mappings jsonb);
       CREATE TEMP TABLE folders (account_id uuid, path text, name text, delimiter text, special_use text,
         no_select boolean NOT NULL DEFAULT false);
-      CREATE TEMP TABLE messages (id uuid PRIMARY KEY, account_id uuid, folder text, uid bigint, message_id text,
+      CREATE TEMP TABLE message_entities (id uuid PRIMARY KEY, account_id uuid, storage_generation uuid, canonical_entity_id uuid);
+      CREATE TEMP TABLE mailbox_identity_epochs (account_id uuid, storage_generation uuid, folder_path text, uid_validity bigint,
+        PRIMARY KEY(account_id,storage_generation,folder_path));
+      CREATE TEMP TABLE entity_locations (account_id uuid, storage_generation uuid, folder_path text, uid_validity bigint,
+        uid bigint, entity_id uuid REFERENCES message_entities(id), status text);
+      CREATE TEMP TABLE messages (storage_generation uuid, uid_validity bigint, entity_id uuid REFERENCES message_entities(id), id uuid PRIMARY KEY, account_id uuid, folder text, uid bigint, message_id text,
         in_reply_to text, thread_references text, thread_id text, is_read boolean DEFAULT false,
         is_deleted boolean DEFAULT false, flags jsonb);
-      CREATE TEMP TABLE snoozed_messages (id uuid, user_id uuid, account_id uuid, message_id_header text,
+      CREATE TEMP TABLE snoozed_messages (entity_id uuid REFERENCES message_entities(id), wake_state text DEFAULT 'ready', storage_generation uuid, id uuid, user_id uuid, account_id uuid, message_id_header text,
         original_folder text, snoozed_folder text, snooze_until timestamptz)`);
     query.mockImplementation((sql, values) => database.query(sql, values));
   });
@@ -45,9 +50,9 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards Postg
     await database?.end();
   });
   beforeEach(async () => {
-    await database.query('TRUNCATE email_accounts, folders, messages, snoozed_messages');
+    await database.query('TRUNCATE email_accounts, folders, messages, snoozed_messages, message_entities, mailbox_identity_epochs, entity_locations');
     await database.query(
-      `INSERT INTO email_accounts VALUES ($1, $4, 'mail.example.com', NULL, NULL), ($2, $4, 'imap.gmail.com', NULL, NULL),
+      `INSERT INTO email_accounts(id,user_id,imap_host,oauth_provider,folder_mappings) VALUES ($1, $4, 'mail.example.com', NULL, NULL), ($2, $4, 'imap.gmail.com', NULL, NULL),
         ($3, $5, 'mail.example.com', NULL, NULL)`,
       [ACCOUNT, GMAIL, THEIRS, USER, SOMEONE_ELSE],
     );
@@ -66,10 +71,19 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards Postg
 
   const message = async ({ account = ACCOUNT, folder = 'INBOX', messageId = `<${nextId}@example.com>`, inReplyTo = null, flags = null } = {}) => {
     const id = newId();
+    const entityId = newId();
+    const uid = nextId;
+    const { rows: [owner] } = await database.query('SELECT storage_generation FROM email_accounts WHERE id=$1', [account]);
+    const generation = owner.storage_generation;
+    await database.query('INSERT INTO message_entities(id,account_id,storage_generation) VALUES ($1,$2,$3)', [entityId, account, generation]);
+    await database.query(`INSERT INTO mailbox_identity_epochs(account_id,storage_generation,folder_path,uid_validity)
+      VALUES ($1,$2,$3,10) ON CONFLICT DO NOTHING`, [account, generation, folder]);
+    await database.query(`INSERT INTO entity_locations(account_id,storage_generation,folder_path,uid_validity,uid,entity_id,status)
+      VALUES ($1,$2,$3,10,$4,$5,'present')`, [account, generation, folder, uid, entityId]);
     await database.query(
-      `INSERT INTO messages (id, account_id, folder, uid, message_id, in_reply_to, thread_id, flags)
-       VALUES ($1, $2, $3, $4, $5, $6, 'thread', $7)`,
-      [id, account, folder, nextId, messageId, inReplyTo, flags && JSON.stringify(flags)],
+      `INSERT INTO messages (id, account_id, folder, uid, message_id, in_reply_to, thread_id, flags, entity_id, storage_generation, uid_validity)
+       VALUES ($1, $2, $3, $4, $5, $6, 'thread', $7, $8, $9, 10)`,
+      [id, account, folder, uid, messageId, inReplyTo, flags && JSON.stringify(flags), entityId, generation],
     );
     return id;
   };
@@ -104,8 +118,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards Postg
   it('refuses a folder one of the account\'s snooze records names, as where a rename took Snoozed', async () => {
     const id = await message();
     const snoozedIn = (account, userId, folder) => database.query(
-      `INSERT INTO snoozed_messages (id, user_id, account_id, message_id_header, original_folder, snoozed_folder, snooze_until)
-       VALUES ($1, $2, $3, '<waiting@example.com>', 'INBOX', $4, '2026-10-20T08:00:00Z')`,
+      `INSERT INTO snoozed_messages (id, user_id, account_id, message_id_header, original_folder, snoozed_folder, snooze_until, storage_generation)
+       VALUES ($1, $2, $3, '<waiting@example.com>', 'INBOX', $4, '2026-10-20T08:00:00Z',(SELECT storage_generation FROM email_accounts WHERE id=$3))`,
       [newId(), userId, account, folder],
     );
     // Another account's snooze says nothing about this one's folders.

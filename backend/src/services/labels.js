@@ -1,4 +1,5 @@
 import { query } from './db.js';
+import { withReadSourceIdentity, CURRENT_MESSAGE_IDENTITY_SQL } from './messageReadScope.js';
 import { fanOutReadToSiblings, readCopyTargets, pushSeen } from '../utils/mailUtils.js';
 
 // Generic "labels" capability (v3.0 plugin platform).
@@ -17,20 +18,32 @@ import { fanOutReadToSiblings, readCopyTargets, pushSeen } from '../utils/mailUt
 // acted row is used directly when it already lives there; otherwise the shared RFC Message-ID
 // (an IMAP COPY duplicates it verbatim) joins to the sibling copy. A message with no
 // Message-ID can only be resolved via the acted-row case.
-export async function resolveLabelCopyUid(message, folder) {
-  if (message.folder === folder) return message.uid;
+const LABEL_COPY_COLUMNS = ['id', 'account_id', 'uid', 'folder', 'message_id', 'thread_key',
+  'storage_generation', 'uid_validity', 'entity_id', 'subject', 'from_email', 'date', 'is_read'];
+const copyLocator = row => row ? Object.fromEntries(LABEL_COPY_COLUMNS
+  .filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]])) : null;
+
+export async function resolveLabelCopy(message, folder) {
+  if (message.folder === folder) return copyLocator(message);
   if (!message.message_id) return null;
   const { rows } = await query(
-    'SELECT uid FROM messages WHERE account_id = $1 AND folder = $2 AND message_id = $3 AND is_deleted = false LIMIT 1',
-    [message.account_id, folder, message.message_id]
+    `SELECT ${LABEL_COPY_COLUMNS.join(', ')} FROM messages WHERE account_id = $1 AND folder = $2 AND message_id = $3
+      AND storage_generation IS NOT DISTINCT FROM $4::uuid AND is_deleted = false LIMIT 1`,
+    [message.account_id, folder, message.message_id, message.storage_generation]
   );
-  return rows[0]?.uid ?? null;
+  return copyLocator(rows[0]);
+}
+
+export async function resolveLabelCopyUid(message, folder) {
+  return (await resolveLabelCopy(message, folder))?.uid ?? null;
 }
 
 // Apply a label: ensure the label folder exists, then COPY the message into it (leaving the
 // original in place). imapManager.copyMessage also emits the section-refresh event. No-op when
 // the message already lives in the label folder. `message` needs { uid, folder }.
 export async function applyLabel(imapManager, account, message, labelFolder, { forceCopy = false } = {}) {
+  account = { ...account };
+  message = { ...message };
   if (message.folder === labelFolder) {
     return { applied: false, uid: message.uid, reason: 'already-there' };
   }
@@ -39,7 +52,7 @@ export async function applyLabel(imapManager, account, message, labelFolder, { f
     return { applied: false, uid: existingUid, reason: 'already-labelled' };
   }
   await imapManager.ensureFolder(account, labelFolder);
-  const uid = await imapManager.copyMessage(account.id, message.uid, message.folder, labelFolder);
+  const uid = await imapManager.copyMessage(account, message.uid, message.folder, labelFolder, { expectedSource: message });
   return { applied: true, uid: uid ?? null };
 }
 
@@ -48,27 +61,33 @@ export async function applyLabel(imapManager, account, message, labelFolder, { f
 // forged UID cannot remove a different message's label copy. Without a Message-ID there is no
 // stable identity shared by the source and copied rows, so no inverse is advertised.
 export async function removeExactLabelCopy(imapManager, message, labelFolder, uid) {
+  message = { ...message };
   if (!message.message_id) return { removed: false };
   const { rows } = await query(
-    `SELECT uid FROM messages
+    `SELECT * FROM messages
       WHERE account_id = $1 AND folder = $2 AND uid = $3
-        AND message_id = $4 AND is_deleted = false
+        AND message_id = $4 AND storage_generation IS NOT DISTINCT FROM $5::uuid AND is_deleted = false
       LIMIT 1`,
-    [message.account_id, labelFolder, uid, message.message_id]
+    [message.account_id, labelFolder, uid, message.message_id, message.storage_generation]
   );
   if (!rows[0]) return { removed: false };
-  await imapManager.removeMessageCopy(message.account_id, uid, labelFolder);
-  return { removed: true };
+  const removed = await imapManager.removeMessageCopy(
+    { id: message.account_id, storage_generation: message.storage_generation }, uid, labelFolder,
+    { expectedSource: { ...rows[0] } });
+  return { removed: removed > 0 };
 }
 
 // Remove a label: delete the message's copy living in the label folder, leaving INBOX and any
 // other labels intact. No-op when no such copy exists. `message` needs { account_id, uid,
 // folder, message_id }.
 export async function removeLabel(imapManager, message, labelFolder) {
-  const uid = await resolveLabelCopyUid(message, labelFolder);
-  if (uid == null) return { removed: false };
-  await imapManager.removeMessageCopy(message.account_id, uid, labelFolder);
-  return { removed: true };
+  message = { ...message };
+  const copy = await resolveLabelCopy(message, labelFolder);
+  if (!copy) return { removed: false };
+  const removed = await imapManager.removeMessageCopy(
+    { id: message.account_id, storage_generation: message.storage_generation }, copy.uid, labelFolder,
+    { expectedSource: { ...copy } });
+  return { removed: removed > 0 };
 }
 
 // Ensure a set of label folders exist on the IMAP server, resolving each to its REAL server
@@ -99,25 +118,35 @@ export async function ensureLabelFolders(imapManager, account, folderPaths) {
 // `error` reports DB/selection or best-effort failures; other failed pushes are queued.
 // `pushedIds` contains confirmed STOREs only, for callers avoiding duplicate writes.
 export async function markThreadRead(imapManager, account, message, { excludeFolders = [] } = {}) {
-  const { rows } = await query(
-    'SELECT id, uid, is_read FROM messages WHERE account_id = $1 AND folder = $2 AND message_id = $3 AND is_deleted = false LIMIT 1',
-    [message.account_id, 'INBOX', message.message_id]
-  );
-  const inboxCopy = rows[0] || null;
+  account = { ...account };
+  message = { ...message };
+  let inboxCopy = null;
+  let inboxSelected = false;
   const pushedIds = [];
   let error;
   try {
-    const flipped = await fanOutReadToSiblings(message.account_id, message.message_id, true) || [];
+    const flipped = await withReadSourceIdentity(account, message, async tx => {
+      const { rows } = await tx.query(`SELECT id, uid, is_read, account_id, folder, storage_generation, uid_validity, entity_id
+        FROM messages WHERE account_id = $1 AND folder = $2 AND message_id = $3 AND is_deleted = false
+          AND storage_generation=$4 AND ${CURRENT_MESSAGE_IDENTITY_SQL} LIMIT 1`,
+      [message.account_id, 'INBOX', message.message_id, account.storage_generation]);
+      inboxCopy = rows[0] || null;
+      inboxSelected = true;
+      return await fanOutReadToSiblings(message.account_id, message.message_id, true,
+        { queryFn: tx.query.bind(tx), storageGeneration: account.storage_generation }) || [];
+    });
     const perCopy = !imapManager.isLabelStore(account);
     let eligible = [];
     if (perCopy) {
-      try { eligible = await readCopyTargets(message.account_id, message.message_id, message); }
+      try { eligible = await readCopyTargets(message.account_id, message.message_id, message, {
+        queryFn: (...args) => withReadSourceIdentity(account, message, tx => tx.query(...args)),
+        storageGeneration: account.storage_generation }); }
       catch (err) { error = err; }
     }
     // INBOX is written without the copy check: Done archives inboxCopy either way.
     if (inboxCopy && !inboxCopy.is_read) {
       try {
-        await imapManager.setFlag(account, inboxCopy.uid, 'INBOX', '\\Seen', true);
+        await imapManager.setFlag(account, inboxCopy.uid, 'INBOX', '\\Seen', true, { expectedSource: { ...inboxCopy } });
         pushedIds.push(inboxCopy.id);
       } catch (err) { error = err; }
     }
@@ -127,13 +156,16 @@ export async function markThreadRead(imapManager, account, message, { excludeFol
       const acted = copies.find(r => r.id === message.id);
       if (acted) {
         try {
-          await imapManager.setFlag(account, acted.uid, acted.folder, '\\Seen', true);
+          await imapManager.setFlag(account, acted.uid, acted.folder, '\\Seen', true, { expectedSource: { ...acted } });
           pushedIds.push(acted.id);
         } catch (err) { error ||= err; }
       }
       pushedIds.push(...await pushSeen(imapManager, account, message.account_id, copies.filter(r => r.id !== message.id), true));
     }
-  } catch (err) { error ||= err; }
+  } catch (err) {
+    if (!inboxSelected && !/^(identity_|storage_generation_)/.test(err.code || '')) throw err;
+    error ||= err;
+  }
   return { inboxCopy, pushedIds, ...(error ? { error } : {}) };
 }
 
@@ -144,7 +176,7 @@ export async function markThreadRead(imapManager, account, message, { excludeFol
 export async function markCopySeen(imapManager, account, message) {
   if (message.is_read) return {};
   try {
-    await imapManager.setFlag(account, message.uid, message.folder, '\\Seen', true);
+    await imapManager.setFlag({ ...account }, message.uid, message.folder, '\\Seen', true, { expectedSource: { ...message } });
   } catch (err) {
     return { error: err };
   }

@@ -22,7 +22,7 @@ import { resolveAllDraftsPaths } from '../../utils/mailUtils.js';
 const DEFAULT_FOLDERS = { todo: 'Todo', watch: 'Watch', delegated: 'Delegated', someday: 'Someday', reference: 'Reference' };
 const account = { id: 'acct-1', user_id: 'user-1', email_address: 'me@example.com', folder_mappings: {} };
 
-const fakeManager = () => ({ hasMessageCopy: vi.fn().mockResolvedValue(true), removeMessageCopy: vi.fn().mockResolvedValue({}), broadcast: vi.fn() });
+const fakeManager = () => ({ hasMessageCopy: vi.fn().mockResolvedValue(true), removeMessageCopy: vi.fn().mockResolvedValue(1), broadcast: vi.fn() });
 
 // One switchboard for the queries the engine issues: the sent-message Message-ID lookup
 // (recognised by message_id = ANY), the owner-address UNION (account_aliases), and the
@@ -106,10 +106,10 @@ describe('runGtdTransitions', () => {
     ] });
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 11, 'Todo');
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 12, 'Someday');
-    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 13, 'Watch');
-    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 14, 'Delegated');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining(account), 11, 'Todo', { expectedSource: expect.objectContaining({ uid: 11, folder: 'Todo' }) });
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining(account), 12, 'Someday', { expectedSource: expect.objectContaining({ uid: 12, folder: 'Someday' }) });
+    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining(account), 13, 'Watch', { expectedSource: expect.objectContaining({ uid: 13, folder: 'Watch' }) });
+    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining(account), 14, 'Delegated', { expectedSource: expect.objectContaining({ uid: 14, folder: 'Delegated' }) });
     expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' }, 'user-1');
   });
 
@@ -240,7 +240,7 @@ describe('runGtdTransitions', () => {
     });
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 31, 'Todo');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining(account), 31, 'Todo', { expectedSource: expect.objectContaining({ uid: 31, folder: 'Todo' }) });
   });
 
   it('keeps Watch when the newest message is from a configured Fastmail masked alias', async () => {
@@ -253,7 +253,7 @@ describe('runGtdTransitions', () => {
     });
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
-    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 33, 'Watch');
+    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining(account), 33, 'Watch', { expectedSource: expect.objectContaining({ uid: 33, folder: 'Watch' }) });
   });
 
   it('keeps Watch when the newest message is from an external address', async () => {
@@ -266,7 +266,7 @@ describe('runGtdTransitions', () => {
     });
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
-    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 35, 'Watch');
+    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining(account), 35, 'Watch', { expectedSource: expect.objectContaining({ uid: 35, folder: 'Watch' }) });
   });
 
   it('never strips Reference, whoever sent last', async () => {
@@ -363,7 +363,7 @@ describe('runGtdTransitions', () => {
     const mgr = fakeManager();
     mgr.removeMessageCopy.mockRejectedValue(new Error('NO [TRYCREATE] no such UID'));
     await expect(runGtdTransitions(mgr, account, ['t1'])).resolves.toBeUndefined();
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 71, 'Todo');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining(account), 71, 'Todo', { expectedSource: expect.objectContaining({ uid: 71, folder: 'Todo' }) });
     expect(mgr.broadcast).toHaveBeenCalledTimes(1);
   });
 });
@@ -407,10 +407,10 @@ describe('runTransitionsForSentMessage', () => {
 
     const midCall = query.mock.calls.find(([sql]) => sql.includes('message_id = ANY'));
     expect(midCall[1]).toEqual(['acct-1', ['abc@example.com', '<abc@example.com>']]);
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 81, 'Todo');
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 82, 'Someday');
-    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 83, 'Watch');
-    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 84, 'Delegated');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining(account), 81, 'Todo', { expectedSource: expect.objectContaining({ uid: 81, folder: 'Todo' }) });
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining(account), 82, 'Someday', { expectedSource: expect.objectContaining({ uid: 82, folder: 'Someday' }) });
+    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining(account), 83, 'Watch', { expectedSource: expect.objectContaining({ uid: 83, folder: 'Watch' }) });
+    expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining(account), 84, 'Delegated', { expectedSource: expect.objectContaining({ uid: 84, folder: 'Delegated' }) });
     expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' }, 'user-1');
   });
 

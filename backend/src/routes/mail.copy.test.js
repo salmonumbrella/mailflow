@@ -10,7 +10,7 @@ import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 
 const ID = '11111111-1111-4111-8111-111111111111';
-const source = { id: ID, account_id: 'account-1', uid: 7, folder: 'INBOX', enabled: true };
+const source = { id: ID, account_id: 'account-1', uid: 7, folder: 'INBOX', enabled: true, storage_generation: 'generation', entity_id: ID, uid_validity: '10' };
 
 describe('POST /mail/messages/:id/copy', () => {
   let server;
@@ -34,7 +34,7 @@ describe('POST /mail/messages/:id/copy', () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, uid: 91 });
-    expect(imapManager.copyMessage).toHaveBeenCalledWith('account-1', 7, 'INBOX', 'Projects');
+    expect(imapManager.copyMessage).toHaveBeenCalledExactlyOnceWith({ id: 'account-1', storage_generation: 'generation' }, 7, 'INBOX', 'Projects', { expectedSource: source });
     expect(query.mock.calls[0][1]).toContain('owner');
     expect(query.mock.calls[1][1]).toEqual(['account-1', 'Projects']);
     expect(query.mock.calls.some(([sql]) => /^\s*DELETE\s/i.test(sql))).toBe(false);

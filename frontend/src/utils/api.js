@@ -368,6 +368,7 @@ export const api = {
 
   // Accounts
   getAccounts: () => request('GET', '/accounts'),
+  getAccountIdentityStatus: (id) => request('GET', `/accounts/${encodeURIComponent(id)}/identity-status`),
   addAccount: (data) => request('POST', '/accounts', data),
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   reorderAccounts: (ids) => request('PATCH', '/accounts/order', { ids }),
@@ -375,6 +376,8 @@ export const api = {
   // { wait: true } answers with how the attempt went: { connection, code, error }.
   reconnectAccount: (id, { wait = false } = {}) => request('POST', `/accounts/${id}/reconnect${wait ? '?wait=1' : ''}`),
   reindexAccount: (id) => request('POST', `/accounts/${id}/reindex`),
+  getSignatureLibrary: accountId => request('GET', `/signatures/${encodeURIComponent(accountId)}`),
+  saveSignatureLibrary: (accountId, data) => request('PUT', `/signatures/${encodeURIComponent(accountId)}`, data),
   // Native MailFlow definitions are independent of IMAP folder operations.
   getNativeLabels: accountId => request('GET', `/labels?accountId=${encodeURIComponent(accountId)}`),
   createNativeLabel: data => request('POST', '/labels', data),

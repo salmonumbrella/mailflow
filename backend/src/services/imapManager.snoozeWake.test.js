@@ -4,7 +4,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
-vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('./db.js', () => {
+  const query = vi.fn();
+  return { query, withTransaction: async fn => fn({ query }) };
+});
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((p) => p) }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
@@ -18,330 +21,234 @@ vi.mock('./spamPipeline.js', () => ({ classifyAndTagMessage: vi.fn() }));
 vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }));
 vi.mock('../utils/mailUtils.js', async (importOriginal) => ({ ...(await importOriginal()), adjustFolderCounts: vi.fn() }));
 
-import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
-import { searchCompiler } from 'imapflow/lib/search-compiler.js';
-import { ImapManager, evictPool } from './imapManager.js';
-import { resolveForConnection } from './hostValidation.js';
-import { getConnectionPolicy } from './connectionPolicy.js';
+import { ImapManager } from './imapManager.js';
 import { query } from './db.js';
 import { adjustFolderCounts } from '../utils/mailUtils.js';
-import { takeCarry } from './movedRowCarry.js';
+import { routeIdentityFixture } from './testSupport/routeIdentityFixture.js';
 
 const HOUR = 3_600_000;
-const ACCOUNT = { id: 'acct-1', user_id: 'u1', imap_host: 'imap.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
-
-// The snooze records and the messages they point at, as the database holds them now. Messages
-// are a list, since two of them can carry one Message-ID.
-let snoozes, messages;
-// The account's folders, as the folder sync last listed them.
-let folders;
-// Folders the server lists as \\Noselect.
-let noSelect;
+const GENERATION = '11111111-1111-4111-8111-111111111111';
+const ACCOUNT = { storage_generation: GENERATION, id: 'acct-1', user_id: 'u1' };
+let snoozes, messages, folders, noSelect, identityDb, mgr;
 const snooze = (id, { until = -HOUR, uid = 10, isRead = false, mid = `<${id}@x>` } = {}) => {
-  snoozes.set(id, { id, user_id: 'u1', account_id: 'acct-1', message_id_header: mid, original_folder: 'INBOX', snoozed_folder: 'Snoozed', snooze_until: Date.now() + until });
-  messages.push({ mid, folder: 'Snoozed', uid, is_read: isRead });
+  snoozes.set(id, { id, entity_id: `entity-${id}`, wake_state: 'ready', storage_generation: GENERATION,
+    user_id: 'u1', account_id: ACCOUNT.id, message_id_header: mid, original_folder: 'INBOX',
+    snoozed_folder: 'Snoozed', snooze_until: Date.now() + until });
+  messages.push({ id: `cache-${id}`, entity_id: `entity-${id}`, account_id: ACCOUNT.id,
+    storage_generation: GENERATION, uid_validity: '10', message_id: mid, folder: 'Snoozed', uid, is_read: isRead });
 };
-const messageOf = (sm) => messages.find(m => m.mid === sm.message_id_header && m.folder === sm.snoozed_folder);
-const byMid = (mid) => messages.find(m => m.mid === mid);
-// What snoozedRows returned for a snooze when it was read: a copy, which later changes miss.
-const rowRead = (id, m = messageOf(snoozes.get(id))) => {
+const messageOf = sm => messages.find(m => m.entity_id === sm.entity_id && m.folder === sm.snoozed_folder);
+const rowRead = id => {
   const sm = snoozes.get(id);
-  return { snooze_id: id, user_id: sm.user_id, account_id: sm.account_id, message_id_header: sm.message_id_header, original_folder: sm.original_folder, snoozed_folder: sm.snoozed_folder, uid: m.uid, is_read: m.is_read };
+  return { ...messageOf(sm), snooze_id: id, user_id: sm.user_id, message_id_header: sm.message_id_header,
+    original_folder: sm.original_folder, snoozed_folder: sm.snoozed_folder,
+    snooze_until: new Date(sm.snooze_until), snooze_until_snapshot: new Date(sm.snooze_until).toISOString() };
 };
-
-// Answers the handful of queries a wake makes, from the state above. The message writes match on
-// every column their WHERE names, uid included when it does.
-const matches = (sql, m, { mid, folder, uid }) => m.mid === mid && m.folder === folder && (!/AND uid = \$\d+$/.test(sql.trim()) || m.uid === uid);
-function fakeQuery(sql, params = []) {
+function fakeQuery(rawSql, params = []) {
+  const sql = rawSql.replace(/\s+/g, ' ').trim();
+  const identityResult = identityDb.query(sql, params);
+  if (identityResult) return identityResult;
   if (sql.includes('FROM snoozed_messages sm')) {
-    let live = [...snoozes.values()].filter(sm => messageOf(sm));
-    if (sql.includes('sm.id = $1')) live = live.filter(sm => sm.id === params[0]);
+    let live = [...snoozes.values()].filter(sm => sm.wake_state === 'ready' && sm.entity_id
+      && sm.storage_generation === ACCOUNT.storage_generation && messageOf(sm));
+    if (sql.includes('sm.id=$1')) live = live.filter(sm => sm.id === params[0]);
     if (sql.includes('sm.snooze_until <= NOW()')) live = live.filter(sm => sm.snooze_until <= Date.now());
     return { rows: live.map(sm => rowRead(sm.id)) };
   }
   if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [ACCOUNT] };
-  if (sql.startsWith('SELECT 1 FROM folders')) return { rows: folders.has(params[1]) && !(sql.includes('NOT no_select') && noSelect.has(params[1])) ? [{ '?column?': 1 }] : [] };
-  if (sql.startsWith('SELECT id FROM messages')) {
-    const m = messages.find(m => m.folder === params[1] && m.uid === params[2]);
-    return { rows: m ? [{ id: `row-${m.mid}-${m.folder}` }] : [] };
+  if (sql.startsWith('SELECT 1 FROM folders')) return { rows: folders.has(params[1]) && !noSelect.has(params[1]) ? [{}] : [] };
+  if (sql.startsWith("UPDATE snoozed_messages SET wake_state='waking'")) {
+    const sm = snoozes.get(params[0]);
+    const matches = sm && sm.account_id === params[1] && sm.storage_generation === params[2]
+      && sm.entity_id === params[3] && sm.wake_state === 'ready'
+      && sm.snooze_until === new Date(params[4]).getTime()
+      && (!sql.includes('AND snooze_until <= NOW()') || sm.snooze_until <= Date.now());
+    if (matches) sm.wake_state = 'waking';
+    return { rows: matches ? [{ id: sm.id }] : [] };
   }
-  if (sql.startsWith('SELECT * FROM messages')) {
-    const m = messages.find(m => m.folder === params[1] && m.uid === params[2] && m.mid === params[3]);
-    return { rows: m ? [{ account_id: params[0], message_id: m.mid, folder: m.folder, uid: m.uid, date: '2026-11-04T10:00:00Z', category: m.category ?? null }] : [] };
+  if (sql.startsWith('UPDATE messages SET is_read=false')) {
+    const row = messages.find(m => m.id === params[0]);
+    if (row) row.is_read = false;
+    return { rows: [] };
   }
-  if (sql.startsWith('UPDATE messages SET folder')) {
-    // The repoint stands down when the destination already holds a row at the new uid.
-    const cond = sql.replace(/\s+AND NOT EXISTS[\s\S]*$/, '');
-    if (cond !== sql && messages.some(m => m.folder === params[0] && m.uid === params[3])) return { rows: [], rowCount: 0 };
-    const where = { mid: params[2], folder: sql.includes('uid = $4') ? params[4] : params[3], uid: params[5] ?? params[params.length - 1] };
-    const hit = messages.filter(m => matches(cond, m, where));
-    for (const m of hit) {
-      m.folder = params[0];
-      if (sql.includes('uid = $4')) m.uid = params[3];
-      if (sql.includes('is_read = false')) m.is_read = false;
-    }
-    return { rows: [], rowCount: hit.length };
+  if (sql === "DELETE FROM snoozed_messages WHERE id=$1 AND wake_state='waking'") {
+    if (snoozes.get(params[0])?.wake_state === 'waking') snoozes.delete(params[0]);
+    return { rows: [] };
   }
-  if (sql.startsWith('UPDATE messages SET is_read = false')) {
-    for (const m of messages.filter(m => m.folder === params[1] && m.uid === params[2])) m.is_read = false;
-    return { rows: [], rowCount: 1 };
+  if (sql === "UPDATE snoozed_messages SET wake_state='pending' WHERE id=$1 AND wake_state='waking'") {
+    const sm = snoozes.get(params[0]);
+    if (sm?.wake_state === 'waking') sm.wake_state = 'pending';
+    return { rows: [] };
   }
-  if (sql.startsWith('DELETE FROM messages')) {
-    const where = { mid: params[1], folder: params[2], uid: params[3] };
-    const cond = sql.replace(/\s+RETURNING \*$/, '');
-    const gone = messages.filter(m => matches(cond, m, where));
-    messages = messages.filter(m => !gone.includes(m));
-    return { rows: gone.map(m => ({ account_id: params[0], message_id: m.mid, uid: m.uid, folder: m.folder, category: m.category ?? null })) };
-  }
-  if (sql.startsWith('DELETE FROM snoozed_messages WHERE id')) { snoozes.delete(params[0]); return { rows: [] }; }
-  return { rows: [] };
+  throw new Error(`Unmodelled snooze SQL: ${sql}`);
 }
-
-let mgr;
+function acknowledgeMove(uid = 500, beforeAck = () => {}) {
+  mgr.moveMessage.mockImplementation(async (account, sourceUid, from, to, { expectedSource }) => {
+    await beforeAck(account, sourceUid, from, to, expectedSource);
+    const destinationUid = typeof uid === 'function' ? uid(sourceUid) : uid;
+    identityDb.acknowledgeMove(expectedSource, to, destinationUid);
+    return destinationUid;
+  });
+}
 beforeEach(() => {
   vi.clearAllMocks();
-  snoozes = new Map();
-  messages = [];
-  folders = new Set(['INBOX', 'Snoozed', 'Projects']);
-  noSelect = new Set();
+  snoozes = new Map(); messages = []; folders = new Set(['INBOX', 'Snoozed', 'Projects']); noSelect = new Set();
+  identityDb = routeIdentityFixture({ account: ACCOUNT, getRows: () => messages,
+    removeRow: id => { messages = messages.filter(m => m.id !== id); },
+    saveRow: (id, row) => { messages = messages.map(m => m.id === id ? row : m); } });
   query.mockImplementation(async (sql, params) => fakeQuery(sql, params));
   mgr = new ImapManager(null);
-  mgr.broadcast = vi.fn();
-  mgr.setFlag = vi.fn(async () => {});
-  mgr.moveMessageGetNewUid = vi.fn(async () => 500);
-  mgr.syncFolderOnDemand = vi.fn(async () => {});
+  mgr.broadcast = vi.fn(); mgr.setFlag = vi.fn(async () => {}); mgr.moveMessage = vi.fn();
+  mgr.syncFolderOnDemand = vi.fn(async () => {}); mgr._enqueueFlagPush = vi.fn();
+  acknowledgeMove();
 });
 
 describe('waking a snooze that changed after it was read', () => {
-  it('leaves one the reader already brought back by hand', async () => {
-    snooze('a');
-    const stale = rowRead('a');
-    expect(await mgr.wakeSnoozed(rowRead('a'), { markUnread: false })).toBe(true);
+  it('does not replay one already brought back by hand', async () => {
+    snooze('a'); const stale = rowRead('a');
+    expect(await mgr.wakeSnoozed(stale, { markUnread: false })).toBe(true);
     expect(await mgr.wakeSnoozed(stale, { onlyIfDue: true })).toBe(false);
-    expect(mgr.moveMessageGetNewUid).toHaveBeenCalledTimes(1);
-    expect(adjustFolderCounts).toHaveBeenCalledTimes(2); // out of Snoozed and into INBOX, once
+    expect(mgr.moveMessage).toHaveBeenCalledTimes(1);
+    expect(adjustFolderCounts).toHaveBeenCalledTimes(2);
     expect(mgr.broadcast).toHaveBeenCalledTimes(1);
   });
-
-  it('leaves one given a later time, but brings it back by hand', async () => {
-    snooze('a');
-    const stale = rowRead('a');
+  it('leaves one given a later time, but brings it back by hand using the current schedule', async () => {
+    snooze('a'); const stale = rowRead('a');
     snoozes.get('a').snooze_until = Date.now() + HOUR;
     expect(await mgr.wakeSnoozed(stale, { onlyIfDue: true })).toBe(false);
-    expect(mgr.moveMessageGetNewUid).not.toHaveBeenCalled();
+    expect(mgr.moveMessage).not.toHaveBeenCalled();
     expect(await mgr.wakeSnoozed(stale, { markUnread: false })).toBe(true);
-    expect(byMid('<a@x>').folder).toBe('INBOX');
+    expect(messages[0].folder).toBe('INBOX');
   });
-
-  it("moves the message's UID and counts its read state as they are now", async () => {
-    snooze('a', { uid: 10, isRead: false });
-    const stale = rowRead('a');
-    Object.assign(byMid('<a@x>'), { uid: 12, is_read: true });
-    expect(await mgr.wakeSnoozed(stale, { onlyIfDue: true })).toBe(true);
-    expect(mgr.moveMessageGetNewUid).toHaveBeenCalledWith(ACCOUNT, 12, 'Snoozed', 'INBOX');
-    expect(adjustFolderCounts).toHaveBeenCalledWith('acct-1', 'Snoozed', -1, 0); // it was read
+  it.each(['uid', 'uid_validity', 'entity_id', 'id'])('refuses a captured source whose %s changed', async key => {
+    snooze('a'); const stale = rowRead('a');
+    messages[0][key] = key === 'uid' ? 12 : 'changed';
+    expect(await mgr.wakeSnoozed(stale, { onlyIfDue: true })).toBe(false);
+    expect(mgr.moveMessage).not.toHaveBeenCalled();
+    expect(adjustFolderCounts).not.toHaveBeenCalled();
   });
-
-  it('tells a wake already under way apart from nothing to wake', async () => {
-    snooze('a');
-    const read = rowRead('a');
-    let finishMove;
-    mgr.moveMessageGetNewUid = vi.fn(() => new Promise(resolve => { finishMove = () => resolve(500); }));
+  it('distinguishes an in-flight wake from nothing to wake, with only one MOVE', async () => {
+    snooze('a'); const read = rowRead('a'); let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    acknowledgeMove(500, () => gate);
     const first = mgr.wakeSnoozed(read);
-    await vi.waitFor(() => expect(mgr.moveMessageGetNewUid).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mgr.moveMessage).toHaveBeenCalledTimes(1));
     expect(mgr.isWakingSnooze('a')).toBe(true);
-    expect(await mgr.wakeSnoozed(read, { markUnread: false })).toBe(null);
-    finishMove();
-    expect(await first).toBe(true);
+    expect(await mgr.wakeSnoozed(read)).toBe(null);
+    release(); expect(await first).toBe(true);
     expect(mgr.isWakingSnooze('a')).toBe(false);
     expect(await mgr.wakeSnoozed(read)).toBe(false);
-    expect(mgr.moveMessageGetNewUid).toHaveBeenCalledTimes(1);
+    expect(mgr.moveMessage).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('the sweep', () => {
-  it('wakes what is due, unread, and skips what the reader unsnoozed while it ran', async () => {
-    snooze('a');
-    snooze('b', { uid: 11 });
-    // The reader brings b back by hand while the sweep is moving a.
-    mgr.moveMessageGetNewUid = vi.fn(async (_acct, uid) => {
+  it('marks only the due sweep message unread when a manual wake runs during it', async () => {
+    snooze('a'); snooze('b', { uid: 11 });
+    acknowledgeMove(uid => uid + 100, async (_account, uid) => {
       if (uid === 10) await mgr.wakeSnoozed(rowRead('b'), { markUnread: false });
-      return uid + 100;
     });
     await mgr._runSnoozeWakeup();
-    expect(mgr.moveMessageGetNewUid.mock.calls.map(c => c[1])).toEqual([10, 11]); // b once, by hand
-    expect(mgr.setFlag).toHaveBeenCalledTimes(1);
-    expect(mgr.setFlag).toHaveBeenCalledWith(ACCOUNT, 110, 'INBOX', '\\Seen', false);
+    expect(mgr.moveMessage.mock.calls.map(c => c[1])).toEqual([10, 11]);
+    expect(mgr.setFlag).toHaveBeenCalledExactlyOnceWith(ACCOUNT, 110, 'INBOX', '\\Seen', false,
+      { expectedSource: expect.objectContaining({ entity_id: 'entity-a', storage_generation: GENERATION, uid_validity: '10' }) });
     expect(snoozes.size).toBe(0);
     expect(adjustFolderCounts).toHaveBeenCalledTimes(4);
   });
+  it('retains orphaned ready decisions rather than treating missing cache as deletion proof', async () => {
+    snooze('a'); messages = [];
+    await mgr._runSnoozeWakeup();
+    expect(snoozes.has('a')).toBe(true);
+    expect(mgr.moveMessage).not.toHaveBeenCalled();
+  });
 });
 
-// The source uid can belong to another message in the folder it comes back to (#665).
-describe('waking a snooze whose move names no new uid', () => {
-  it('drops the row and pulls the folder, rather than keep the row on its Snoozed uid', async () => {
-    snooze('a');
-    byMid('<a@x>').category = 'promotions';
-    mgr.moveMessageGetNewUid = vi.fn(async () => null);
-    expect(await mgr.wakeSnoozed(rowRead('a'), { markUnread: false })).toBe(true);
-    expect(byMid('<a@x>')).toBeUndefined();
+describe('waking without an exact destination mapping', () => {
+  it.each([null, 500])('keeps the source and holds recovery for unjournalled provider result %s', async uid => {
+    snooze('a'); mgr.moveMessage.mockResolvedValue(uid);
+    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
+    expect(messages[0]).toMatchObject({ folder: 'Snoozed', uid: 10 });
+    expect(snoozes.get('a').wake_state).toBe('pending');
     expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(ACCOUNT, 'INBOX');
-    expect(snoozes.size).toBe(0);
-    expect(adjustFolderCounts.mock.calls).toEqual([['acct-1', 'Snoozed', -1, -1]]);
-    // The inbox's sync files it again with what MailFlow knew, not as new mail.
-    expect(takeCarry('acct-1', 'INBOX', '<a@x>', null)).toEqual({ category: 'promotions' });
+    expect(mgr.setFlag).not.toHaveBeenCalled();
+    expect(adjustFolderCounts).not.toHaveBeenCalled();
+    await mgr._runSnoozeWakeup();
+    expect(mgr.moveMessage).toHaveBeenCalledTimes(1);
+  });
+  it('drops only the acknowledged source for noUID success, holds its decision, and never searches headers to mark unread', async () => {
+    snooze('a'); snooze('b', { uid: 11, mid: '<a@x>' }); acknowledgeMove(null);
+    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ entity_id: 'entity-b', folder: 'Snoozed', uid: 11 });
+    expect(snoozes.get('a').wake_state).toBe('pending');
+    expect(mgr.setFlag).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+    expect(adjustFolderCounts).toHaveBeenCalledExactlyOnceWith(ACCOUNT.id, 'Snoozed', -1, -1, expect.any(Function));
   });
 });
 
-// Two messages in Snoozed can carry one Message-ID. The wake writes only the row it moved.
-describe('waking one of two messages that share a Message-ID', () => {
-  beforeEach(() => {
-    snooze('a', { uid: 10, mid: '<dup@x>' });
-    messages.push({ mid: '<dup@x>', folder: 'Snoozed', uid: 11, is_read: false });
+describe('exact destination mappings', () => {
+  it('moves only the intended entity when two deliveries share a Message-ID', async () => {
+    snooze('a', { mid: '<dup@x>' }); snooze('b', { uid: 11, mid: '<dup@x>' });
+    expect(await mgr.wakeSnoozed(rowRead('a'), { markUnread: false })).toBe(true);
+    expect(messages).toMatchObject([{ entity_id: 'entity-a', folder: 'INBOX', uid: 500 }, { entity_id: 'entity-b', folder: 'Snoozed', uid: 11 }]);
+    expect(snoozes.has('a')).toBe(false); expect(snoozes.has('b')).toBe(true);
   });
-  const woken = () => rowRead('a', messages.find(m => m.uid === 10));
-
-  it('drops only its own row when the move names no new uid', async () => {
-    mgr.moveMessageGetNewUid = vi.fn(async () => null);
-    expect(await mgr.wakeSnoozed(woken(), { markUnread: false })).toBe(true);
-    expect(messages).toEqual([{ mid: '<dup@x>', folder: 'Snoozed', uid: 11, is_read: false }]);
+  it('counts a destination already filed by sync only once and marks the verified entity unread', async () => {
+    snooze('a', { isRead: true });
+    acknowledgeMove(500, () => { messages.push({ ...messages[0], id: 'destination-cache', folder: 'INBOX', uid: 500 }); });
+    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ entity_id: 'entity-a', folder: 'INBOX', uid: 500, is_read: false });
+    expect(adjustFolderCounts.mock.calls.map(call => call.slice(1, 4))).toEqual([['Snoozed', -1, 0], ['INBOX', 0, 0], ['INBOX', 0, 1]]);
+    expect(mgr.setFlag).toHaveBeenCalledTimes(1);
   });
-
-  it('moves only its own row when the move names the new uid', async () => {
-    expect(await mgr.wakeSnoozed(woken(), { markUnread: false })).toBe(true);
-    expect(messages).toEqual([
-      { mid: '<dup@x>', folder: 'INBOX', uid: 500, is_read: false },
-      { mid: '<dup@x>', folder: 'Snoozed', uid: 11, is_read: false },
-    ]);
+  it('retains provider success when marking unread fails and queues only the verified target', async () => {
+    snooze('a'); mgr.setFlag.mockRejectedValue(new Error('NO [UNAVAILABLE]'));
+    const source = rowRead('a');
+    expect(await mgr.wakeSnoozed(source)).toBe(true);
+    expect(messages[0]).toMatchObject({ folder: 'INBOX', uid: 500, is_read: false });
+    expect(snoozes.get('a').wake_state).toBe('waking');
+    expect(mgr._enqueueFlagPush).toHaveBeenCalledExactlyOnceWith(ACCOUNT.id, 'cache-a', '\\Seen', false,
+      { expectedSource: expect.objectContaining({ id: 'cache-a', entity_id: 'entity-a', storage_generation: GENERATION, folder: 'INBOX', uid: 500 }) });
+    expect(await mgr.wakeSnoozed(source)).toBe(false);
+    expect(mgr.moveMessage).toHaveBeenCalledTimes(1);
+  });
+  it('holds after a transport failure instead of replaying an uncertain MOVE', async () => {
+    snooze('a'); const source = rowRead('a'); mgr.moveMessage.mockRejectedValue(new Error('connection lost'));
+    expect(await mgr.wakeSnoozed(source)).toBe(false);
+    expect(snoozes.get('a').wake_state).toBe('waking');
+    await mgr._runSnoozeWakeup();
+    expect(mgr.moveMessage).toHaveBeenCalledTimes(1);
+  });
+  it('does not count or mark a replacement source after provider success', async () => {
+    snooze('a'); acknowledgeMove(500, () => { messages = []; });
+    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
+    expect(adjustFolderCounts).not.toHaveBeenCalled(); expect(mgr.setFlag).not.toHaveBeenCalled();
+    expect(snoozes.get('a').wake_state).toBe('pending');
   });
 });
 
-// Without a new uid the woken message is marked unread on the server by a Message-ID SEARCH, which
-// may find more than one message.
-describe('marking a woken message unread without its new uid', () => {
-  let found, unflagged;
-  beforeEach(() => {
-    evictPool(ACCOUNT.id);
-    unflagged = [];
-    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
-    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
-    ImapFlow.mockImplementation(function () {
-      return Object.assign(new EventEmitter(), {
-        capabilities: new Map([['IMAP4rev1', true]]), enabled: new Set(),
-        states: { NOT_AUTHENTICATED: 1, AUTHENTICATED: 2, SELECTED: 3, LOGOUT: 4 }, state: 2, mailbox: false,
-        connect: vi.fn(async () => {}), close: vi.fn(), logout: vi.fn(async () => {}), noop: vi.fn(async () => true),
-        async getMailboxLock(path) { this.mailbox = { path, exists: 1 }; return { release() {} }; },
-        // As a server would: the criteria go through imapflow's compiler, and only a SEARCH for
-        // the woken message's Message-ID header finds anything.
-        async search(criteria) {
-          const wire = searchCompiler(this, criteria).map(a => a.value);
-          return wire.join(' ') === 'HEADER MESSAGE-ID <a@x>' ? found : [];
-        },
-        async messageFlagsRemove(range) { unflagged.push(range); return true; },
-      });
+describe('destination availability and legacy holds', () => {
+  it.each([['Old project', false, 'INBOX'], ['Projects', true, 'INBOX'], ['Projects', false, 'Projects']])(
+    'returns from %s with noSelect=%s to %s', async (original, unselectable, expected) => {
+      snooze('a'); snoozes.get('a').original_folder = original;
+      if (unselectable) noSelect.add(original);
+      expect(await mgr.wakeSnoozed(rowRead('a'), { markUnread: false })).toBe(true);
+      expect(mgr.moveMessage).toHaveBeenCalledExactlyOnceWith(ACCOUNT, 10, 'Snoozed', expected,
+        { expectedSource: expect.objectContaining({ id: 'cache-a', entity_id: 'entity-a', storage_generation: GENERATION, uid_validity: '10' }) });
     });
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    snooze('a');
-    mgr.moveMessageGetNewUid = vi.fn(async () => null);
+  it.each([null, '22222222-2222-4222-8222-222222222222'])('retains prior generation %s while refusing provider work', async generation => {
+    snooze('a'); const source = rowRead('a'); snoozes.get('a').storage_generation = generation;
+    expect(await mgr.wakeSnoozed(source)).toBe(false);
+    await mgr._runSnoozeWakeup(); messages = []; await mgr._runSnoozeWakeup();
+    expect(snoozes.has('a')).toBe(true); expect(mgr.moveMessage).not.toHaveBeenCalled();
   });
-
-  it('unflags the one message that carries the Message-ID', async () => {
-    found = [7];
-    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
-    expect(unflagged).toEqual(['7']);
-    evictPool(ACCOUNT.id);
-  });
-
-  it('leaves them all alone when more than one carries it', async () => {
-    found = [7, 8];
-    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
-    expect(unflagged).toEqual([]);
-    evictPool(ACCOUNT.id);
-  });
-});
-
-// The move announces the message to INBOX, whose sync can file it under its new uid before the
-// wake repoints the row. That row is then the message: the wake drops its own, and nothing ends
-// up in both INBOX and Snoozed or treated as new mail.
-describe('waking a snooze while the destination sync files the message first', () => {
-  it('keeps the row the sync filed, unread, and drops its own', async () => {
-    snooze('a', { uid: 10, isRead: true });
-    mgr.moveMessageGetNewUid = vi.fn(async () => {
-      messages.push({ mid: '<a@x>', folder: 'INBOX', uid: 500, is_read: true }); // the sync, first
-      return 500;
-    });
-    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
-    expect(messages).toEqual([{ mid: '<a@x>', folder: 'INBOX', uid: 500, is_read: false }]);
-    expect(snoozes.has('a')).toBe(false);
-    expect(mgr.setFlag).toHaveBeenCalledWith(ACCOUNT, 500, 'INBOX', '\\Seen', false);
-    // Out of Snoozed only: the sync counted it into INBOX.
-    expect(adjustFolderCounts).toHaveBeenCalledTimes(1);
-  });
-
-  it("leaves the sync this row's state to take, and only until the wake is done", async () => {
-    snooze('a');
-    let carried;
-    mgr.moveMessageGetNewUid = vi.fn(async () => {
-      carried = takeCarry('acct-1', 'INBOX', '<a@x>', '2026-11-04T10:00:00Z');
-      return 500;
-    });
-    await mgr.wakeSnoozed(rowRead('a'));
-    expect(carried).not.toBeNull();
-    snooze('b');
-    mgr.moveMessageGetNewUid = vi.fn(async () => 501);
-    await mgr.wakeSnoozed(rowRead('b'));
-    expect(takeCarry('acct-1', 'INBOX', '<b@x>', '2026-11-04T10:00:00Z')).toBeNull();
-  });
-
-  it('still brings the message back when the server refuses to mark it unread, and retries the flag', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    snooze('a');
-    mgr.setFlag = vi.fn(async () => { throw new Error('NO [UNAVAILABLE]'); });
-    mgr._enqueueFlagPush = vi.fn();
-    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
-    expect(byMid('<a@x>')).toMatchObject({ folder: 'INBOX', uid: 500, is_read: false });
-    expect(snoozes.has('a')).toBe(false);
-    // Queued, so the read state is not read back from the server over it meanwhile.
-    expect(mgr._enqueueFlagPush).toHaveBeenCalledWith('acct-1', 'row-<a@x>-INBOX', '\\Seen', false);
-  });
-
-  it('does not take a Snoozed row that went elsewhere for a row the sync filed', async () => {
-    snooze('a');
-    mgr.moveMessageGetNewUid = vi.fn(async () => {
-      messages = messages.filter(m => m.mid !== '<a@x>'); // moved out of Snoozed by another path
-      return 500;
-    });
-    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
-    // Nothing at INBOX/500 to mark unread, and INBOX is counted as usual.
-    expect(adjustFolderCounts).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe('waking a snooze whose folder is gone', () => {
-  it('brings the message back to the Inbox instead of failing on every sweep', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    snooze('a');
-    snoozes.get('a').original_folder = 'Old project';
-    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
-    expect(mgr.moveMessageGetNewUid).toHaveBeenCalledWith(ACCOUNT, 10, 'Snoozed', 'INBOX');
-    expect(byMid('<a@x>')).toMatchObject({ folder: 'INBOX', uid: 500 });
-    expect(snoozes.has('a')).toBe(false);
-  });
-
-  it('treats a folder the server lists as \\Noselect as gone', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    snooze('a');
-    snoozes.get('a').original_folder = 'Projects';
-    noSelect.add('Projects');
-    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
-    expect(mgr.moveMessageGetNewUid).toHaveBeenCalledWith(ACCOUNT, 10, 'Snoozed', 'INBOX');
-  });
-
-  it('still goes back to a folder that exists', async () => {
-    snooze('a');
-    snoozes.get('a').original_folder = 'Projects';
-    expect(await mgr.wakeSnoozed(rowRead('a'))).toBe(true);
-    expect(mgr.moveMessageGetNewUid).toHaveBeenCalledWith(ACCOUNT, 10, 'Snoozed', 'Projects');
+  it('holds a legacy NULL-entity decision even when its header matches current mail', async () => {
+    snooze('a'); const source = rowRead('a'); snoozes.get('a').entity_id = null;
+    expect(await mgr.wakeSnoozed(source)).toBe(false);
+    await mgr._runSnoozeWakeup();
+    expect(snoozes.has('a')).toBe(true); expect(mgr.moveMessage).not.toHaveBeenCalled();
   });
 });

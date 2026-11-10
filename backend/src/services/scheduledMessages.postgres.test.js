@@ -108,9 +108,10 @@ describe.skipIf(!ADMIN_URL)('scheduled messages schema on PostgreSQL (#543)', ()
     ]);
   });
 
-  const insertMessage = (over = {}) => {
+  const insertMessage = async (over = {}) => {
+    const generation = (await h.pool.query('SELECT storage_generation FROM email_accounts WHERE id=$1', [over.account_id || account.id])).rows[0]?.storage_generation;
     const row = {
-      user_id: user.id, account_id: account.id, client_key: randomUUID(),
+      user_id: user.id, account_id: account.id, storage_generation: generation, client_key: randomUUID(),
       send_at: '2026-10-25T07:00:00Z', due_at: '2026-10-25T07:00:00Z', ...over,
     };
     const cols = Object.keys(row);

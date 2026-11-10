@@ -64,7 +64,7 @@ function stubQueries({ msg = inboxMsg, acct = account, sibling = null, siblings 
     if (sql.includes('thread_key = ANY($2::text[])')) return { rows: threadCopies };
     if (sql.startsWith('SELECT DISTINCT folder FROM messages')) return { rows: folders.map(folder => ({ folder })) };
     if (sql.includes('thread_key = $4') || sql.includes('message_id = $4')) return { rows: exact ? [exact] : [] };
-    if (sql.startsWith('SELECT uid FROM messages')) return { rows: siblings[params?.[1]] ? [{ uid: siblings[params[1]] }] : sibling ? [sibling] : [] };
+    if ((sql.startsWith('SELECT uid FROM messages') || sql.startsWith('SELECT * FROM messages') || sql.startsWith('SELECT id, account_id, uid, folder, message_id, thread_key,'))) return { rows: siblings[params?.[1]] ? [{ ...msg, id: `copy-${params[1]}`, folder: params[1], uid: siblings[params[1]] }] : sibling ? [{ ...msg, id: `copy-${params[1]}`, folder: params[1], ...sibling }] : [] };
     return { rows: [] };
   });
 }
@@ -104,6 +104,7 @@ beforeEach(() => {
   getGtdConfig.mockReset();
   getGtdConfig.mockResolvedValue({ enabled: true, folders: DEFAULT_GTD_FOLDERS });
   imapManager.copyMessage.mockResolvedValue(77);
+  imapManager.removeMessageCopy.mockResolvedValue(1);
   // By default the server confirms a surviving copy, and the account is not Gmail.
   imapManager.hasMessageCopy.mockResolvedValue(true);
   imapManager.isLabelStore.mockReturnValue(false);
@@ -138,7 +139,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     });
     // Callers own folder existence, so classify ensures then copies — the message stays in INBOX.
     expect(imapManager.ensureFolder).toHaveBeenCalledWith(account, 'Todo');
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Todo');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 10, 'INBOX', 'Todo', { expectedSource: expect.objectContaining({ uid: 10, folder: 'INBOX' }) });
   });
 
   it('succeeds without advertising an unsafe inverse for non-UIDPLUS', async () => {
@@ -177,6 +178,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     });
     imapManager.removeMessageCopy.mockImplementation(async (_accountId, uid, folder) => {
       live.delete(`${folder}:${uid}`);
+      return 1;
     });
 
     const res = await classify({ messageId: MSG_ID, state: 'todo' });
@@ -189,7 +191,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
 
     expect([...live.values()].filter(row => row.folder === 'Todo').map(row => row.message_id)).toEqual(['<invoice@example.test>']);
     expect(live.has('Sent:90')).toBe(true);
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 100, 'Todo');
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 100, 'Todo', { expectedSource: expect.objectContaining({ uid: 100 }) });
   });
 
   it('succeeds without advertising an unverifiable inverse when Message-ID is absent', async () => {
@@ -226,9 +228,27 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, folder: 'Watch', applied: true, undoToken: null, switched: true, sourceRemoved: false });
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch');
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(ACCT_ID, 42, 'Todo');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 10, 'INBOX', 'Watch', { expectedSource: expect.objectContaining({ uid: 10, folder: 'INBOX' }) });
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: ACCT_ID }), 42, 'Todo', { expectedSource: expect.objectContaining({ uid: 42 }) });
     expect(imapManager.copyMessage.mock.invocationCallOrder[0]).toBeLessThan(imapManager.removeMessageCopy.mock.invocationCallOrder[0]);
+  });
+
+  it('the unindexed fallback retains the resolved copy UUID and epoch, not the selected row identity', async () => {
+    const generation = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const selected = { ...inboxMsg, storage_generation: generation, uid_validity: '10', entity_id: 'selected-entity' };
+    const copy = { ...selected, id: 'resolved-copy-id', uid: 42, folder: 'Todo', uid_validity: '20',
+      entity_id: 'resolved-copy-entity', body_text: 'private body must not cross the locator capability' };
+    stubQueries({ msg: selected, acct: { ...account, storage_generation: generation }, folders: ['INBOX', 'Todo'], siblings: { Todo: 42 } });
+    const original = query.getMockImplementation();
+    query.mockImplementation(async (sql, params) => sql.startsWith('SELECT id, account_id, uid, folder, message_id, thread_key,') && params[1] === 'Todo'
+      ? { rows: [copy] } : original(sql, params));
+    const res = await classify({ messageId: MSG_ID, state: 'watch' });
+    expect(res.status).toBe(200);
+    const removed = imapManager.removeMessageCopy.mock.calls[0];
+    expect(removed[0]).toEqual({ id: ACCT_ID, storage_generation: generation });
+    expect(removed[3].expectedSource).toMatchObject({ id: copy.id, uid: 42, folder: 'Todo',
+      storage_generation: generation, uid_validity: '20', entity_id: copy.entity_id });
+    expect(removed[3].expectedSource).not.toHaveProperty('body_text');
   });
 
   it('preserves an older invoice whose only copy lives in Reference before switching the conversation', async () => {
@@ -249,6 +269,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
       const identity = live.get(`${folder}:${uid}`);
       expect([...live].some(([key, value]) => key.startsWith('Todo:') && value === identity)).toBe(true);
       live.delete(`${folder}:${uid}`);
+      return 1;
     });
     const res = await classify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
@@ -272,6 +293,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     });
     imapManager.removeMessageCopy.mockImplementation(async (_account, uid, folder) => {
       live.delete(`${folder}:${uid}`);
+      return 1;
     });
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
     expect(res.status).toBe(200);
@@ -296,6 +318,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     imapManager.hasMessageCopy.mockImplementation(async (_account, uid, folder, messageId) => live.get(`${folder}:${uid}`) === messageId);
     imapManager.removeMessageCopy.mockImplementation(async (_accountId, uid, folder) => {
       live.delete(`${folder}:${uid}`);
+      return 1;
     });
     const res = await classify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
@@ -310,7 +333,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     try {
       const res = await classify({ messageId: MSG_ID, state: 'todo' });
       expect(res.status).toBe(200);
-      expect(imapManager.copyMessage.mock.calls.map(call => call.slice(1))).toEqual([
+      expect(imapManager.copyMessage.mock.calls.map(call => call.slice(1, 4))).toEqual([
         [10, 'INBOX', 'Todo'], [98, 'Reference', 'Todo'],
       ]);
     } finally {
@@ -335,6 +358,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     });
     imapManager.removeMessageCopy.mockImplementation(async (_accountId, uid, folder) => {
       live.delete(`${folder}:${uid}`);
+      return 1;
     });
     const res = await classify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
@@ -351,8 +375,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     imapManager.copyMessage.mockResolvedValue(null);
     const res = await classify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 98, 'Reference', 'Todo');
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 99, 'Someday', 'Todo');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 98, 'Reference', 'Todo', { expectedSource: expect.objectContaining({ uid: 98, folder: 'Reference' }) });
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 99, 'Someday', 'Todo', { expectedSource: expect.objectContaining({ uid: 99, folder: 'Someday' }) });
     expect(imapManager.copyMessage.mock.invocationCallOrder.at(-1)).toBeLessThan(imapManager.removeMessageCopy.mock.invocationCallOrder[0]);
   });
 
@@ -368,7 +392,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     stubQueries({ folders: ['Watch', 'Todo'], siblings: { Watch: 41, Todo: 42 } });
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
     expect(res.status).toBe(200);
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 10, 'INBOX', 'Watch', { expectedSource: expect.objectContaining({ uid: 10, folder: 'INBOX' }) });
     expect(imapManager.copyMessage.mock.invocationCallOrder[0]).toBeLessThan(imapManager.removeMessageCopy.mock.invocationCallOrder[0]);
   });
 
@@ -381,7 +405,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     const res = await classify({ messageId: MSG_ID, state: 'someday' });
 
     expect(res.status).toBe(200);
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(ACCT_ID, 98, 'Reference');
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: ACCT_ID }), 98, 'Reference', { expectedSource: expect.objectContaining({ uid: 98 }) });
   });
 
   it('preserves an older GTD state even when the requested state is cached', async () => {
@@ -389,8 +413,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
 
     expect(res.status).toBe(200);
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Watch');
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(ACCT_ID, 42, 'Todo');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 10, 'INBOX', 'Watch', { expectedSource: expect.objectContaining({ uid: 10, folder: 'INBOX' }) });
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: ACCT_ID }), 42, 'Todo', { expectedSource: expect.objectContaining({ uid: 42 }) });
   });
 
   it('keeps the old state when applying the new state fails', async () => {
@@ -407,8 +431,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
 
     expect(res.status).toBe(200);
-    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'Todo', 'Watch');
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(ACCT_ID, 10, 'Todo');
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 10, 'Todo', 'Watch', { expectedSource: expect.objectContaining({ uid: 10, folder: 'Todo' }) });
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: ACCT_ID }), 10, 'Todo', { expectedSource: expect.objectContaining({ uid: 10 }) });
   });
 
   it('keeps the new copy if removal fails after expunging an older GTD label', async () => {
@@ -417,8 +441,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
 
     expect(res.status).toBe(500);
-    expect(imapManager.removeMessageCopy).toHaveBeenNthCalledWith(1, ACCT_ID, 42, 'Todo');
-    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(ACCT_ID, 77, 'Watch');
+    expect(imapManager.removeMessageCopy).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: ACCT_ID }), 42, 'Todo', { expectedSource: expect.objectContaining({ uid: 42 }) });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 77, 'Watch', { expectedSource: expect.objectContaining({ uid: 77 }) });
   });
 
   // removeMessageCopy refuses an old label row whose uid holds another message (#665).
@@ -430,7 +454,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ changed: true, error: expect.stringMatching(/changed on the server/) });
     expect(imapManager.copyMessage).toHaveBeenCalled();
-    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(ACCT_ID, 77, 'Watch');
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 77, 'Watch', { expectedSource: expect.objectContaining({ uid: 77 }) });
   });
 
   it('retains a non-UIDPLUS target copy after old-state removal fails', async () => {
@@ -438,7 +462,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     const originalQuery = query.getMockImplementation();
     let watchLookups = 0;
     query.mockImplementation((sql, params) => {
-      if (sql.startsWith('SELECT uid FROM messages') && params?.[1] === 'Watch') {
+      if ((sql.startsWith('SELECT uid FROM messages') || sql.startsWith('SELECT * FROM messages') || sql.startsWith('SELECT id, account_id, uid, folder, message_id, thread_key,')) && params?.[1] === 'Watch') {
         watchLookups += 1;
         return { rows: [{ uid: 88 }] };
       }
@@ -451,8 +475,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
 
     expect(res.status).toBe(500);
     expect(watchLookups).toBe(0);
-    expect(imapManager.removeMessageCopy).toHaveBeenNthCalledWith(1, ACCT_ID, 42, 'Todo');
-    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(ACCT_ID, 88, 'Watch');
+    expect(imapManager.removeMessageCopy).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: ACCT_ID }), 42, 'Todo', { expectedSource: expect.objectContaining({ uid: 42 }) });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 88, 'Watch', { expectedSource: expect.objectContaining({ uid: 88 }) });
   });
 
   it('reports the removal error without trying rollback before destination sync', async () => {
@@ -481,8 +505,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
 
     expect(res.status).toBe(500);
-    expect(imapManager.removeMessageCopy).toHaveBeenNthCalledWith(1, ACCT_ID, 98, 'Reference');
-    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(ACCT_ID, 10, 'Todo');
+    expect(imapManager.removeMessageCopy).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: ACCT_ID }), 98, 'Reference', { expectedSource: expect.objectContaining({ uid: 98 }) });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 10, 'Todo', { expectedSource: expect.objectContaining({ uid: 10 }) });
   });
 
   it('retains a fresh target UID when the source has no Message-ID', async () => {
@@ -491,8 +515,8 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
 
     expect(res.status).toBe(500);
-    expect(imapManager.removeMessageCopy).toHaveBeenNthCalledWith(1, ACCT_ID, 10, 'Todo');
-    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(ACCT_ID, 77, 'Watch');
+    expect(imapManager.removeMessageCopy).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: ACCT_ID }), 10, 'Todo', { expectedSource: expect.objectContaining({ uid: 10 }) });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 77, 'Watch', { expectedSource: expect.objectContaining({ uid: 77 }) });
   });
 
   it('retains every new member after an earlier removal succeeds and a later one throws', async () => {
@@ -509,6 +533,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     imapManager.removeMessageCopy.mockImplementation(async (_acct, uid, folder) => {
       live.delete(`${folder}:${uid}`);
       if (uid === 10) throw new Error('connection dropped after EXPUNGE');
+      return 1;
     });
     const res = await classify({ messageId: MSG_ID, state: 'watch' });
     expect(res.status).toBe(500);
@@ -540,7 +565,7 @@ describe('DELETE /api/gtd/classify — remove a GTD label', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo' });
     // resolveCopyUid found the state-folder copy (uid 42) via the shared Message-ID join.
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 42, 'Todo');
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 42, 'Todo', { expectedSource: expect.objectContaining({ uid: 42 }) });
   });
 
   // removeMessageCopy refuses a uid whose server copy is another message (#665): nothing is removed,
@@ -627,14 +652,14 @@ describe('DELETE /api/gtd/classify — remove a GTD label', () => {
     imapManager.isLabelStore.mockReturnValue(true);
     const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 10, 'Todo');
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 10, 'Todo', { expectedSource: expect.objectContaining({ uid: 10 }) });
   });
 
   it('removes the label when another GTD label still keeps the message', async () => {
     stubQueries({ msg: { ...inboxMsg, folder: 'Todo' }, folders: ['Todo', 'Watch'], siblings: { Watch: 41 } });
     const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 10, 'Todo');
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 10, 'Todo', { expectedSource: expect.objectContaining({ uid: 10 }) });
   });
 
   it("404s a message the caller doesn't own", async () => {
@@ -660,7 +685,7 @@ describe('POST /api/gtd/classify/undo — remove only the request-owned copy', (
     const res = await undoClassify(token);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo' });
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 77, 'Todo');
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(expect.objectContaining({ id: ACCT_ID }), 77, 'Todo', { expectedSource: expect.objectContaining({ uid: 77 }) });
   });
 
   it('is replay-safe when the exact copy no longer exists', async () => {

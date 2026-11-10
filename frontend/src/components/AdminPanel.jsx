@@ -6,6 +6,7 @@ import { PluginSlot } from '../plugins/PluginSlot.jsx';
 import { newAiAction, AI_ACTION_LIMITS } from '../aiActions.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { api } from '../utils/api.js';
+import { STORAGE_SELECTOR_FIELDS, storageSelectorsChanged } from '../utils/accountStorageIdentity.js';
 import { spamApi } from '../utils/spamApi.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { isValidFromValue } from '../utils/defaultSender.js';
@@ -118,6 +119,22 @@ function AccountForm({ initial, onSave, onCancel, prefill, onMicrosoftSignIn, on
     trusted_authserv_id: '',
     ...(prefill?.preset && PRESETS[prefill.preset]?.imap_host ? { ...PRESETS[prefill.preset], label: undefined } : {}),
   });
+  const [identityBaseline, setIdentityBaseline] = useState(initial);
+  const [storageIdentityDecision, setStorageIdentityDecision] = useState('');
+  const [identityStatus, setIdentityStatus] = useState(null);
+  const [identityStatusError, setIdentityStatusError] = useState(false);
+  const selectorForm = signedInWith ? { ...form, auth_user: (form.auth_user || '').trim() || form.email_address } : form;
+  const identityChanged = isEdit && storageSelectorsChanged(identityBaseline, selectorForm);
+  useEffect(() => {
+    if (!initial?.id) return undefined;
+    let cancelled = false;
+    setIdentityStatus(null);
+    setIdentityStatusError(false);
+    api.getAccountIdentityStatus(initial.id).then(status => {
+      if (!cancelled) setIdentityStatus(status);
+    }).catch(() => { if (!cancelled) setIdentityStatusError(true); });
+    return () => { cancelled = true; };
+  }, [initial?.id, initial?.storage_generation]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   // Detected Authentication-Results authserv-ids for this account (setup helper
@@ -182,7 +199,10 @@ function AccountForm({ initial, onSave, onCancel, prefill, onMicrosoftSignIn, on
     return () => { cancelled = true; };
   }, [isEdit, form.antispam_enabled, initial?.id]);
 
-  const set = (key, val) => setForm(f => ({ ...f, [key]: val }));
+  const set = (key, val) => {
+    if (STORAGE_SELECTOR_FIELDS.includes(key)) setStorageIdentityDecision('');
+    setForm(f => ({ ...f, [key]: val }));
+  };
   // The login follows the address (which is what it usually is) until the user edits the
   // login itself, so correcting a prefilled address does not leave the old one as the login.
   const [authUserEdited, setAuthUserEdited] = useState(false);
@@ -198,6 +218,11 @@ function AccountForm({ initial, onSave, onCancel, prefill, onMicrosoftSignIn, on
   };
 
   const handleSubmit = async () => {
+    if (saving) return;
+    if (identityChanged && !storageIdentityDecision) {
+      setError(t('accountForm.storageIdentityRequired', { defaultValue: 'Choose whether this is the same mailbox or a different mailbox before saving.' }));
+      return;
+    }
     // The login and server of a signed-in account are hidden and not editable: not required.
     if (!form.email_address || (!signedInWith && (!form.auth_user || !form.imap_host))) {
       setError(t('admin.accounts.errorRequired'));
@@ -210,8 +235,13 @@ function AccountForm({ initial, onSave, onCancel, prefill, onMicrosoftSignIn, on
     setSaving(true);
     setError('');
     try {
-      await onSave(form);
+      await onSave({ ...form, ...(identityChanged ? { storageIdentityDecision } : {}) });
     } catch (err) {
+      if (err.refreshedAccount) {
+        setForm(err.refreshedAccount);
+        setIdentityBaseline(err.refreshedAccount);
+        setStorageIdentityDecision('');
+      }
       setError(err.message);
       setSaving(false);
     }
@@ -711,6 +741,33 @@ function AccountForm({ initial, onSave, onCancel, prefill, onMicrosoftSignIn, on
         </>
       )}
 
+      {identityChanged && (
+        <fieldset data-storage-identity-choice style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 14, marginBottom: 14 }}>
+          <legend>{t('accountForm.storageIdentityTitle', { defaultValue: 'Which mailbox is this?' })}</legend>
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+            {t('accountForm.storageIdentityHelp', { defaultValue: 'The server or mailbox login changed. Choose how MailFlow should keep your local labels and history.' })}
+          </p>
+          <label style={{ display: 'block', marginBottom: 10 }}>
+            <input type="radio" name="storageIdentityDecision" value="preserve" checked={storageIdentityDecision === 'preserve'} onChange={() => setStorageIdentityDecision('preserve')} />
+            {' '}{t('accountForm.storageIdentityPreserve', { defaultValue: 'Same mailbox: keep local labels and history. Cached messages still need verification.' })}
+          </label>
+          <label style={{ display: 'block' }}>
+            <input type="radio" name="storageIdentityDecision" value="replace" checked={storageIdentityDecision === 'replace'} onChange={() => setStorageIdentityDecision('replace')} />
+            {' '}{t('accountForm.storageIdentityReplace', { defaultValue: 'Different mailbox: start a fresh cache. Previous local labels and history stay separate and are not applied to this mailbox.' })}
+          </label>
+        </fieldset>
+      )}
+      {isEdit && identityStatus && (Number(identityStatus.heldSnoozeCount) > 0 || Number(identityStatus.priorGenerationEntityCount) > 0 || Number(identityStatus.unresolvedEntityCount) > 0 || Number(identityStatus.unresolvedOperationCount) > 0 || Number(identityStatus.unverifiedCacheRows) > 0) && (
+        <div role="status" data-storage-identity-status style={{ padding: 12, marginBottom: 14, border: '1px solid var(--border)', borderRadius: 8, fontSize: 13 }}>
+          {t('accountForm.storageIdentityStatus', {
+            defaultValue: 'Local history: {{prior}} records from a previous mailbox remain separate. {{unresolved}} records await verification. {{pending}} label operations remain unresolved. {{unverified}} cached messages await identity verification.',
+            prior: identityStatus.priorGenerationEntityCount, unresolved: identityStatus.unresolvedEntityCount, pending: identityStatus.unresolvedOperationCount, unverified: identityStatus.unverifiedCacheRows,
+          })}
+          {Number(identityStatus.heldSnoozeCount) > 0 && <p>{t('accountForm.heldSnoozes', { defaultValue: '{{count}} snooze records are held for a previous or unverified mailbox. They will not wake messages in this mailbox.', count: Number(identityStatus.heldSnoozeCount) })}</p>}
+        </div>
+      )}
+      {isEdit && identityStatusError && <p role="status">{t('accountForm.storageIdentityStatusError', { defaultValue: 'Local mailbox history status is unavailable. Reopen this editor to try again.' })}</p>}
+
       {error && (
         <div style={{
           padding: '10px 14px', background: 'rgba(248,113,113,0.1)',
@@ -840,7 +897,32 @@ function AccountsTab() {
       updates.smtp_auth_pass = null;
     }
     if (OAUTH_PROVIDERS.has(editTarget.oauth_provider)) for (const field of OAUTH_OWNED_FIELDS) delete updates[field];
-    const updated = await api.updateAccount(editTarget.id, updates);
+    if (form.storage_generation) updates.expectedStorageGeneration = form.storage_generation;
+    if (form.storageIdentityDecision) updates.storageIdentityDecision = form.storageIdentityDecision;
+    let updated;
+    try {
+      updated = await api.updateAccount(editTarget.id, updates);
+    } catch (err) {
+      if (err.code === 'storage_generation_conflict') {
+        try {
+          const freshAccounts = await api.getAccounts();
+          const freshAccount = freshAccounts.find(account => account.id === editTarget.id);
+          setAccounts(freshAccounts);
+          if (freshAccount) {
+            setEditTarget(freshAccount);
+            err.refreshedAccount = freshAccount;
+            err.message = t('accountForm.storageIdentityRefreshed', { defaultValue: 'This mailbox changed while you were editing. The latest settings are loaded. Review and re-enter your changes before saving.' });
+          }
+        } catch {
+          err.message = t('accountForm.storageIdentityRefreshFailed', { defaultValue: 'This mailbox changed while you were editing. The latest settings could not be loaded. Close and reopen this editor before saving.' });
+        }
+      }
+      throw err;
+    }
+    if (form.storageIdentityDecision === 'replace') addNotification({
+      type: 'info', title: t('accountForm.storageIdentityReplacedTitle', { defaultValue: 'Different mailbox saved' }),
+      body: t('accountForm.storageIdentityReplacedBody', { defaultValue: 'The new mailbox starts with a fresh cache. Previous local labels and history remain separate; reopen Edit to see their status.' }),
+    });
     updateAccount(editTarget.id, updated);
     api.getUnreadCounts().then(setUnreadCounts).catch(console.error);
     setSubview('list');

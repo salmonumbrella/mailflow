@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 
 // Same mock surface the other mail.* route tests use so importing mail.js is side-effect free.
+vi.mock('../services/messageIdentity.js', () => import('../services/testSupport/identityTestAdapter.js'));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (_req, _res, next) => next() }));
 vi.mock('../index.js', () => ({ imapManager: {} }));
@@ -106,7 +107,7 @@ describe('relocate reinsert column lists', () => {
 // list, and that list fell behind: it lacked plugin_annotations (the GTD gist cache), so every
 // labelled copy regenerated it. Hold it to the relocate list so neither can drift alone.
 describe('label copy column list', () => {
-  it('copies exactly the columns a relocate carries', async () => {
+  it('copies relocate content columns but never blindly copies source entity identity', async () => {
     const { query } = await import('../services/db.js');
     const { insertCopiedSibling } = await import('../services/imapManager.js');
     query.mockReset();
@@ -115,6 +116,8 @@ describe('label copy column list', () => {
     const sql = query.mock.calls[0][0];
     const labelCols = sql.slice(sql.indexOf('(') + 1, sql.indexOf(')')).split(',').map(s => s.trim());
     const relocateCols = RELOCATE_INSERT_COLS.split(',').map(s => s.trim());
-    expect([...labelCols].sort()).toEqual([...relocateCols].sort());
+    const identityColumns = new Set(['entity_id', 'storage_generation', 'uid_validity']);
+    expect(labelCols.filter(col => identityColumns.has(col))).toEqual([]);
+    expect([...labelCols].sort()).toEqual(relocateCols.filter(col => !identityColumns.has(col)).sort());
   });
 });

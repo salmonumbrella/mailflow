@@ -249,13 +249,14 @@ describe('stop', () => {
 describe('a claimed message', () => {
   it('more than 6 h overdue is paused and the user told, not sent', async () => {
     const db = fakeDb();
-    db.query.mockResolvedValue({ rows: [], rowCount: 1 });
+    db.query.mockResolvedValue({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: 'a1', storage_generation: 'g1' }] });
     const push = vi.fn();
     const broadcast = vi.fn();
     sender = new ScheduledSender({ db, push, imap: () => ({ broadcast }) });
-    const row = { id: 'm1', user_id: 'u1', claim_token: 't1', version: 1, overdue: true, lateReason: 'offline', send_at: new Date('2026-10-24T22:00:00Z'), time_zone: null, summary_enc: null };
+    const row = { id: 'm1', storage_generation: 'g1', user_id: 'u1', claim_token: 't1', version: 1, overdue: true, lateReason: 'offline', send_at: new Date('2026-10-24T22:00:00Z'), time_zone: null, summary_enc: null };
     await sender.send(row);
-    const [sql, params] = db.query.mock.calls[0];
+    const [sql, params] = db.query.mock.calls[1];
     expect(sql).toMatch(/WHERE id = \$1 AND claim_token = \$2 AND status = 'sending'/);
     expect(params.slice(0, 5)).toEqual(['m1', 't1', 'paused', 'overdue', 'overdue']);
     expect(broadcast).toHaveBeenCalledWith({ type: 'scheduled_changed', id: 'm1', status: 'paused' }, 'u1');

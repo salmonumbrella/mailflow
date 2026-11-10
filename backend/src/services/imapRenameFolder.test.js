@@ -17,7 +17,10 @@ import imapflowRename from 'imapflow/lib/commands/rename.js';
 import imapflowClose from 'imapflow/lib/commands/close.js';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
-vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('./db.js', () => {
+  const query=vi.fn();
+  return {query,withTransaction:async fn=>fn({query})};
+});
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((p) => p), headersToRawString: vi.fn(() => 'Subject: hello') }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
@@ -37,7 +40,7 @@ import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 
 const acct = {
-  id: 'rename-folder', user_id: 'u1', imap_host: 'imap.example.com', imap_port: 993,
+  storage_generation:'11111111-1111-4111-8111-111111111111', id: 'rename-folder', user_id: 'u1', imap_host: 'imap.example.com', imap_port: 993,
   imap_tls: true, auth_user: 'u', auth_pass: 'enc', enabled: true,
 };
 
@@ -45,6 +48,9 @@ const acct = {
 // how every personal folder is named on a server whose namespace prefix is "INBOX.".
 function makeServer() {
   return {
+    accountGeneration:acct.storage_generation,
+    epochs:new Map(['INBOX','Projects','Archive','INBOX.Projects'].map((path,index)=>[path,{uid_validity:String(index+10),revision:'1',provider_mailbox_id:null}])),
+    beforeStatus:null,
     folders: {
       INBOX: { uids: [1, 2], deleted: new Set([2]) },
       Projects: { uids: [10, 11, 12], deleted: new Set([11]) },
@@ -82,6 +88,12 @@ function connectionTo(server) {
       }
       this.locked = true;
       return { release: () => { this.locked = false; } };
+    },
+    async status(path, fields) {
+      expect(fields).toEqual({uidValidity:true});
+      server.commands.push(['STATUS',path]);
+      if(server.beforeStatus) { const callback=server.beforeStatus;server.beforeStatus=null;await callback(); }
+      return {uidValidity:BigInt(server.epochs.get(path).uid_validity)};
     },
     async *fetch(range) {
       yield { uid: Number(range), headers: Buffer.from('Subject: hello\r\n') };
@@ -126,8 +138,15 @@ beforeEach(() => {
   evictPool(acct.id);
   getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
   resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
-  query.mockResolvedValue({ rows: [] });
   server = makeServer();
+  // Real messageIdentity helpers use this explicit account/epoch fixture. Do not replace
+  // them with an identity-bypassing adapter: STATUS must be checked before RENAME.
+  query.mockImplementation(async(sql,params=[])=>{
+    if(sql.startsWith('SELECT id, storage_generation FROM email_accounts')) return {rows:[{id:acct.id,storage_generation:server.accountGeneration}]};
+    if(sql.includes('FROM mailbox_identity_epochs')) return {rows:server.epochs.has(params[2])?[server.epochs.get(params[2])]:[]};
+    if(sql.startsWith('SELECT uid_validity FROM folders')) return {rows:server.epochs.has(params[1])?[{uid_validity:server.epochs.get(params[1]).uid_validity}]:[]};
+    return {rows:[]};
+  });
   ImapFlow.mockImplementation(function () { return connectionTo(server); });
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -152,6 +171,7 @@ describe('renameFolder', () => {
     expect(ImapFlow).toHaveBeenCalledTimes(1); // the rename ran on that same session
     expect(sent('CLOSE')).toEqual([]);
     expect(sent('RENAME')).toEqual([['RENAME', 'Projects', 'Projects 2024']]);
+    expect(server.commands).toEqual([['SELECT','Projects'],['SELECT','INBOX'],['STATUS','Projects'],['RENAME','Projects','Projects 2024']]);
     expect(server.folders.Projects).toBeUndefined();
     expect(server.folders['Projects 2024'].uids).toEqual([10, 11, 12]);
     expect([...server.folders['Projects 2024'].deleted]).toEqual([11]);
@@ -189,4 +209,16 @@ describe('renameFolder', () => {
     expect(server.folders.INBOX.uids).toEqual([1, 2]);
     expect([...server.folders.INBOX.deleted]).toEqual([2]);
   });
+  it.each(['epoch','generation'])('does not rename when STATUS crosses a %s change',async change=>{
+    await mgr.fetchHeaders(acct,10,'Projects');
+    server.beforeStatus=async()=>{
+      if(change==='epoch') server.epochs.set('Projects',{uid_validity:'99',revision:'2',provider_mailbox_id:null});
+      else server.accountGeneration='22222222-2222-4222-8222-222222222222';
+    };
+    await expect(mgr.renameFolder(acct,'Projects','Renamed')).rejects.toMatchObject({code:change==='epoch'?'identity_epoch_changed':'storage_generation_conflict'});
+    expect(sent('CLOSE')).toEqual([]);expect(sent('RENAME')).toEqual([]);
+    expect(server.folders.Projects.uids).toEqual([10,11,12]);
+    expect([...server.folders.Projects.deleted]).toEqual([11]);
+  });
+
 });

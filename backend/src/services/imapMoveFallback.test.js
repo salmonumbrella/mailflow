@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import imapflowMove from 'imapflow/lib/commands/move.js';
 
+vi.mock('./messageIdentity.js', () => import('./testSupport/identityTestAdapter.js'));
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('./messageParser.js', () => ({ MAX_HEADER_FIELD: 500, parseMessage: vi.fn(), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((p) => p) }));
@@ -33,6 +34,7 @@ vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }
 import { ImapManager, evictPool } from './imapManager.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
+import { prepareIdentityOperations, completeIdentityOperations, observeMailboxIdentity, assertMailboxIdentity } from './messageIdentity.js';
 import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 
@@ -289,11 +291,23 @@ describe('move on a server without MOVE, when the COPY succeeds but the EXPUNGE 
     expect(server.folders.INBOX.uids).toEqual([4, 5, 6]);
     expect(server.folders.Archive.uids).toEqual([1]);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('in both folders'));
+    expect(completeIdentityOperations).toHaveBeenCalledWith(expect.any(Array),
+      expect.objectContaining({ sourceRetained: true, uidMap: expect.any(Map) }), { outcome: 'confirmed' });
   });
 });
 
 describe('move on a server without MOVE, when the COPY succeeds', () => {
   beforeEach(() => { server = makeServer(); });
+
+  it('preserves acknowledged COPY when source validation fails before deletion', async () => {
+    assertMailboxIdentity.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('identity database unavailable'));
+    await expect(mgr.moveMessage(acct, 5, 'INBOX', 'Archive')).resolves.toBe(1);
+    expect(server.folders.INBOX.uids).toEqual([4,5,6]);
+    expect(server.folders.Archive.uids).toEqual([1]);
+    expect(server.commands.filter(([command]) => command === 'EXPUNGE')).toEqual([]);
+    expect(completeIdentityOperations).toHaveBeenCalledWith(expect.any(Array),
+      expect.objectContaining({sourceRetained:true}),{outcome:'confirmed'});
+  });
 
   it('moveMessage still moves the message and returns its new UID', async () => {
     await expect(mgr.moveMessage(acct, 5, 'INBOX', 'Archive')).resolves.toBe(1);
@@ -399,15 +413,16 @@ describe.each([
   it('reports a UID that is no longer in the source as failed, not as moved onto existing mail', async () => {
     const r = await mgr.bulkMoveMessages(acct, [9], 'INBOX', 'Archive');
     expect(r.succeeded).toEqual([]);
-    expect(r.failed).toEqual([9]);
+    expect(r.failed).toEqual([]);expect(r.pending).toEqual([9]);expect(r.identityPending).toBe(true);
     expect([...r.uidMap]).toEqual([]);
-    expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(acct, 'Archive');
+    expect(mgr.syncFolderOnDemand).not.toHaveBeenCalled();
   });
 
-  it('still maps a message that really moved to its new UID', async () => {
+  it('keeps an acknowledged unmapped bulk move pending instead of guessing its UID', async () => {
     const r = await mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive');
-    expect(r.succeeded).toEqual([5]);
-    expect([...r.uidMap]).toEqual([[5, 4]]);
+    expect(r.succeeded).toEqual([]);expect(r.pending).toEqual([5]);expect(r.identityPending).toBe(true);
+    expect([...r.uidMap]).toEqual([]);
+    expect(server.folders.Archive.uids).toContain(4);
   });
 });
 
@@ -431,11 +446,11 @@ describe('move without COPYUID, when the destination SEARCH returns no list', ()
   it.each([[false], [undefined]])('leaves the move unverified when it returns %s, instead of reporting it stale', async (result) => {
     server.folders.Archive.searchResult = result;
     const r = await mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive');
-    expect(r.succeeded).toEqual([5]);
+    expect(r.succeeded).toEqual([]);expect(r.pending).toEqual([5]);expect(r.identityPending).toBe(true);
     expect(r.failed).toEqual([]);
     expect([...r.uidMap]).toEqual([]);
     expect(mgr.syncFolderOnDemand).not.toHaveBeenCalled();
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`destination UID SEARCH returned ${result}`));
+    expect(server.commands.some(([command])=>command==='SEARCH')).toBe(false);
   });
 });
 
@@ -485,28 +500,28 @@ describe.each([
   // The overlap: the batch has a UID that is no longer in the source, and one other message lands
   // in the destination meanwhile. Counting arrivals, the two cancel out, so the stale UID looked
   // moved and the batch was mapped by order onto the other message.
-  it('bulkMoveMessages maps a batch with a stale UID correctly when other mail lands meanwhile', async () => {
+  it('bulkMoveMessages retains uncertainty when a stale UID and unrelated arrival overlap', async () => {
     server.beforeMove = () => deliver(server, 'Archive', { messageId: '<other@example.com>', subject: 'Other' });
     const r = await mgr.bulkMoveMessages(acct, [5, 9], 'INBOX', 'Archive');
-    expect(r.succeeded).toEqual([5]);
-    expect(r.failed).toEqual([9]);
-    expect([...r.uidMap]).toEqual([[5, 5]]);
+    expect(r.succeeded).toEqual([]);expect(r.failed).toEqual([]);
+    expect(r.pending).toEqual([5,9]);expect(r.identityPending).toBe(true);
+    expect([...r.uidMap]).toEqual([]);
     expect(contentOf(server, 'Archive', 5).messageId).toBe('<inbox-5@example.com>');
   });
 
-  it('bulkMoveMessages maps every message of a batch that other mail interleaves with', async () => {
+  it('bulkMoveMessages does not use interleaved content matches as destination proof', async () => {
     server.beforeMove = () => deliver(server, 'Archive', { messageId: '<other@example.com>', subject: 'Other' });
     const r = await mgr.bulkMoveMessages(acct, [4, 6], 'INBOX', 'Archive');
-    expect(r.succeeded).toEqual([4, 6]);
-    for (const [src, dst] of r.uidMap) expect(contentOf(server, 'Archive', dst)).toBe(contentOf(server, 'INBOX', src));
-    expect(r.uidMap.size).toBe(2);
+    expect(r.succeeded).toEqual([]);expect(r.pending).toEqual([4,6]);expect(r.identityPending).toBe(true);
+    expect(r.uidMap.size).toBe(0);
+    expect(server.folders.INBOX.uids).toEqual([5]);
   });
 
   it('bulkMoveMessages leaves unmapped two moved messages that cannot be told apart', async () => {
     server.content.set('INBOX:6', { ...contentOf(server, 'INBOX', 5) });
     const r = await mgr.bulkMoveMessages(acct, [4, 5, 6], 'INBOX', 'Archive');
-    expect(r.succeeded).toEqual([4, 5, 6]);
-    expect([...r.uidMap]).toEqual([[4, 4]]);
+    expect(r.succeeded).toEqual([]);expect(r.pending).toEqual([4,5,6]);expect(r.identityPending).toBe(true);
+    expect([...r.uidMap]).toEqual([]);expect(server.folders.INBOX.uids).toEqual([]);
   });
 });
 
@@ -570,5 +585,44 @@ describe('removeMessageCopy', () => {
   it('expunges nothing for a uid with no row to check it against', async () => {
     await expect(mgr.removeMessageCopy(acct.id, 7, 'Trash')).resolves.toBe(0);
     expect(server.folders.Trash.uids).toEqual([7, 8]);
+  });
+});
+
+
+describe('durable operation journal wiring', () => {
+  beforeEach(() => { server = makeServer(); });
+
+  it('commits the source intent before the provider can copy or expunge', async () => {
+    server.beforeMove = () => {
+      expect(prepareIdentityOperations).toHaveBeenCalledWith(
+        expect.objectContaining({ accountId: acct.id, folderPath: 'INBOX' }), 'Archive', [5], 'move', {});
+      expect(completeIdentityOperations).not.toHaveBeenCalled();
+    };
+    await mgr.moveMessage(acct, 5, 'INBOX', 'Archive');
+    expect(completeIdentityOperations).toHaveBeenCalledWith(expect.any(Array),
+      expect.objectContaining({ uidMap: expect.any(Map) }), { outcome: 'confirmed' });
+  });
+
+  it('does not invoke provider mutation or reconciliation when journal preparation fails', async () => {
+    prepareIdentityOperations.mockRejectedValueOnce(new Error('journal unavailable'));
+    await expect(mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive')).rejects.toThrow('journal unavailable');
+    expect(server.folders.INBOX.uids).toEqual([4, 5, 6]);
+    expect(server.folders.Archive.uids).toEqual([]);
+    expect(completeIdentityOperations).not.toHaveBeenCalled();
+  });
+
+  it('refuses a newly observed source epoch before mutating a reused UID', async () => {
+    observeMailboxIdentity.mockResolvedValueOnce({ epochChanged: true });
+    await expect(mgr.moveMessage(acct, 5, 'INBOX', 'Archive')).rejects.toMatchObject({ code: 'MAIL_IDENTITY_STALE' });
+    expect(prepareIdentityOperations).not.toHaveBeenCalled();
+    expect(server.folders.INBOX.uids).toEqual([4, 5, 6]);
+  });
+
+  it('never promotes a heuristic destination UID into durable identity proof', async () => {
+    server = makeServer({ capabilities: ['IMAP4rev1', 'MOVE'] });
+    await expect(mgr.moveMessage(acct, 5, 'INBOX', 'Archive')).resolves.toBe(1);
+    expect(completeIdentityOperations).toHaveBeenCalledOnce();
+    const protocolResult = completeIdentityOperations.mock.calls[0][1];
+    expect(protocolResult?.uidMap?.size || 0).toBe(0);
   });
 });

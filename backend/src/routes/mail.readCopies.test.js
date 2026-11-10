@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
+vi.mock('../services/messageIdentity.js', () => import('../services/testSupport/identityTestAdapter.js'));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'reader' }; next(); } }));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { hasActiveAsync: vi.fn(), collectHook: vi.fn(), runHook: vi.fn() } }));
@@ -59,9 +60,24 @@ class Mailbox extends EventEmitter {
 }
 // SQL projections reflect production RETURNING; fake rows cannot hide missing columns.
 async function database(sql, params = []) {
+  if (sql.startsWith('SELECT id FROM mail_identity_operations')) return { rows: events.some(event => event[0] === 'move' && event[1] === params[4] && event[2] === params[3]) ? [{ id: 'confirmed-fake-provider-move' }] : [] };
+  if (sql.startsWith('SELECT uid_validity FROM mailbox_identity_epochs')) return { rows: [{ uid_validity: '10' }] };
+  if (sql.includes(' FROM messages WHERE id=$1') && sql.includes('storage_generation IS NOT DISTINCT FROM $5')) return { rows: rows.filter(r => r.id === params[0] && r.account_id === params[1] && r.folder === params[2] && Number(r.uid) === Number(params[3]) && r.storage_generation === params[4] && r.uid_validity === params[5] && r.entity_id === params[6]).map(r => ({ ...r })) };
+  if (sql.includes(' FROM messages WHERE id=$1')) return { rows: rows.filter(r => r.id === params[0] && r.account_id === params[1] && r.storage_generation === params[2] && r.folder === params[3] && r.uid === params[4] && r.uid_validity === params[5] && r.entity_id === params[6]).map(r => ({ ...r })) };
+  if (sql.includes(' FROM messages WHERE account_id = $1 AND folder = $2')) return { rows: rows.filter(r => r.account_id === params[0] && r.folder === params[1]).map(r => ({ ...r })) };
+
   if (sql.includes('FROM folders')) return { rows: sql.includes('special_use =') && !sql.includes('LIMIT 1') ? [] : sql.includes('LIMIT 1') ? [{ path: 'Archive' }] : [] };
   if (sql.startsWith('SELECT DISTINCT folder FROM messages')) return { rows: rows.filter(r => !r.is_deleted).map(r => ({ folder: r.folder })) };
+  if (sql.startsWith('SELECT id, account_id, uid, folder, message_id, thread_key')) return { rows: rows.filter(r => r.account_id === params[0] && r.folder === params[1] && r.message_id === params[2] && r.storage_generation === params[3] && !r.is_deleted).map(r => ({ ...r })) };
   if (sql.startsWith('SELECT uid FROM messages')) return { rows: rows.filter(r => r.account_id === params[0] && r.folder === params[1] && r.message_id === params[2] && !r.is_deleted).map(r => ({ uid: r.uid })) };
+  if (sql.startsWith('DELETE FROM messages WHERE id = $1') || sql.startsWith('DELETE FROM messages WHERE id=$1 RETURNING')) {
+    const removed = rows.filter(r => r.id === params[0]);
+    rows = rows.filter(r => !removed.includes(r)); return { rows: removed, rowCount: removed.length };
+  }
+  if (sql.startsWith('DELETE FROM messages WHERE id=$1')) {
+    const removed = rows.filter(r => r.id === params[0] && r.account_id === params[1] && r.folder === params[2] && Number(r.uid) === Number(params[3]));
+    rows = rows.filter(r => !removed.includes(r)); return { rows: removed, rowCount: removed.length };
+  }
   if (sql.startsWith('DELETE FROM messages WHERE account_id')) {
     const removed = rows.filter(r => r.account_id === params[0] && Number(r.uid) === Number(params[1]) && r.folder === params[2]);
     rows = rows.filter(r => !removed.includes(r)); return { rows: removed, rowCount: removed.length };
@@ -74,7 +90,7 @@ async function database(sql, params = []) {
   if (sql.startsWith('SELECT message_id, date, subject, from_email FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3')) {
     return { rows: rows.filter(r => r.account_id === params[0] && Number(r.uid) === Number(params[1]) && r.folder === params[2]).map(r => ({ message_id: r.message_id, date: r.date, subject: r.subject, from_email: r.from_email })) };
   }
-  if (sql.startsWith('SELECT id, uid, is_read FROM messages')) return { rows: rows.filter(r => r.folder === params[1] && r.message_id === params[2] && !r.is_deleted).map(r => ({ ...r })) };
+  if (sql.startsWith('SELECT id, uid, is_read')) return { rows: rows.filter(r => r.folder === params[1] && r.message_id === params[2] && !r.is_deleted).map(r => ({ ...r })) };
   if (sql.includes('FROM email_accounts')) return { rows: [otherAccounts.find(a => a.id === params[0]) || account] };
   if (sql.includes('FROM messages m') && sql.includes('JOIN email_accounts')) {
     const ids = Array.isArray(params[1]) ? params[1] : [params[0]];
@@ -106,7 +122,7 @@ async function database(sql, params = []) {
   }
   return { rows: [] };
 }
-const row = (id, folder, uid, extra = {}) => ({ id, account_id: account.id, message_id: MID, from_email: 'sender@example.test', date: '2026-10-20T12:00:00.000Z', subject: 'Same copied message', body_text: 'Original copied body', body_html: null, to_addresses: ['reader@example.test'], cc_addresses: [], folder, uid, is_read: false, is_deleted: false, ...extra });
+const row = (id, folder, uid, extra = {}) => ({ id, account_id: account.id, storage_generation: account.storage_generation, uid_validity: '10', entity_id: id, message_id: MID, from_email: 'sender@example.test', date: '2026-10-20T12:00:00.000Z', subject: 'Same copied message', body_text: 'Original copied body', body_html: null, to_addresses: ['reader@example.test'], cc_addresses: [], folder, uid, is_read: false, is_deleted: false, ...extra });
 const settle = async () => { for (let n = 0; n < 30; n++) await new Promise(resolve => setImmediate(resolve)); };
 let server, url;
 beforeAll(async () => {
@@ -117,7 +133,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise(resolve => server.close(resolve)); });
 beforeEach(() => {
   vi.clearAllMocks();
-  account = { id: `copies-${++serial}`, user_id: 'reader', imap_host: 'imap.example.test', imap_port: 993, imap_tls: true, auth_user: 'reader', auth_pass: 'enc' };
+  account = { id: `copies-${++serial}`, storage_generation: 'test-generation', user_id: 'reader', imap_host: 'imap.example.test', imap_port: 993, imap_tls: true, auth_user: 'reader', auth_pass: 'enc' };
   wire = []; events = []; otherAccounts = []; selectionHold = false; releaseSelection = null; hold = null; failFolder = null; selectionError = false; selectionChange = null; releaseHold = null; gtd = true; labels = ['Watch', 'Todo'];
   Object.setPrototypeOf(imapManager, ImapManager.prototype); Object.assign(imapManager, new ImapManager({ clients: new Set() }));
   clearInterval(imapManager._folderStatusTimer);
@@ -239,7 +255,12 @@ describe('read-copy production routes and IMAP', () => {
     selectionError = true;
     expect((await read(A, true)).status).toBe(200); await settle(); expect(wire).toEqual([['INBOX', '11', true]]);
   });
-  it('uses the live sibling address if it moves after fan-out', async () => {
+  it('does not adopt a sibling re-bound to a different entity after fan-out', async () => {
+    selectionChange = () => { rows[1].entity_id = C; };
+    expect((await read(A, true)).status).toBe(200); await settle();
+    expect(wire).toEqual([['INBOX', '11', true]]);
+  });
+  it('uses the current verified address when a sibling keeps its durable entity through a move', async () => {
     selectionChange = () => { rows[1].uid = 88; rows[1].folder = 'Todo'; };
     expect((await read(A, true)).status).toBe(200); await settle(); expect(wire).toEqual([['INBOX', '11', true], ['Todo', '88', true]]);
   });

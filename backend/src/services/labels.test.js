@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// Legacy routing fixtures isolate the identity transaction; real epoch/generation checks
+// are exercised by gtdRead.identityReview.postgres.test.js.
+vi.mock('./messageReadScope.js', () => ({
+  CURRENT_MESSAGE_IDENTITY_SQL: 'TRUE',
+  withReadSourceIdentity: async (_account, _source, write) => write({ query }),
+}));
+
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('../utils/mailUtils.js', () => ({ fanOutReadToSiblings: vi.fn() }));
 import { query } from './db.js';
@@ -13,8 +20,8 @@ import {
   ensureLabelFolders,
 } from './labels.js';
 
-const account = { id: 'acct-1' };
-const mkImap = () => ({ ensureFolder: vi.fn(), copyMessage: vi.fn(), removeMessageCopy: vi.fn() });
+const account = { id: 'acct-1', storage_generation: 'generation-1' };
+const mkImap = () => ({ ensureFolder: vi.fn(), copyMessage: vi.fn(), removeMessageCopy: vi.fn().mockResolvedValue(1) });
 
 beforeEach(() => { query.mockReset(); fanOutReadToSiblings.mockReset(); });
 
@@ -31,7 +38,7 @@ describe('resolveLabelCopyUid', () => {
     expect(uid).toBe(99);
     const [sql, params] = query.mock.calls[0];
     expect(sql).toMatch(/FROM messages WHERE account_id = \$1 AND folder = \$2 AND message_id = \$3/);
-    expect(params).toEqual(['a', 'Todo', '<m>']);
+    expect(params).toEqual(['a', 'Todo', '<m>', undefined]);
   });
 
   it('returns null when no sibling exists, and when the message has no Message-ID', async () => {
@@ -48,7 +55,7 @@ describe('applyLabel', () => {
     const r = await applyLabel(imap, account, { uid: 7, folder: 'INBOX' }, 'Todo');
     expect(r).toEqual({ applied: true, uid: 77 });
     expect(imap.ensureFolder).toHaveBeenCalledWith(account, 'Todo');
-    expect(imap.copyMessage).toHaveBeenCalledWith('acct-1', 7, 'INBOX', 'Todo');
+    expect(imap.copyMessage).toHaveBeenCalledWith(account, 7, 'INBOX', 'Todo', { expectedSource: { uid: 7, folder: 'INBOX' } });
   });
 
   it('reports a successful non-UIDPLUS copy without inventing an identity', async () => {
@@ -70,7 +77,7 @@ describe('applyLabel', () => {
     query.mockResolvedValue({ rows: [{ uid: 91 }] });
     const imap = mkImap();
     await applyLabel(imap, account, { account_id: 'acct-1', uid: 7, folder: 'Reference', message_id: '<m>' }, 'Todo', { forceCopy: true });
-    expect(imap.copyMessage).toHaveBeenCalledWith('acct-1', 7, 'Reference', 'Todo');
+    expect(imap.copyMessage).toHaveBeenCalledWith(account, 7, 'Reference', 'Todo', { expectedSource: expect.objectContaining({ uid: 7, folder: 'Reference' }) });
   });
 
   it('is a no-op when a sibling already carries the label', async () => {
@@ -95,9 +102,9 @@ describe('removeExactLabelCopy', () => {
 
     expect(result).toEqual({ removed: true });
     expect(query).toHaveBeenCalledWith(expect.stringMatching(/message_id = \$4/), [
-      'acct-1', 'Todo', 77, '<source@example.com>',
+      'acct-1', 'Todo', 77, '<source@example.com>', undefined,
     ]);
-    expect(imap.removeMessageCopy).toHaveBeenCalledWith('acct-1', 77, 'Todo');
+    expect(imap.removeMessageCopy).toHaveBeenCalledWith({ id: 'acct-1', storage_generation: undefined }, 77, 'Todo', { expectedSource: { uid: 77 } });
   });
 
   it('does not remove an absent UID or a UID belonging to another message', async () => {
@@ -130,7 +137,7 @@ describe('removeLabel', () => {
     const imap = mkImap();
     const r = await removeLabel(imap, { account_id: 'acct-1', uid: 1, folder: 'INBOX', message_id: '<m>' }, 'Todo');
     expect(r).toEqual({ removed: true });
-    expect(imap.removeMessageCopy).toHaveBeenCalledWith('acct-1', 99, 'Todo');
+    expect(imap.removeMessageCopy).toHaveBeenCalledWith({ id: 'acct-1', storage_generation: undefined }, 99, 'Todo', { expectedSource: { uid: 99 } });
   });
 
   it('is a no-op (no IMAP call) when no copy lives in the label folder', async () => {
@@ -139,6 +146,17 @@ describe('removeLabel', () => {
     const r = await removeLabel(imap, { account_id: 'acct-1', uid: 1, folder: 'INBOX', message_id: '<m>' }, 'Todo');
     expect(r).toEqual({ removed: false });
     expect(imap.removeMessageCopy).not.toHaveBeenCalled();
+  });
+});
+
+describe('label removal result', () => {
+  it.each([0, false])('does not claim removal when the engine returns %s', async count => {
+    const imap = mkImap();
+    imap.removeMessageCopy.mockResolvedValue(count);
+    const source = { account_id: 'acct-1', uid: 7, folder: 'Todo', message_id: '<m>' };
+    await expect(removeLabel(imap, source, 'Todo')).resolves.toEqual({ removed: false });
+    query.mockResolvedValueOnce({ rows: [source] });
+    await expect(removeExactLabelCopy(imap, source, 'Todo', 7)).resolves.toEqual({ removed: false });
   });
 });
 
@@ -176,8 +194,8 @@ describe('markThreadRead', () => {
     query.mockResolvedValueOnce({ rows: [{ id: 'i1', uid: 5, is_read: false }] });
     const imap = imapMR();
     const r = await markThreadRead(imap, { id: 'acct-1' }, msg);
-    expect(fanOutReadToSiblings).toHaveBeenCalledWith('acct-1', '<m>', true);
-    expect(imap.setFlag).toHaveBeenCalledWith({ id: 'acct-1' }, 5, 'INBOX', '\\Seen', true);
+    expect(fanOutReadToSiblings).toHaveBeenCalledWith('acct-1', '<m>', true, { queryFn: expect.any(Function), storageGeneration: undefined });
+    expect(imap.setFlag).toHaveBeenCalledWith({ id: 'acct-1' }, 5, 'INBOX', '\\Seen', true, { expectedSource: expect.any(Object) });
     expect(r.inboxCopy).toEqual({ id: 'i1', uid: 5, is_read: false });
     expect(r.error).toBeUndefined();
   });

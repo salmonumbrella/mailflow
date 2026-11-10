@@ -24,10 +24,12 @@ import routes from './scheduled.js';
 import { query, withTransaction } from '../services/db.js';
 import { findOwnedAccount, findOwnedScheduledMessage } from '../services/ownership.js';
 import { consume } from '../services/rateLimiter.js';
+import { deleteSentDraft } from '../services/draftCopies.js';
 import { resolveIdentity } from '../services/outgoingMail.js';
 import { openJson, aad } from '../services/scheduledSend.js';
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
+const GENERATION = '33333333-3333-4333-8333-333333333333';
 const ID = '22222222-2222-4222-8222-222222222222';
 let server, base;
 beforeAll(async () => {
@@ -42,7 +44,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   query.mockResolvedValue({ rows: [] });
   consume.mockResolvedValue({ limited: false });
-  findOwnedAccount.mockResolvedValue({ id: ACCOUNT, enabled: true });
+  findOwnedAccount.mockResolvedValue({ id: ACCOUNT, enabled: true, storage_generation: GENERATION });
   findOwnedScheduledMessage.mockResolvedValue(null);
   withTransaction.mockRejectedValue(new Error('no database here'));
 });
@@ -83,8 +85,16 @@ describe('POST /scheduled checks before storing anything', () => {
     expect(result.status).toBe(201);
     expect(resolveIdentity).toHaveBeenCalledWith('u1', expect.objectContaining({ plaintextEmail: true, editedSignature: signature }));
     const insert = client.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO scheduled_messages'))[1];
+    expect(insert[10]).toBe(GENERATION);
     const payload = openJson(insert[7], aad.payload({ id: insert[0], user_id: 'u1', version: 1 }));
     expect(payload).toMatchObject({ plaintextEmail: true, bodyIsHtml: false, signatureIsPlainText: true, signature });
+  });
+
+  it('reports stale create preparation as a conflict, without deleting its draft', async () => {
+    withTransaction.mockRejectedValueOnce(Object.assign(new Error('storage_generation_conflict: pending work belongs to a previous or unverified mailbox'), { code: '23514' }));
+    const result = await call('POST', '', createBody({ draft: { uid: 9, folder: 'Drafts', accountId: ACCOUNT } }));
+    expect(result).toMatchObject({ status: 409, body: { code: 'storage_generation_conflict' } });
+    expect(deleteSentDraft).not.toHaveBeenCalled();
   });
 
   it('takes 60 s ahead at the earliest and 366 days at the latest, by the server clock', async () => {
@@ -102,7 +112,7 @@ describe('POST /scheduled checks before storing anything', () => {
   it('refuses a disabled or foreign account, and an alias of another account', async () => {
     findOwnedAccount.mockResolvedValue(null);
     expect((await call('POST', '', createBody())).body).toEqual({ error: 'Account not found' });
-    findOwnedAccount.mockResolvedValue({ id: ACCOUNT, enabled: true });
+    findOwnedAccount.mockResolvedValue({ id: ACCOUNT, enabled: true, storage_generation: GENERATION });
     expect((await call('POST', '', createBody({ aliasId: ID }))).body).toEqual({ error: 'Alias not found' });
     expect(findOwnedAccount).toHaveBeenCalledWith('u1', ACCOUNT, { enabled: true });
   });

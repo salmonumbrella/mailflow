@@ -55,6 +55,17 @@ describe('POST /api/mail/draft — local row persistence', () => {
     imapManager.upsertDraftMessageRecord.mockResolvedValue(undefined);
   });
 
+  it('passes verified APPEND proof directly to the draft cache without exposing it in the response', async () => {
+    const identityContext = { accountId: ACCOUNT_ID, folderPath: 'Drafts', uidValidity: '9', revision: '2' };
+    imapManager.appendToFolder.mockResolvedValueOnce({ uid: 5, identityContext });
+    const response = await fetch(`${base}/api/mail/draft`, { method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['friend@example.test'], subject: 'Draft', body: 'Body' }) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).not.toHaveProperty('identityContext');
+    expect(imapManager.upsertDraftMessageRecord.mock.calls[0][3].identityContext).toBe(identityContext);
+  });
+
   it('persists a Drafts row with parsed recipient, subject and body after append', async () => {
     const res = await fetch(`${base}/api/mail/draft`, {
       method: 'POST',

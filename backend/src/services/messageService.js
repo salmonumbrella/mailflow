@@ -1,3 +1,4 @@
+import { currentSnoozeMessageSql } from './snoozeIdentity.js';
 import { query } from './db.js';
 import { resolveAccountScope } from './unifiedInbox.js';
 import { draftMessageSql } from '../utils/mailUtils.js';
@@ -11,9 +12,7 @@ export const SNOOZED_FOLDER = 'Snoozed';
 // a message whose own snooze record names the folder it is in; the folder's other mail is not
 // snoozed. The ANY over the folders the records name lets the (account_id, folder) index find it.
 const snoozedElsewhereSql = (accounts) =>
-  `(m.folder = ANY(ARRAY(SELECT DISTINCT sm.snoozed_folder FROM snoozed_messages sm WHERE sm.account_id = ANY(${accounts})))`
-  + ' AND EXISTS (SELECT 1 FROM snoozed_messages own WHERE own.account_id = m.account_id'
-  + ' AND own.message_id_header = m.message_id AND own.snoozed_folder = m.folder))';
+  `EXISTS (SELECT 1 FROM snoozed_messages own WHERE own.account_id = ANY(${accounts}) AND ${currentSnoozeMessageSql('own')})`;
 
 // List orders (#528). Each maps to fixed SQL, never to text from the request. Sender and Subject
 // sort on what the row shows: the sender's name, or the address when there is none, and the
@@ -74,14 +73,18 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
   if (isSpecificAccount) {
     whereConditions.push(`m.account_id = $${p++}`);
     values.push(resolvedAccountId);
-    whereConditions.push(`m.folder = $${p++}`);
-    values.push(folder);
+    if (isSnoozedView) {
+      whereConditions.push(snoozedElsewhereSql('ARRAY[$1::uuid]'));
+    } else {
+      whereConditions.push(`m.folder = $${p++}`);
+      values.push(folder);
+    }
   } else {
     const accountsParam = `$${p++}`;
     whereConditions.push(`m.account_id = ANY(${accountsParam})`);
     values.push(scopedAccountIds);
     whereConditions.push(isSnoozedView
-      ? `(m.folder = '${SNOOZED_FOLDER}' OR ${snoozedElsewhereSql(accountsParam)})`
+      ? snoozedElsewhereSql(accountsParam)
       : `m.folder = 'INBOX'`);
   }
 
@@ -119,7 +122,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
 
   let total = 0;
   try {
-    if (safeCategory && !isSnoozedView) {
+    if (isSnoozedView || safeCategory) {
       // A category tab lists only that category's mail; the folder's counts are of all its mail,
       // so the list offered pages, or a "Load more", with nothing on them (#611). Counted by
       // row, as the threaded list is.
@@ -295,8 +298,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
     -- record's folder tells the client the mail is snoozed where the folder is not named Snoozed.
     LEFT JOIN LATERAL (
       SELECT sm.snooze_until, sm.snoozed_folder FROM snoozed_messages sm
-      WHERE sm.account_id = m.account_id AND sm.message_id_header = m.message_id
-        AND sm.snoozed_folder = m.folder
+      WHERE ${currentSnoozeMessageSql()}
       ORDER BY sm.snooze_until LIMIT 1
     ) sz ON true` : ''}
     WHERE ${where}

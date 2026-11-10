@@ -68,10 +68,11 @@ describe('listMessages — account scope', () => {
 
     await listMessages({ userId: 'user-1', folder: 'Snoozed', threaded: 'true' });
 
-    expect(query.mock.calls[1][1]).toEqual([['acc-included', 'acc-excluded'], 'Snoozed']);
+    expect(query.mock.calls[1][1][0]).toEqual(['acc-included', 'acc-excluded']);
     const [sql, params] = query.mock.calls[2];
     expect(params[0]).toEqual(['acc-included', 'acc-excluded']);
-    expect(sql).toContain("m.folder = 'Snoozed'");
+    expect(sql).toContain('own.snoozed_folder=m.folder');
+    expect(sql).toContain('sl.entity_id=m.entity_id');
     expect(sql).toContain('sz.snooze_until');
     expect(sql).toMatch(/ORDER BY sz\.snooze_until ASC NULLS LAST, m\.date DESC, m\.id/);
     expect(sql).not.toContain('paged_threads');
@@ -93,16 +94,19 @@ describe('listMessages — account scope', () => {
 
     await listMessages({ userId: 'user-1', folder: 'Snoozed', unreadOnly });
 
-    const snoozedElsewhere = '(m.folder = ANY(ARRAY(SELECT DISTINCT sm.snoozed_folder FROM snoozed_messages sm WHERE sm.account_id = ANY($1)))'
-      + ' AND EXISTS (SELECT 1 FROM snoozed_messages own WHERE own.account_id = m.account_id'
-      + ' AND own.message_id_header = m.message_id AND own.snoozed_folder = m.folder))';
-    expect(query.mock.calls[1]).toEqual([
-      `SELECT COALESCE(SUM(${column}), 0)::int + (SELECT COUNT(*)::int FROM messages m WHERE m.account_id = ANY($1) AND m.folder <> $2`
-        + ` AND m.is_deleted = false${unreadSql} AND ${snoozedElsewhere}) AS n FROM folders WHERE account_id = ANY($1) AND path = $2`,
-      [['acc-1'], 'Snoozed'],
-    ]);
+    const [countSql, countParams] = query.mock.calls[1];
+    expect(countParams[0]).toEqual(['acc-1']);
+    expect(countSql).toContain('SELECT COUNT(*)::int AS n FROM messages m');
+    expect(countSql).not.toContain(`SUM(${column})`);
+    expect(countSql).toContain('own.snoozed_folder=m.folder');
+    expect(countSql).toContain("own.wake_state='ready'");
+    expect(countSql).toContain('sl.entity_id=m.entity_id');
+    expect(countSql).not.toContain('own.message_id_header = m.message_id');
+    if (unreadSql) expect(countSql).toContain(unreadSql);
     const [sql, params] = query.mock.calls[2];
-    expect(sql).toContain(`(m.folder = 'Snoozed' OR ${snoozedElsewhere})${unreadSql}`);
+    expect(sql).toContain('own.snoozed_folder=m.folder');
+    expect(sql).toContain('sl.entity_id=m.entity_id');
+    if (unreadSql) expect(sql).toContain(unreadSql);
     expect(params[0]).toEqual(['acc-1']);
     expect(sql).toContain('sz.snooze_until, sz.snoozed_folder');
     expect(sql).toContain('SELECT sm.snooze_until, sm.snoozed_folder FROM snoozed_messages sm');

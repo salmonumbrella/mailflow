@@ -24,6 +24,13 @@ describe('ownership lookups', () => {
     expect(query).toHaveBeenCalledWith('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', ['acc', 'u1']);
   });
 
+  it('locks an owned account through the transaction helper without changing ownership scope', async () => {
+    const client = { query: vi.fn().mockResolvedValue({ rows: [{ id: 'acc' }] }) };
+    expect(await findOwnedAccount('u1', 'acc', { columns: 'id', client, forUpdate: true })).toEqual({ id: 'acc' });
+    expect(client.query).toHaveBeenCalledWith('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2 FOR UPDATE', ['acc', 'u1']);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('adds the account filters it is asked for', async () => {
     await findOwnedAccount('u1', 'acc', { columns: 'id', enabled: true, protocol: 'imap' });
     expect(query).toHaveBeenCalledWith(

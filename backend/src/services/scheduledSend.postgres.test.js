@@ -112,7 +112,7 @@ describe.skipIf(!ADMIN_URL)('scheduled sender on PostgreSQL (#543)', () => {
     account ??= await newAccount();
     const messageId = `<${randomBytes(8).toString('hex')}@example.com>`;
     const { id } = await storeScheduledMessage(h.pool, {
-      userId: user.id, accountId: account.id, clientKey: randomUUID(), sendAt, timeZone: 'Europe/Berlin',
+      userId: user.id, accountId: account.id, storageGeneration: account.storage_generation, clientKey: randomUUID(), sendAt, timeZone: 'Europe/Berlin',
       payload: { v: 1, messageId, aliasId: null, to: [to], cc: [], bcc: [], subject: 'Q4 numbers', body: 'Hello', bodyIsHtml: false, signature: null, plaintextEmail: false, priority: 'normal', ...payload },
       summary: { subject: 'Q4 numbers' },
       attachments,
@@ -136,6 +136,62 @@ describe.skipIf(!ADMIN_URL)('scheduled sender on PostgreSQL (#543)', () => {
     await sender.runTick();
     await sender.idle();
   };
+
+  describe('mailbox replacement holds', () => {
+    it.each([
+      ['before SMTP', {}, 'failed'],
+      ['SMTP outcome unknown', { smtp_started_at: new Date() }, 'uncertain'],
+      ['SMTP accepted', { smtp_started_at: new Date(), smtp_accepted_at: new Date() }, 'sent'],
+    ])('does not send or append recovered %s mail into a replacement', async (_label, smtp, status) => {
+      const msg = await schedule({ state: { status: 'sending', claimed_at: null, claim_token: null, ...smtp } });
+      // Models restored work with old provenance, not the account-edit API (which refuses pending mail).
+      await h.pool.query('UPDATE email_accounts SET storage_generation=$2 WHERE id=$1', [msg.account.id, randomUUID()]);
+      await tick(newSender());
+      await tick(newSender());
+      const row = await rowOf(msg.id);
+      expect(row.status).toBe(status);
+      expect(row.storage_generation).toBe(msg.account.storage_generation);
+      if (status === 'sent') expect(resultOf(row)).toMatchObject({ sentCopySaved: false, sentCopyReason: 'storage_generation_conflict' });
+      else expect(row.failure_code).toBe('storage_generation_conflict');
+      expect(h.sendMail).not.toHaveBeenCalled();
+      expect(imapManager.findUidByMessageId).not.toHaveBeenCalled();
+      expect(imapManager.appendToSent).not.toHaveBeenCalled();
+    });
+
+    it('rechecks accepted recovery after waiting for the Sent folder', async () => {
+      const msg = await schedule({ state: { status: 'sending', claimed_at: null, claim_token: null, smtp_started_at: new Date(), smtp_accepted_at: new Date() } });
+      const sender = newSender();
+      vi.spyOn(sender, 'awaitSentFolder').mockImplementationOnce(async () => {
+        await h.pool.query('UPDATE email_accounts SET storage_generation=$2 WHERE id=$1', [msg.account.id, randomUUID()]);
+        return { path: 'Sent' };
+      });
+      await tick(sender);
+      expect(resultOf(await rowOf(msg.id))).toMatchObject({ sentCopySaved: false, sentCopyReason: 'storage_generation_conflict' });
+      expect(h.sendMail).not.toHaveBeenCalled();
+      expect(imapManager.findUidByMessageId).not.toHaveBeenCalled();
+      expect(imapManager.appendToSent).not.toHaveBeenCalled();
+    });
+
+    it('skips stale queued work without preventing current-generation mail from sending', async () => {
+      const stale = await schedule();
+      const { rows: [current] } = await h.pool.query('UPDATE email_accounts SET storage_generation=$2 WHERE id=$1 RETURNING *', [stale.account.id, randomUUID()]);
+      const fresh = await schedule({ account: current });
+      await tick(newSender());
+      expect(await rowOf(stale.id)).toMatchObject({ status: 'scheduled', attempts: 0 });
+      expect((await rowOf(fresh.id)).status).toBe('sent');
+      expect(h.sendMail).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a stale already-claimed send before preparing SMTP', async () => {
+      const msg = await schedule();
+      const sender = newSender();
+      const row = await sender.claimOne();
+      await h.pool.query('UPDATE email_accounts SET storage_generation=$2 WHERE id=$1', [msg.account.id, randomUUID()]);
+      await sender.send(row);
+      expect(await rowOf(msg.id)).toMatchObject({ status: 'failed', failure_code: 'storage_generation_conflict', smtp_started_at: null });
+      expect(h.sendMail).not.toHaveBeenCalled();
+    });
+  });
 
   describe('the claim', () => {
     it('gives every due message to exactly one of two concurrent workers, one per account', async () => {

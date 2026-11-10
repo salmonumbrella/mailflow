@@ -48,7 +48,7 @@ function database() {
     if (sql.includes('AND thread_id = $2 AND message_id IS NOT NULL')) {
       return { rows: messages.filter(m => m.account_id === params[0] && m.thread_id === params[1] && m.message_id) };
     }
-    if (sql.startsWith('SELECT sm.message_id_header FROM snoozed_messages sm')) return { rows: [] };
+    if (sql.startsWith('SELECT sm.entity_id FROM snoozed_messages sm')) return { rows: [] };
     if (sql.includes('FROM folders WHERE account_id = $1 AND path = $2')) {
       const folder = folders[params[0]]?.[params[1]];
       return { rows: folder ? [{ no_select: false, special_use: null, trash_rule: false, drafts_rule: false, spam_rule: false,

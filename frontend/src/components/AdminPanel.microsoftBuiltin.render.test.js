@@ -243,6 +243,7 @@ describe('account form: Outlook.com address (#674)', () => {
   async function openEdit(status) {
     api.admin.getSettings = async () => ({ settings: {} });
     api.getUnreadCounts = async () => ({});
+    api.getAccountIdentityStatus = async () => ({ priorGenerationEntityCount: '0', unresolvedEntityCount: '0', unresolvedOperationCount: '0' });
     api.getIntegrationsStatus = async () => ({ microsoft: status, google: { configured: false } });
     useStore.setState({ user: { id: 'u1' }, accounts: [OUTLOOK], adminTab: 'accounts' });
     root = createRoot(document.getElementById('root'));
@@ -276,7 +277,7 @@ describe('account form: Outlook.com address (#674)', () => {
 // saving it sends none of those.
 describe('Edit form for an account connected through a sign-in', () => {
   const ACCOUNT = (provider) => ({
-    id: 'acct', name: 'Maria', email_address: provider === 'google' ? 'maria@gmail.com' : 'maria.lopez@outlook.com', color: '#0078d4',
+    id: 'acct', storage_generation: '55555555-5555-4555-8555-555555555555', name: 'Maria', email_address: provider === 'google' ? 'maria@gmail.com' : 'maria.lopez@outlook.com', color: '#0078d4',
     imap_host: provider === 'google' ? 'imap.gmail.com' : 'outlook.office365.com', imap_port: 993, auth_user: 'maria',
     smtp_host: 'smtp.example.com', smtp_port: 587, smtp_tls: 'STARTTLS', oauth_provider: provider, oauth_public_client: true,
   });
@@ -287,6 +288,7 @@ describe('Edit form for an account connected through a sign-in', () => {
     deviceStarts = 0;
     api.admin.getSettings = async () => ({ settings: {} });
     api.getUnreadCounts = async () => ({});
+    api.getAccountIdentityStatus = async () => ({ priorGenerationEntityCount: '0', unresolvedEntityCount: '0', unresolvedOperationCount: '0' });
     api.getIntegrationsStatus = async () => ({ microsoft: BUILTIN, google: { configured: false } });
     api.updateAccount = async (_id, body) => { updates = body; return { ...account, ...body }; };
     api.startMsDeviceFlow = async () => { deviceStarts++; return { userCode: 'K7QWZP2M', verificationUri: 'https://microsoft.com/devicelogin', interval: 3600 }; };
@@ -323,6 +325,8 @@ describe('Edit form for an account connected through a sign-in', () => {
       assert.equal(field in updates, false, field);
     }
     assert.equal(updates.name, 'Maria');
+    assert.equal(updates.expectedStorageGeneration, ACCOUNT('microsoft').storage_generation);
+    assert.equal('storageIdentityDecision' in updates, false);
     // Unchanged, the mailbox to open is not sent: a cosmetic save must not reconnect.
     assert.equal('auth_user' in updates, false);
   });
@@ -351,14 +355,22 @@ describe('Edit form for an account connected through a sign-in', () => {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
     await React.act(async () => { setter.call(input, 'shared@contoso.example'); input.dispatchEvent(new window.Event('input', { bubbles: true })); });
     await click(button('admin.accounts.saveChanges'));
+    assert.equal(updates, null, 'an explicit mailbox identity decision is required');
+    await click(document.querySelector('input[name="storageIdentityDecision"][value="replace"]'));
+    await click(button('admin.accounts.saveChanges'));
     assert.equal(updates.auth_user, 'shared@contoso.example');
+    assert.equal(updates.storageIdentityDecision, 'replace');
     await React.act(async () => root.unmount());
     // Emptied, it goes back to the account's own address.
     await openEdit(ACCOUNT('microsoft'));
     const again = [...document.querySelectorAll('input')].find(i => i.value === 'maria');
     await React.act(async () => { setter.call(again, ''); again.dispatchEvent(new window.Event('input', { bubbles: true })); });
     await click(button('admin.accounts.saveChanges'));
+    assert.equal(updates, null);
+    await click(document.querySelector('input[name="storageIdentityDecision"][value="preserve"]'));
+    await click(button('admin.accounts.saveChanges'));
     assert.equal(updates.auth_user, 'maria.lopez@outlook.com');
+    assert.equal(updates.storageIdentityDecision, 'preserve');
   });
 
   test('saves even when the hidden login and server are empty on the stored account', async () => {
@@ -382,5 +394,86 @@ describe('Edit form for an account connected through a sign-in', () => {
     assert.ok(text().includes('admin.accounts.imapHost'));
     assert.ok(text().includes('admin.accounts.authUser'));
   });
+  test('changing the selector again clears the prior identity choice; cancel writes nothing', async () => {
+    await openEdit(ACCOUNT('microsoft'));
+    const input = [...document.querySelectorAll('input')].find(i => i.value === 'maria');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    const change = async value => React.act(async () => { setter.call(input, value); input.dispatchEvent(new window.Event('input', { bubbles: true })); });
+    await change('first@example.com');
+    await click(document.querySelector('input[name="storageIdentityDecision"][value="preserve"]'));
+    await change('second@example.com');
+    assert.ok(!document.querySelector('input[name="storageIdentityDecision"]:checked'));
+    await click(button('admin.accounts.saveChanges'));
+    assert.equal(updates, null);
+    await click(button('common.cancel'));
+    assert.equal(document.querySelector('[data-storage-identity-choice]'), null);
+    assert.equal(updates, null);
+  });
+
+  test('host formatting and a password refresh do not require an identity choice', async () => {
+    await openEdit({ ...ACCOUNT('microsoft'), oauth_provider: null, imap_host: 'imap.example.com' });
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    const host = [...document.querySelectorAll('input')].find(i => i.value === 'imap.example.com');
+    const password = document.querySelector('input[type="password"]');
+    await React.act(async () => {
+      setter.call(host, ' IMAP.EXAMPLE.COM. '); host.dispatchEvent(new window.Event('input', { bubbles: true }));
+      setter.call(password, 'new-password'); password.dispatchEvent(new window.Event('input', { bubbles: true }));
+    });
+    assert.equal(document.querySelector('[data-storage-identity-choice]'), null);
+    await click(button('admin.accounts.saveChanges'));
+    assert.equal(updates.auth_pass, 'new-password');
+    assert.equal('storageIdentityDecision' in updates, false);
+  });
+
+  test('a different host needs an explicit decision and sends the original generation', async () => {
+    await openEdit({ ...ACCOUNT('microsoft'), oauth_provider: null, imap_host: 'imap.example.com' });
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    const host = [...document.querySelectorAll('input')].find(i => i.value === 'imap.example.com');
+    await React.act(async () => { setter.call(host, 'other.example.com'); host.dispatchEvent(new window.Event('input', { bubbles: true })); });
+    await click(button('admin.accounts.saveChanges'));
+    assert.equal(updates, null);
+    await click(document.querySelector('input[name="storageIdentityDecision"][value="preserve"]'));
+    await click(button('admin.accounts.saveChanges'));
+    assert.equal(updates.imap_host, 'other.example.com');
+    assert.equal(updates.storageIdentityDecision, 'preserve');
+    assert.equal(updates.expectedStorageGeneration, ACCOUNT('microsoft').storage_generation);
+  });
+
+  test('stale-generation conflict refreshes and resets the form without retrying the write', async () => {
+    const account = ACCOUNT('microsoft');
+    await openEdit(account);
+    let attempts = 0;
+    api.updateAccount = async () => { attempts++; throw Object.assign(new Error('Stale'), { code: 'storage_generation_conflict', status: 409 }); };
+    api.getAccounts = async () => [{ ...account, auth_user: 'fresh@example.com', storage_generation: '66666666-6666-4666-8666-666666666666' }];
+    const input = [...document.querySelectorAll('input')].find(i => i.value === 'maria');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    await React.act(async () => { setter.call(input, 'shared@example.com'); input.dispatchEvent(new window.Event('input', { bubbles: true })); });
+    await click(document.querySelector('input[name="storageIdentityDecision"][value="replace"]'));
+    await click(button('admin.accounts.saveChanges'));
+    assert.equal(attempts, 1);
+    assert.ok([...document.querySelectorAll('input')].some(i => i.value === 'fresh@example.com'));
+    assert.equal(document.querySelector('[data-storage-identity-choice]'), null);
+    assert.ok(text().includes('accountForm.storageIdentityRefreshed'));
+    assert.equal(useStore.getState().accounts[0].storage_generation, '66666666-6666-4666-8666-666666666666');
+    api.updateAccount = async (_id, body) => { attempts++; updates = body; return { ...account, ...body }; };
+    const refreshed = [...document.querySelectorAll('input')].find(i => i.value === 'fresh@example.com');
+    await React.act(async () => { setter.call(refreshed, 'reviewed@example.com'); refreshed.dispatchEvent(new window.Event('input', { bubbles: true })); });
+    await click(document.querySelector('input[name="storageIdentityDecision"][value="preserve"]'));
+    await click(button('admin.accounts.saveChanges'));
+    assert.equal(attempts, 2);
+    assert.equal(updates.expectedStorageGeneration, '66666666-6666-4666-8666-666666666666');
+    assert.equal(updates.storageIdentityDecision, 'preserve');
+  });
+
+  test('previous-generation and unresolved history is visible in the account editor', async () => {
+    await openEdit(ACCOUNT('google'));
+    await click(button('common.cancel'));
+    api.getAccountIdentityStatus = async () => ({ priorGenerationEntityCount: '12', unresolvedEntityCount: '2', unresolvedOperationCount: '1' });
+    await click(document.querySelector('button[title="common.edit"]'));
+    await React.act(async () => {});
+    assert.ok(document.querySelector('[data-storage-identity-status]'));
+    assert.ok(text().includes('accountForm.storageIdentityStatus'));
+  });
+
 });
 

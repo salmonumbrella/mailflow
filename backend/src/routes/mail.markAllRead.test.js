@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('../services/messageIdentity.js', () => import('../services/testSupport/identityTestAdapter.js'));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
 vi.mock('../index.js', () => ({
-  imapManager: { markAllReadImap: vi.fn(), scheduleCountRefresh: vi.fn(), broadcast: vi.fn() },
+  imapManager: { setFlag: vi.fn(), _resolveFlagPush: vi.fn(), _enqueueFlagPush: vi.fn(), markAllReadImap: vi.fn(), scheduleCountRefresh: vi.fn(), broadcast: vi.fn() },
 }));
 
 import express from 'express';
@@ -15,7 +16,15 @@ import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
 
 const ACCOUNT_ID = 'e5e5e5e5-5555-4555-8555-e5e5e5e5e5e5';
-const ACCOUNT = { id: ACCOUNT_ID, user_id: 'user-1' };
+const ACCOUNT = { id: ACCOUNT_ID, storage_generation: 'test-generation', user_id: 'user-1' };
+const source = (id = 'a', uid = 5) => ({ id, uid, folder: 'INBOX', account_id: ACCOUNT_ID, storage_generation: ACCOUNT.storage_generation, uid_validity: '10', entity_id: id, is_read: false });
+let sources;
+const database = (sql, params = []) => {
+  if (sql.startsWith('UPDATE messages SET is_read = $1')) sources = sources.map(row => ({ ...row, is_read: params[0] }));
+  return Promise.resolve({ rows: sql.includes('FROM email_accounts') ? [ACCOUNT]
+    : sql.includes(' FROM messages WHERE id=$1') ? sources.filter(row => row.id === params[0]).map(row => ({ ...row }))
+    : sql.includes(' FROM messages WHERE account_id = $1 AND folder = $2') ? sources.map(row => ({ ...row })) : [] });
+};
 
 function buildApp() {
   const app = express();
@@ -34,7 +43,11 @@ describe('POST /api/mail/mark-all-read', () => {
   afterAll(async () => { await new Promise(r => server.close(r)); });
   beforeEach(() => {
     query.mockReset();
-    query.mockImplementation((sql) => Promise.resolve({ rows: sql.includes('FROM email_accounts') ? [ACCOUNT] : [] }));
+    sources = [source()];
+    query.mockImplementation(database);
+    imapManager.setFlag.mockReset();
+    imapManager._enqueueFlagPush.mockReset();
+    imapManager._resolveFlagPush.mockReset();
     imapManager.markAllReadImap.mockReset();
     imapManager.scheduleCountRefresh.mockReset();
     imapManager.broadcast.mockReset();
@@ -45,12 +58,22 @@ describe('POST /api/mail/mark-all-read', () => {
     body: JSON.stringify({ accountId: ACCOUNT_ID, folder: 'INBOX' }),
   });
 
+  it('captures only identity and flag metadata for the whole folder', async () => {
+    imapManager.setFlag.mockResolvedValue();
+    expect((await markAllRead()).status).toBe(200);
+    const [sql] = query.mock.calls.find(([text]) => text.includes(' FROM messages WHERE account_id = $1 AND folder = $2'));
+    const projection = sql.slice('SELECT '.length, sql.indexOf(' FROM messages'));
+    expect(projection.split(', ')).toEqual(['id', 'account_id', 'storage_generation', 'uid_validity', 'entity_id',
+      'uid', 'folder', 'message_id', 'is_read', 'is_starred', 'is_deleted']);
+  });
+
   it('answers without waiting for the IMAP write, and refreshes counts only once it is done', async () => {
     let finishWrite;
-    imapManager.markAllReadImap.mockReturnValue(new Promise(resolve => { finishWrite = resolve; }));
+    imapManager.setFlag.mockReturnValue(new Promise(resolve => { finishWrite = resolve; }));
     const res = await markAllRead();
     expect(res.status).toBe(200);
-    expect(imapManager.markAllReadImap).toHaveBeenCalledWith(ACCOUNT, 'INBOX', { uidCeiling: undefined });
+    expect(imapManager.setFlag).toHaveBeenCalledWith(ACCOUNT, 5, 'INBOX', '\\Seen', true, { expectedSource: source() });
+    expect(imapManager.markAllReadImap).not.toHaveBeenCalled();
     expect(imapManager.broadcast).toHaveBeenCalledWith({ type: 'sync_complete', accountId: ACCOUNT_ID }, 'user-1');
     expect(imapManager.scheduleCountRefresh).not.toHaveBeenCalled();
     finishWrite();
@@ -58,38 +81,33 @@ describe('POST /api/mail/mark-all-read', () => {
   });
 
   it('still refreshes counts when the IMAP write fails', async () => {
-    imapManager.markAllReadImap.mockRejectedValue(new Error('NO [THROTTLED]'));
+    imapManager.setFlag.mockRejectedValue(new Error('NO [THROTTLED]'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       expect((await markAllRead()).status).toBe(200);
       await vi.waitFor(() => expect(imapManager.scheduleCountRefresh).toHaveBeenCalledWith(ACCOUNT_ID, ['INBOX']));
-      expect(warn).toHaveBeenCalledWith('markAllReadImap failed:', 'NO [THROTTLED]');
+      expect(warn).toHaveBeenCalledWith('IMAP flag update failed:', 'NO [THROTTLED]');
     } finally {
       warn.mockRestore();
     }
   });
 
-  it('passes the highest uid it marked, so mail that arrives during the write stays unread', async () => {
-    imapManager.markAllReadImap.mockResolvedValue();
-    query.mockImplementation((sql) => Promise.resolve({ rows:
-      sql.includes('FROM email_accounts') ? [ACCOUNT]
-      : sql.includes('RETURNING m.id') ? [{ id: 'a', uid: 7, was_read: true }, { id: 'b', uid: 12, was_read: true }, { id: 'c', uid: 9, was_read: true }]
-      : [] }));
+  it('passes exact captured sources, so later mail and reused UIDs are never in the write', async () => {
+    imapManager.setFlag.mockResolvedValue();
+    sources = [source('a', 7), source('b', 12), source('c', 9)];
     expect((await markAllRead()).status).toBe(200);
-    expect(imapManager.markAllReadImap).toHaveBeenCalledWith(ACCOUNT, 'INBOX', { uidCeiling: 12 });
+    expect(imapManager.setFlag).toHaveBeenCalledTimes(3);
+    for (const row of sources) expect(imapManager.setFlag).toHaveBeenCalledWith(ACCOUNT, row.uid, 'INBOX', '\\Seen', true, { expectedSource: { ...row, is_read: false } });
+    expect(imapManager.markAllReadImap).not.toHaveBeenCalled();
   });
 
   it('still writes \\Seen to the folder when the label copies step fails', async () => {
-    imapManager.markAllReadImap.mockResolvedValue();
+    imapManager.setFlag.mockResolvedValue();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const active = vi.spyOn(pluginRegistry, 'hasActiveAsync').mockRejectedValue(new Error('connection reset'));
-    query.mockImplementation((sql) => Promise.resolve({ rows:
-      sql.includes('FROM email_accounts') ? [ACCOUNT]
-      : sql.includes('RETURNING m.id') ? [{ id: 'a', uid: 5, message_id: '<m@x>', was_read: false }]
-      : [] }));
     try {
       expect((await markAllRead()).status).toBe(200);
-      expect(imapManager.markAllReadImap).toHaveBeenCalledWith(ACCOUNT, 'INBOX', { uidCeiling: 5 });
+      expect(imapManager.setFlag).toHaveBeenCalledWith(ACCOUNT, 5, 'INBOX', '\\Seen', true, { expectedSource: source() });
       expect(warn).toHaveBeenCalledWith('Mark-all-read label copies failed:', 'connection reset');
     } finally {
       warn.mockRestore();

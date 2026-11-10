@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, forwardRef } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, forwardRef, lazy, Suspense } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import { createComposeSwitch } from '../utils/composeSwitch.js';
 import { shouldAutosave, isAutosaveDue } from '../utils/draftAutosave.js';
@@ -49,6 +49,8 @@ import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/pri
 import GmailComposeMore from './GmailComposeMore.jsx';
 import GmailContactPicker from './GmailContactPicker.jsx';
 import { ComposeQuestion, ScheduledStrip, SendLaterIcon, SendLaterMenu, SendLaterSheet } from './SendLater.jsx';
+
+const SignatureSettings = lazy(() => import('./GmailSettings.jsx'));
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -246,7 +248,10 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   });
   const [fromValue, setFromValue] = useState(initialFromValue);
   const unsupportedSenderRef = useRef(Boolean(composeData?.unsupportedFrom));
-  const chooseFrom = value => { unsupportedSenderRef.current = false; setFromValue(value); };
+  const chooseFrom = value => {
+    if (value !== fromValue && signatureManuallyEditedRef.current && !window.confirm(t('signatureLibrary.changeSender', 'Change sender and replace this message’s edited signature? The message body will be kept.'))) return;
+    unsupportedSenderRef.current = false; setFromValue(value);
+  };
 
   // The From account's automatic Cc and Bcc (#491). The chips and their dirty baselines are both
   // seeded from this, so an untouched composer is not an edit: no autosave, no close prompt. A
@@ -443,15 +448,30 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
 
   // A reopened draft saved without a signature ('') starts with the signature turned off, but the
   // From signature is kept ready, so turning it on shows it.
-  const [plainSig, setPlainSig] = useState(() => composerHtmlToText(composeData?.signature || fromSignature || ''));
+  const draftSignatureHtml = composeData?.signatureIsPlainText && composeData.signature ? composerTextToHtml(composeData.signature) : composeData?.signature;
+  const [plainSig, setPlainSig] = useState(() => composeData?.signatureIsPlainText && composeData.signature ? composeData.signature : composerHtmlToText(draftSignatureHtml || fromSignature || ''));
   // Tracks the user's current (possibly edited) rich-text signature; kept current by onInput.
-  const signatureContentRef = useRef(DOMPurify.sanitize(composeData?.signature || fromSignature || ''));
+  const signatureContentRef = useRef(DOMPurify.sanitize(draftSignatureHtml || fromSignature || ''));
   const [hasRichSignature, setHasRichSignature] = useState(() => Boolean(signatureContentRef.current));
   // Whether this message goes out with the signature (#555). A reopened draft says so itself
   // ('' is off; utils/composeSignature.js); otherwise it follows the From mailbox's default, again
   // whenever From changes. Off keeps the signature's text, so turning it back on restores edits.
   const [signatureEnabled, setSignatureEnabled] = useState(() => resolveSignatureEnabled(fromAccount, composeData?.signature));
   const signatureToggledRef = useRef(false);
+  const signatureManuallyEditedRef = useRef(false);
+  const [signatureLibrary, setSignatureLibrary] = useState(null);
+  const [signatureLibraryError, setSignatureLibraryError] = useState('');
+  const [signatureReload, setSignatureReload] = useState(0);
+  const [selectedSignatureId, setSelectedSignatureId] = useState('');
+  const [showSignatureSettings, setShowSignatureSettings] = useState(false);
+  const libraryAppliedFromRef = useRef(null);
+  const initialSignatureFromRef = useRef(fromValue);
+  // Account identifiers are UUIDs. An incomplete account is not a usable settings target.
+  const signatureAccountReady = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(fromResolved.accountId || '');
+  const activeSignatureLibrary = signatureLibrary?.accountId === fromResolved.accountId ? signatureLibrary : null;
+  const signatureDefaultsPending = signatureAccountReady && !activeSignatureLibrary && !signatureManuallyEditedRef.current
+    && !(composeData?.signature !== undefined && fromValue === initialSignatureFromRef.current);
+
   // The From value whose mailbox default was last applied; null until the accounts have loaded.
   const signatureDefaultForRef = useRef(fromAccount ? fromValue : null);
   const signatureAutoChangedRef = useRef(false);
@@ -790,17 +810,19 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     if (fromValueChanged) {
       prevFromValueRef.current = fromValue;
       signatureInitializedRef.current = false;
+      signatureManuallyEditedRef.current = false;
+      libraryAppliedFromRef.current = '';
     }
     // A reopened draft supplies the signature it was saved with ('' meaning "already in the
     // body, render none"). Honour it for the first initialisation only, so switching the From
     // identity afterwards still swaps in that account's signature. See utils/draftSignature.js.
     if (!signatureInitializedRef.current && !fromValueChanged && composeData?.signature !== undefined) {
       signatureInitializedRef.current = true;
-      const draftSig = DOMPurify.sanitize(composeData.signature || fromSignature || '');
+      const draftSig = DOMPurify.sanitize(draftSignatureHtml || fromSignature || '');
       if (signatureRef.current) signatureRef.current.innerHTML = draftSig;
       signatureContentRef.current = draftSig;
       setHasRichSignature(Boolean(draftSig));
-      setPlainSig(composerHtmlToText(draftSig));
+      setPlainSig(composeData?.signatureIsPlainText && composeData.signature ? composeData.signature : composerHtmlToText(draftSig));
       return;
     }
     if (!signatureInitializedRef.current && fromSignature != null) {
@@ -815,7 +837,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       setHasRichSignature(false);
       setPlainSig('');
     }
-  }, [fromValue, fromSignature, composeData?.signature]);
+  }, [fromValue, fromSignature, composeData?.signature, composeData?.signatureIsPlainText, draftSignatureHtml]);
 
   // Apply the From mailbox's "show signature by default" when From changes, and once when the
   // accounts load after the composer opened, unless a reopened draft or the user already decided.
@@ -830,6 +852,46 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       setSignatureEnabled(next);
     }
   }, [fromValue, fromAccount]); // eslint-disable-line react-hooks/exhaustive-deps -- applies the default on a From change or account load only, never when the user toggles
+
+  useEffect(() => {
+    if (!signatureAccountReady) return;
+    let cancelled = false;
+    setSignatureLibraryError('');
+    api.getSignatureLibrary(fromResolved.accountId).then(data => {
+      if (!data || !Array.isArray(data.signatures) || !Array.isArray(data.defaults) || data.accountId !== fromResolved.accountId) throw new Error(t('signatureLibrary.loadFailed', 'Signatures could not be loaded.'));
+      if (!cancelled) setSignatureLibrary(data);
+    }).catch(err => { if (!cancelled) setSignatureLibraryError(err.message); });
+    return () => { cancelled = true; };
+  }, [fromResolved.accountId, signatureAccountReady, signatureReload]); // eslint-disable-line react-hooks/exhaustive-deps -- current sender/account only; typing never reloads
+  useEffect(() => {
+    const changed = event => { if (event.detail?.accountId === fromResolved.accountId) setSignatureReload(n => n + 1); };
+    window.addEventListener('mailflow:signatures-changed', changed);
+    return () => window.removeEventListener('mailflow:signatures-changed', changed);
+  }, [fromResolved.accountId]);
+  const applyLibrarySignature = (record, automatic = false) => {
+    const html = record ? (record.isPlainText ? composerTextToHtml(record.content) : DOMPurify.sanitize(record.content, { FORBID_TAGS: ['style'] })) : '';
+    signatureContentRef.current = html;
+    if (signatureRef.current) signatureRef.current.innerHTML = html;
+    setHasRichSignature(Boolean(html));
+    setPlainSig(record?.isPlainText ? record.content : composerHtmlToText(html));
+    setSignatureEnabled(Boolean(record));
+    setSelectedSignatureId(record?.id || '');
+    if (automatic) signatureAutoChangedRef.current = true;
+    else { signatureManuallyEditedRef.current = true; signatureToggledRef.current = true; lastEditAtRef.current = Date.now(); }
+  };
+  useEffect(() => {
+    if (!activeSignatureLibrary || libraryAppliedFromRef.current === fromValue) return;
+    const first = libraryAppliedFromRef.current === null;
+    libraryAppliedFromRef.current = fromValue;
+    if (signatureManuallyEditedRef.current || (first && composeData?.signature !== undefined && fromValue === initialSignatureFromRef.current)) return;
+    const defaults = activeSignatureLibrary.defaults.find(d => d.senderKey === (fromResolved.aliasId || 'main'));
+    const id = defaults?.[isReply || isForward ? 'replySignatureId' : 'newSignatureId'];
+    applyLibrarySignature(activeSignatureLibrary.signatures.find(record => record.id === id), true);
+  }, [activeSignatureLibrary, fromValue]); // eslint-disable-line react-hooks/exhaustive-deps -- copy once per sender; later library edits cannot mutate this message
+  const selectLibrarySignature = id => {
+    if (signatureManuallyEditedRef.current && !window.confirm(t('signatureLibrary.replaceEdited', 'Replace this message’s edited signature? The message body will be kept.'))) return;
+    applyLibrarySignature(activeSignatureLibrary?.signatures.find(record => record.id === id));
+  };
 
   // Swap the automatic Cc and Bcc when From moves to another account, or when the account loads
   // after the composer opened (#491). An alias keeps its account's id, so it changes nothing. The
@@ -1102,6 +1164,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   // done, or from a warning's "Send anyway".
   const readyToSubmit = async ({ skipSubjectWarn = false, skipAttachWarn = false } = {}, resume, { scheduling = false } = {}) => {
     if (useStore.getState().user?.id !== composeOwner) return null;
+    if (signatureDefaultsPending) { setError(signatureLibraryError || t('signatureLibrary.wait', 'Wait for signatures to load, or retry from the signature menu.')); return null; }
     if (sending || sendingRef.current || sendWaitingRef.current) return null;
     if (composeSwitchRef.current?.isSaving()) {
       sendWaitingRef.current = true;
@@ -1175,7 +1238,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       ...(sentQuotedBody ? { quotedBody: sentQuotedBody } : {}),
       ...(sentQuotedHtml != null ? { quotedBodyHtml: unproxyImages(sentQuotedHtml) } : {}),
       // Off sends an empty override, or the server would add the account's signature.
-      ...(!signatureEnabled || signatureContentRef.current || fromSignature != null || composeData?.signature !== undefined
+      ...(!signatureEnabled || signatureContentRef.current || fromSignature != null || composeData?.signature !== undefined || activeSignatureLibrary
         ? { editedSignature: !signatureEnabled ? '' : plaintextEmail ? plainSig : unproxyImages(signatureContentRef.current) }
         : {}),
       inReplyTo: composeData?.inReplyTo,
@@ -1749,7 +1812,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     ...(composeData?.references ? { references: composeData.references } : {}),
     ...(value.quotedBody ? { quotedBody: value.quotedBody } : {}),
     ...(value.bodyIsHtml && value.quotedBodyHtml ? { quotedBodyHtml: unproxyImages(value.quotedBodyHtml) } : {}),
-    ...(value.editedSignature || fromSignature != null || composeData?.signature !== undefined
+    ...(value.editedSignature || fromSignature != null || composeData?.signature !== undefined || activeSignatureLibrary
       ? { editedSignature: value.bodyIsHtml ? unproxyImages(value.editedSignature) : value.editedSignature } : {}),
   });
   saveRef.current = async value => {
@@ -1758,6 +1821,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     // one way there.
     if (scheduledEdit) return false;
     if (discardedRef.current) return false;
+    if (signatureDefaultsPending) { setError(signatureLibraryError || t('signatureLibrary.wait', 'Wait for signatures to load, or retry from the signature menu.')); return false; }
     const { accountId, aliasId } = resolveFrom(value.fromValue || fromValue);
     if (unsupportedSenderRef.current) { setError(t("compose.unsupportedDraftFrom", { defaultValue: "Choose a configured sender before saving or sending this draft.", email: composeData?.unsupportedFrom })); return false; }
     if (!accountId) { setError(t('compose.selectAccount')); return false; }
@@ -1842,7 +1906,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       initialSavedSnapshotRef.current.editedSignature = snapshotRef.current().editedSignature;
       composeSwitchRef.current.markSaved(initialSavedSnapshotRef.current);
     }
-  }, [signatureEnabled]);
+  }, [signatureEnabled, plainSig, selectedSignatureId]);
 
   useEffect(() => {
     if (plaintextEmail || !editor || editorBaselineReadyRef.current) return;
@@ -2130,7 +2194,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const renderSignatureEditor = () => plaintextEmail ? (
     <textarea
       value={plainSig}
-      onChange={e => setPlainSig(e.target.value)}
+      onChange={e => { signatureManuallyEditedRef.current = true; setPlainSig(e.target.value); }}
       style={{
         width: '100%', fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6,
         background: 'transparent', border: 'none', outline: 'none', resize: 'none',
@@ -2144,6 +2208,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       suppressContentEditableWarning
       spellCheck={false}
       onInput={() => {
+        signatureManuallyEditedRef.current = true;
         signatureContentRef.current = signatureRef.current?.innerHTML || '';
         setHasRichSignature(Boolean(signatureContentRef.current));
       }}
@@ -2153,14 +2218,14 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   );
 
   // Signature on/off for this message (#555), shown only when there is a signature to turn on.
-  const renderSignatureToggle = () => ((plaintextEmail ? plainSig : hasRichSignature) ? (
+  const renderLegacySignatureToggle = () => ((plaintextEmail ? plainSig : hasRichSignature) ? (
     <button type="button"
       title={t('compose.insertSignature')}
       aria-label={t('compose.insertSignature')}
       aria-pressed={signatureEnabled}
       disabled={sending}
       onMouseDown={e => e.preventDefault()}
-      onClick={() => { signatureToggledRef.current = true; setSignatureEnabled(on => !on); }}
+      onClick={() => { signatureManuallyEditedRef.current = true; signatureToggledRef.current = true; setSignatureEnabled(on => !on); }}
       style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         padding: isMobile ? '6px 4px' : '3px 6px', border: 'none', borderRadius: 4,
@@ -2176,6 +2241,20 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       </svg>
     </button>
   ) : null);
+
+  const renderSignatureToggle = () => <>
+    {renderLegacySignatureToggle()}
+    {signatureAccountReady && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      {activeSignatureLibrary && <select aria-label={t('signatureLibrary.insert', 'Insert signature')} value={signatureEnabled ? selectedSignatureId || '__snapshot' : ''} disabled={sending} onChange={e => selectLibrarySignature(e.target.value)} style={{ maxWidth: 130 }}>
+        <option value="">{t('signatureLibrary.none', 'No signature')}</option>
+        {signatureEnabled && (!selectedSignatureId || !activeSignatureLibrary.signatures.some(s => s.id === selectedSignatureId)) && <option value={selectedSignatureId || '__snapshot'}>{t('signatureLibrary.currentMessage', 'Current message signature')}</option>}
+        {activeSignatureLibrary.signatures.map(record => <option key={record.id} value={record.id}>{record.name}</option>)}
+      </select>}
+      <button type="button" disabled={sending} onClick={() => setShowSignatureSettings(true)} title={t('signatureLibrary.manage', 'Manage signatures')}>{t('signatureLibrary.manage', 'Manage signatures')}</button>
+      {signatureLibraryError && <button type="button" title={signatureLibraryError} onClick={() => setSignatureReload(n => n + 1)}>{t('signatureLibrary.retry', 'Retry signatures')}</button>}
+    </span>}
+    {showSignatureSettings && createPortal(<Suspense fallback={<p role="status">{t('signatureLibrary.loading', 'Loading signatures…')}</p>}><SignatureSettings initialAccountId={fromResolved.accountId} onClose={() => setShowSignatureSettings(false)} /></Suspense>, document.body)}
+  </>;
 
   const modeLabel = isReply
     ? (replyAll ? t('compose.replyAll') : t('compose.reply'))

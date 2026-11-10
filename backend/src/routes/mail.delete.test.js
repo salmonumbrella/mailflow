@@ -1,19 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => { const query = vi.fn(); return { query, withTransaction: vi.fn(async fn => fn({ query })) }; });
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
 vi.mock('../index.js', () => ({
   imapManager: {
     _guardMoveUid: vi.fn(), _unguardMoveUid: vi.fn(), moveMessage: vi.fn(),
-    permanentDeleteMessage: vi.fn(), bulkPermanentDelete: vi.fn(), syncFolderOnDemand: vi.fn(),
+    permanentDeleteMessage: vi.fn(), bulkPermanentDelete: vi.fn(), bulkMoveMessages: vi.fn(), syncFolderOnDemand: vi.fn(),
     broadcast: vi.fn(), scheduleCountRefresh: vi.fn(),
   },
 }));
 
 import express from 'express';
+import { routeIdentityFixture } from '../services/testSupport/routeIdentityFixture.js';
 import mailRoutes from './mail.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
@@ -21,6 +22,10 @@ import { isRowsMessage } from '../services/imapManager.js';
 
 const ACCOUNT_ID = 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1';
 const MSG_ID = 'b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2';
+const GENERATION = '11111111-1111-4111-8111-111111111111';
+const ACCOUNT = { id: ACCOUNT_ID, user_id: 'user-1', storage_generation: GENERATION, folder_mappings: null };
+const identity = id => ({ entity_id: id, storage_generation: GENERATION, uid_validity: '10' });
+let identityDb;
 const OTHER_ID = 'c3c3c3c3-3333-4333-8333-c3c3c3c3c3c3';
 
 // What each server copy carries: its Message-ID, INTERNALDATE, subject and sender.
@@ -47,8 +52,10 @@ const synced = (name) => ({
 let rows, server, uidplus, nextTrashUid;
 
 function reset({ trash = {}, withUidplus = true, folder = 'INBOX' } = {}) {
-  rows = new Map([[MSG_ID, { id: MSG_ID, account_id: ACCOUNT_ID, uid: 42, folder, is_read: false, ...synced('MAIL-A') }]]);
+  rows = new Map([[MSG_ID, { id: MSG_ID, ...identity(MSG_ID), account_id: ACCOUNT_ID, uid: 42, folder, is_read: false, ...synced('MAIL-A') }]]);
   server = { [folder]: new Map([[42, 'MAIL-A']]), Trash: new Map(Object.entries(trash).map(([u, m]) => [Number(u), m])) };
+  identityDb = routeIdentityFixture({ account: ACCOUNT, getRows: () => [...rows.values()],
+    removeRow: id => rows.delete(id), saveRow: (id, row) => { rows.delete(id); rows.set(row.id, row); } });
   uidplus = withUidplus;
   nextTrashUid = 900;
 }
@@ -57,7 +64,7 @@ function reset({ trash = {}, withUidplus = true, folder = 'INBOX' } = {}) {
 // evaluating each query against them, as Postgres would.
 const folderRow = (path, special_use = null) => ({ path, name: path.split('/').pop(), delimiter: '/', special_use });
 const FOLDERS = [
-  folderRow('INBOX'), folderRow('Trash', '\\Trash'), folderRow('Drafts', '\\Drafts'),
+  folderRow('INBOX'), folderRow('Projects'), folderRow('Archive', '\\Archive'), folderRow('Trash', '\\Trash'), folderRow('Drafts', '\\Drafts'),
   folderRow('Blog drafts'), folderRow('Deleted clients'), folderRow('Clients/Drafts'), folderRow('Old Account/Trash'),
 ];
 
@@ -91,19 +98,23 @@ function folderCondition(text) {
 function selectFolders(rawSql, folders) {
   const sql = rawSql.replace(/\s+/g, ' ').trim();
   const [, where, first, limit] = sql.match(
-    /^SELECT path FROM folders WHERE account_id = \$1 AND (.+?)(?: ORDER BY \(CASE WHEN (.+) THEN 0 ELSE 1 END\))?(?: LIMIT (\d+))?$/
+    /^SELECT path FROM folders WHERE account_id = \$1 AND (.+?)(?: ORDER BY \(CASE (.+) END\))?(?: LIMIT (\d+))?$/
   ) ?? [];
   if (!where) throw new Error(`unrecognised query: ${sql}`);
   let rows = folders.filter(folderCondition(where));
   if (first) {
-    const isFirst = folderCondition(first);
-    rows = [...rows.filter(isFirst), ...rows.filter(f => !isFirst(f))];
+    const branches = [...first.matchAll(/WHEN (.+?) THEN (\d+)/g)].map(([, condition, rank]) => [folderCondition(condition), Number(rank)]);
+    const fallback = Number(first.match(/ELSE (\d+)/)[1]);
+    const rank = folder => branches.find(([matches]) => matches(folder))?.[1] ?? fallback;
+    rows.sort((a, b) => rank(a) - rank(b));
   }
   return rows.slice(0, limit ? Number(limit) : undefined).map(({ path }) => ({ path }));
 }
 
 function fakeQuery(rawSql, params = []) {
   const sql = rawSql.replace(/\s+/g, ' ').trim();
+  const identityResult = identityDb.query(sql, params);
+  if (identityResult) return Promise.resolve(identityResult);
   const result = (r, rowCount = r.length) => Promise.resolve({ rows: r, rowCount });
   if (sql.includes('FROM messages m JOIN email_accounts a') && sql.includes('m.id = ANY($2::uuid[])')) {
     return result(params[1].map(id => rows.get(id)).filter(Boolean).map(r => ({ ...r, user_id: 'user-1', folder_mappings: null })));
@@ -115,7 +126,8 @@ function fakeQuery(rawSql, params = []) {
   if (sql === 'DELETE FROM messages WHERE id = ANY($1::uuid[])') {
     return result([], params[0].filter(id => rows.delete(id)).length);
   }
-  if (sql.startsWith('SELECT * FROM email_accounts')) return result([{ id: ACCOUNT_ID, user_id: 'user-1', folder_mappings: null }]);
+  if (sql.startsWith('SELECT * FROM email_accounts')) return result([ACCOUNT]);
+  if (sql === 'SELECT 1 FROM folders WHERE account_id=$1 AND path=$2 AND no_select=false') return result(FOLDERS.filter(f => f.path === params[1]));
   if (sql.startsWith('SELECT path FROM folders')) return result(selectFolders(sql, FOLDERS));
   if (sql.startsWith('DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 AND id != $4')) {
     for (const [id, r] of [...rows]) if (r.uid === params[1] && r.folder === params[2] && id !== params[3]) rows.delete(id);
@@ -145,11 +157,12 @@ function fakeQuery(rawSql, params = []) {
 function wireImap() {
   // A UID MOVE naming a UID that is no longer there is a tagged OK with no COPYUID, which
   // moveMessage reports exactly like a server without UIDPLUS: null.
-  imapManager.moveMessage.mockImplementation(async (_account, uid, from, to) => {
+  imapManager.moveMessage.mockImplementation(async (_account, uid, from, to, { expectedSource }) => {
     if (!server[from].has(uid)) return null;
     const newUid = nextTrashUid++;
     server[to].set(newUid, server[from].get(uid));
     server[from].delete(uid);
+    identityDb.acknowledgeMove(expectedSource, to, uidplus ? newUid : null);
     return uidplus ? newUid : null;
   });
   // As the real ones: with an expected row, a uid whose server copy is another message (by the
@@ -177,6 +190,15 @@ function wireImap() {
     const succeeded = uids.filter(uid => !mismatched.includes(uid));
     for (const uid of succeeded) server[folder].delete(Number(uid));
     return { succeeded, failed: [], mismatched };
+  });
+  imapManager.bulkMoveMessages.mockImplementation(async (account, uids, from, to, { expectedSources }) => {
+    server[to] ??= new Map();
+    const uidMap = new Map();
+    for (const uid of uids) {
+      const next = await imapManager.moveMessage(account, uid, from, to, { expectedSource: expectedSources.find(row => row.uid === uid) });
+      if (next !== null) uidMap.set(uid, next);
+    }
+    return { succeeded: uids, failed: [], pending: [], uidMap };
   });
   imapManager.syncFolderOnDemand.mockResolvedValue(undefined);
 }
@@ -220,7 +242,7 @@ describe('DELETE /api/mail/messages/:id', () => {
     // Deleting it from the Trash view, by the id the Trash listing shows, is still permanent.
     expect(await del(trashed.id)).toBe(200);
     expect(imapManager.permanentDeleteMessage.mock.calls.map(c => c.slice(1)))
-      .toEqual([[900, 'Trash', { expectRow: expect.objectContaining({ message_id: '<a@example.com>', subject: 'A' }) }]]);
+      .toEqual([[900, 'Trash', { expectRow: expect.objectContaining({ message_id: '<a@example.com>', subject: 'A' }), expectedSource: expect.objectContaining(identity(MSG_ID)) }]]);
     expect(rows.size).toBe(0);
   });
 
@@ -238,7 +260,7 @@ describe('DELETE /api/mail/messages/:id', () => {
 
   // Before that, such a row kept its INBOX uid, and in Trash that uid can belong to another
   // message. Sync never corrects a row whose uid is taken that way, so rows left like this remain.
-  const staleTrashRow = (name, uid) => ({ id: randomUUID(), account_id: ACCOUNT_ID, uid, folder: 'Trash', is_read: true, ...synced(name) });
+  const staleTrashRow = (name, uid) => ({ ...identity(randomUUID()), id: randomUUID(), account_id: ACCOUNT_ID, uid, folder: 'Trash', is_read: true, ...synced(name) });
 
   it('deleting a Trash row left on a stale uid does not expunge the message holding that uid', async () => {
     reset({ trash: { 42: 'MAIL-OLD', 900: 'MAIL-A' } });
@@ -290,9 +312,9 @@ describe('DELETE /api/mail/messages/:id', () => {
     reset({ trash: { 42: 'MAIL-OLD', 900: 'MAIL-A', 7: 'MAIL-Y', 8: 'MAIL-NOID' } });
     const trashed = staleTrashRow('MAIL-A', 42);
     rows = new Map([[trashed.id, trashed]]);
-    rows.set(OTHER_ID, { id: OTHER_ID, account_id: ACCOUNT_ID, uid: 7, folder: 'Trash', is_read: true, ...synced('MAIL-Y') });
+    rows.set(OTHER_ID, { id: OTHER_ID, ...identity(OTHER_ID), account_id: ACCOUNT_ID, uid: 7, folder: 'Trash', is_read: true, ...synced('MAIL-Y') });
     const NOID_ID = randomUUID();
-    rows.set(NOID_ID, { id: NOID_ID, account_id: ACCOUNT_ID, uid: 8, folder: 'Trash', is_read: true, ...synced('MAIL-NOID') });
+    rows.set(NOID_ID, { id: NOID_ID, ...identity(NOID_ID), account_id: ACCOUNT_ID, uid: 8, folder: 'Trash', is_read: true, ...synced('MAIL-NOID') });
 
     const res = await bulkDelete([trashed.id, OTHER_ID, NOID_ID]);
     expect(res.status).toBe(200);
@@ -301,8 +323,7 @@ describe('DELETE /api/mail/messages/:id', () => {
     expect(server.Trash.get(900)).toBe('MAIL-A');
     expect(server.Trash.has(7)).toBe(false);
     expect(server.Trash.has(8)).toBe(false);
-    expect(rows.size).toBe(0);
-    expect(imapManager.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 'Trash');
+    expect([...rows.keys()]).toEqual([trashed.id]);
   });
 
   it('bulk delete from Trash leaves a row with no Message-ID whose stale uid holds a message that has one', async () => {
@@ -312,11 +333,11 @@ describe('DELETE /api/mail/messages/:id', () => {
     expect(trashed).toMatchObject({ message_id: null });
 
     const res = await bulkDelete([trashed.id]);
-    expect(res.status).toBe(200);
-    expect((await res.json()).deleted).toEqual([]);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ deleted: [], conflicts: [trashed.id] });
     expect(server.Trash.get(42)).toBe('MAIL-OLD');
     expect(server.Trash.get(900)).toBe('MAIL-NOID');
-    expect(rows.size).toBe(0);
+    expect([...rows.keys()]).toEqual([trashed.id]);
   });
 
   it('permanently deletes a Drafts row, checking that its server copy is its message', async () => {
@@ -325,7 +346,7 @@ describe('DELETE /api/mail/messages/:id', () => {
     expect(server.Drafts.has(42)).toBe(false);
     expect(rows.size).toBe(0);
     expect(imapManager.permanentDeleteMessage.mock.calls.map(c => c.slice(1)))
-      .toEqual([[42, 'Drafts', { expectRow: expect.objectContaining({ id: MSG_ID, message_id: '<a@example.com>' }) }]]);
+      .toEqual([[42, 'Drafts', { expectRow: expect.objectContaining({ id: MSG_ID, message_id: '<a@example.com>' }), expectedSource: expect.objectContaining(identity(MSG_ID)) }]]);
   });
 
   it('does not expunge the uid of a Drafts row when another message holds it', async () => {
@@ -369,10 +390,40 @@ describe('DELETE /api/mail/messages/:id', () => {
     expect(countDeltas('Trash')).toEqual([1]);
   });
 
+  it.each([null, 900])('retains the captured source and reports pending when provider result %s has no journal acknowledgement', async uid => {
+    reset();
+    imapManager.moveMessage.mockResolvedValue(uid);
+    const response = await fetch(`${base}/api/mail/messages/${MSG_ID}`, { method: 'DELETE' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, identityPending: true });
+    expect(rows.get(MSG_ID)).toMatchObject({ folder: 'INBOX', uid: 42, ...identity(MSG_ID) });
+    expect(imapManager.moveMessage).toHaveBeenCalledTimes(1);
+    expect(countDeltas('INBOX')).toEqual([]);
+    expect(countDeltas('Trash')).toEqual([]);
+  });
+
+  it.each([['move', 'Projects', 'moved'], ['archive', 'Archive', 'archived']])(
+    'bulk %s applies exact journal mappings once and forwards every source proof', async (action, folder, field) => {
+      reset();
+      const response = await fetch(`${base}/api/mail/messages/bulk-${action}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids: [MSG_ID, MSG_ID], ...(action === 'move' ? { folder } : {}) }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: true, [field]: [MSG_ID] });
+      expect(imapManager.bulkMoveMessages).toHaveBeenCalledExactlyOnceWith(ACCOUNT, [42], 'INBOX', folder, {
+        expectedSources: [expect.objectContaining({ id: MSG_ID, ...identity(MSG_ID), folder: 'INBOX', uid: 42 })],
+      });
+      expect([...rows.values()]).toMatchObject([{ folder, uid: 900, ...identity(MSG_ID) }]);
+      expect(rows.has(MSG_ID)).toBe(false);
+      expect(countDeltas('INBOX')).toEqual([-1]);
+      expect(countDeltas(folder)).toEqual([1]);
+    });
+
   it('releases the in-flight guard when the move fails, so a retry goes through', async () => {
     reset();
-    imapManager.moveMessage.mockRejectedValueOnce(new Error('connection lost'));
-    expect(await del()).toBe(500);
+    imapManager.moveMessage.mockRejectedValueOnce(new Error('NO [TRYCREATE] destination does not exist'));
+    expect(await del()).toBe(502);
     expect([...rows.values()]).toEqual([expect.objectContaining({ id: MSG_ID, folder: 'INBOX', uid: 42 })]);
     expect(await del()).toBe(200);
     expect(server.Trash.get(900)).toBe('MAIL-A');

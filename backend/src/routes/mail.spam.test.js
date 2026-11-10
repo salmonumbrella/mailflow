@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => { const query = vi.fn(); return { query, withTransaction: vi.fn(async fn => fn({ query })) }; });
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => {
     req.session = { userId: 'user-1' };
@@ -25,6 +25,7 @@ vi.mock('../services/spamModelStore.js', () => ({
 }));
 
 import express from 'express';
+import { routeIdentityFixture } from '../services/testSupport/routeIdentityFixture.js';
 import mailRoutes from './mail.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
@@ -34,6 +35,9 @@ import { takeCarry } from '../services/movedRowCarry.js';
 
 const USER_ID = 'user-1';
 const ACCOUNT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const GENERATION = '11111111-1111-4111-8111-111111111111';
+const ACCOUNT = { id: ACCOUNT_ID, storage_generation: GENERATION };
+let storedRows, identityDb;
 const MESSAGE_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
 function buildApp() {
@@ -55,6 +59,8 @@ function startServer() {
 function messageRow(overrides = {}) {
   return {
     id: MESSAGE_ID,
+    storage_generation: GENERATION, uid_validity: '10', entity_id: MESSAGE_ID,
+    folder_mappings: { spam: 'Junk', inbox: 'INBOX' },
     account_id: ACCOUNT_ID,
     uid: 42,
     folder: 'Junk',
@@ -89,6 +95,27 @@ beforeEach(() => {
   });
 });
 
+function setupMessage(overrides = {}, destinationUid = 100) {
+  storedRows = [messageRow(overrides)];
+  identityDb = routeIdentityFixture({ account: ACCOUNT, getRows: () => storedRows,
+    removeRow: id => { storedRows = storedRows.filter(row => row.id !== id); },
+    saveRow: (id, row) => { storedRows = storedRows.map(old => old.id === id ? row : old); } });
+  query.mockImplementation(async (rawSql, params = []) => {
+    const sql = rawSql.replace(/\s+/g, ' ').trim();
+    const identityResult = identityDb.query(sql, params);
+    if (identityResult) return identityResult;
+    if (sql.includes('FROM messages m JOIN email_accounts a')) return { rows: storedRows.map(row => ({ ...row })) };
+    if (sql.startsWith('SELECT 1 FROM folders')) return { rows: [{}] };
+    if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [ACCOUNT] };
+    return { rows: [] };
+  });
+  imapManager.moveMessage.mockImplementation(async (_account, _uid, _from, folder, { expectedSource }) => {
+    identityDb.acknowledgeMove(expectedSource, folder, destinationUid);
+    return destinationUid;
+  });
+  imapManager.syncFolderOnDemand.mockResolvedValue(undefined);
+}
+
 function getSpamInserts() {
   return query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO spam_training_log'));
 }
@@ -105,14 +132,7 @@ describe('POST /api/mail/messages/:id/spam — no-op path (already in spam folde
   });
 
   it('stores v0.2 features in spam_training_log and trains incrementally', async () => {
-    // 1. Route lookup (account + folder_mappings)
-    query.mockResolvedValueOnce({ rows: [{ account_id: ACCOUNT_ID, folder_mappings: { spam: 'Junk' } }] });
-    // 2. resolveSpamFolder → mappedFolderUsable
-    query.mockResolvedValueOnce({ rows: [{}] }); // folder exists
-    // 3. moveForSpamLabel SELECT m.* — message already in 'Junk'
-    query.mockResolvedValueOnce({ rows: [messageRow()] });
-    // 4. INSERT INTO spam_training_log + UPDATE messages
-    query.mockResolvedValue({ rows: [] });
+    setupMessage();
 
     const res = await fetch(`${base}/api/mail/messages/${MESSAGE_ID}/spam`, { method: 'POST' });
     expect(res.status).toBe(200);
@@ -151,18 +171,7 @@ describe('POST /api/mail/messages/:id/ham — move path (message leaves spam)', 
   });
 
   it('moves to the inbox and trains incrementally with label=ham', async () => {
-    // 1. Route lookup for /ham
-    query.mockResolvedValueOnce({ rows: [{ account_id: ACCOUNT_ID, folder: 'Junk', folder_mappings: { spam: 'Junk', inbox: 'INBOX' } }] });
-    // 2. resolveAllSpamPaths → mapped folder check for 'Junk'
-    query.mockResolvedValueOnce({ rows: [{}] });
-    // 3. moveForSpamLabel SELECT m.*
-    query.mockResolvedValueOnce({ rows: [messageRow()] });
-    // 4. account row
-    query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID }] });
-    // 5. DELETE stale row, UPDATE messages, INSERT training log
-    query.mockResolvedValue({ rows: [] });
-
-    imapManager.moveMessage.mockResolvedValue(100);
+    setupMessage();
 
     const res = await fetch(`${base}/api/mail/messages/${MESSAGE_ID}/ham`, { method: 'POST' });
     expect(res.status).toBe(200);
@@ -170,7 +179,10 @@ describe('POST /api/mail/messages/:id/ham — move path (message leaves spam)', 
     expect(body.ok).toBe(true);
     expect(body.folder).toBe('INBOX');
 
-    expect(imapManager.moveMessage).toHaveBeenCalled();
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(ACCOUNT, 42, 'Junk', 'INBOX', {
+      expectedSource: expect.objectContaining({ id: MESSAGE_ID, entity_id: MESSAGE_ID, storage_generation: GENERATION, uid_validity: '10' }),
+    });
+    expect(storedRows).toMatchObject([{ id: MESSAGE_ID, folder: 'INBOX', uid: 100 }]);
 
     // Training logged exactly once on the move path, with manual source.
     const inserts = getSpamInserts();
@@ -184,26 +196,18 @@ describe('POST /api/mail/messages/:id/ham — move path (message leaves spam)', 
 
   // The source uid can belong to another message in the inbox (#665), so the row is not kept on it.
   it('without a new uid, drops the row and pulls the inbox instead of keeping the source uid', async () => {
-    query.mockResolvedValueOnce({ rows: [{ account_id: ACCOUNT_ID, folder: 'Junk', folder_mappings: { spam: 'Junk', inbox: 'INBOX' } }] });
-    query.mockResolvedValueOnce({ rows: [{}] });
-    query.mockResolvedValueOnce({ rows: [messageRow()] });
-    query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID }] });
     const date = '2026-11-04T10:00:00.000Z';
-    query.mockImplementation(async (sql) => (sql === 'DELETE FROM messages WHERE id = $1 RETURNING *'
-      ? { rows: [messageRow({ date, spam_verdict: 'spam', spam_user_override: null, category: 'promotions' })] }
-      : { rows: [] }));
-    imapManager.moveMessage.mockResolvedValue(null);
-    imapManager.syncFolderOnDemand.mockResolvedValue(undefined);
+    setupMessage({ date, spam_verdict: 'spam', spam_user_override: null, category: 'promotions' }, null);
 
     const res = await fetch(`${base}/api/mail/messages/${MESSAGE_ID}/ham`, { method: 'POST' });
     expect(res.status).toBe(200);
     const sqls = query.mock.calls.map(([sql, params]) => [sql.replace(/\s+/g, ' ').trim(), params]);
     expect(sqls.filter(([sql]) => sql.startsWith('UPDATE messages'))).toEqual([]);
-    expect(sqls).toContainEqual(['DELETE FROM messages WHERE id = $1 RETURNING *', [MESSAGE_ID]]);
-    expect(imapManager.syncFolderOnDemand).toHaveBeenCalledWith({ id: ACCOUNT_ID }, 'INBOX');
+    expect(sqls).toContainEqual(['DELETE FROM messages WHERE id=$1 RETURNING *', [MESSAGE_ID]]);
+    expect(imapManager.syncFolderOnDemand).toHaveBeenCalledWith(ACCOUNT, 'INBOX');
     expect(getSpamInserts()).toHaveLength(1);
     // The inbox's sync files it again with the user's verdict, not as mail to classify.
-    expect(takeCarry(ACCOUNT_ID, 'INBOX', '<abc123@example.com>', date)).toMatchObject({
+    expect(takeCarry(ACCOUNT_ID, 'INBOX', '<abc123@example.com>', date, Date.now(), GENERATION)).toMatchObject({
       spam_user_override: 'ham', spam_verdict: 'ham', category: 'promotions',
     });
   });

@@ -306,6 +306,16 @@ describe('deliverAndRecord', () => {
     query.mockResolvedValue({ rows: [{ id: 'book1' }] });
   });
 
+  it('passes exact APPEND identity proof to Sent metadata without persisting it in the send payload', async () => {
+    const identityContext = { accountId: 'a1', folderPath: 'Sent', uidValidity: '9', revision: '2' };
+    imapManager.appendToSent.mockResolvedValueOnce({ uid: 5, identityContext });
+    const msg = await message();
+    await deliverAndRecord(msg);
+    expect(imapManager.upsertSentMessageRecord).toHaveBeenCalledWith(account, 'Sent', 5,
+      expect.objectContaining({ identityContext }));
+    expect(msg.delivery).not.toHaveProperty('identityContext');
+  });
+
   it('delivers, deletes the draft, stores the Sent copy once and reports the result', async () => {
     const onResult = vi.fn();
     const msg = await message({ sentDraft: { uid: 3, folder: 'Drafts', accountId: 'a1' } });

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
 
+vi.mock('./messageIdentity.js', () => import('./testSupport/identityTestAdapter.js'));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), parseMailboxList: () => [{ email: 'bcc@example.test' }] }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
@@ -59,7 +60,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('draft ingestion SQL id
       parsedHeaders: { bcc: 'bcc@example.test' }, flags: [], hasAttachments: false });
     const manager = Object.create(ImapManager.prototype);
     const metadata = await manager._ingestDraftUidWithClient({ id: 'account-a', email_address: 'me@example.test', imap_host: 'imap.gmail.com' }, 'Drafts', 1,
-      { mailbox: { uidValidity: current } }, { headers: Buffer.from('headers'), bodyStructure: { type: 'text/plain' } });
+      { mailbox: { uidValidity: current } }, { headers: Buffer.from('headers'), bodyStructure: { type: 'text/plain' } },
+      { uidValidity: current == null ? '' : String(current), providerNamespace: 'gmail-x-gm-msgid' });
     const persisted = (await database.query("SELECT * FROM messages WHERE folder='Drafts'")).rows[0];
     expect(metadata.thread_id).toBe(root);
     expect(persisted.thread_id).toBe(root);

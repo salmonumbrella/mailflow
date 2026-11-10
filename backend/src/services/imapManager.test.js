@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('./messageIdentity.js', () => import('./testSupport/identityTestAdapter.js'));
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), parseMailboxList: vi.fn(() => [{ name: 'Hidden', email: 'hidden@example.test' }]), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((parsed) => parsed), MAX_HEADER_FIELD: 500 }));
@@ -24,6 +25,7 @@ import { refreshMicrosoftToken } from '../routes/oauth.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
+import { observeMailboxIdentity } from './messageIdentity.js';
 import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
@@ -124,7 +126,7 @@ describe('live reply draft lookup', () => {
 
   it('uses current headers and structure, replacing stale cache metadata for a reused UID', async () => {
     const release = vi.fn();
-    const client = { getMailboxLock: vi.fn().mockResolvedValue({ release }), mailbox: { uidValidity: 9n },
+    const client = { noop: vi.fn(async () => true), getMailboxLock: vi.fn().mockResolvedValue({ release }), mailbox: { uidValidity: 9n },
       fetch: vi.fn(async function* () { yield { uid: 1, headers: Buffer.from('Message-ID: <new@example.test>\r\n'), bodyStructure: { type: 'text/plain' } }; }) };
     parseMessage.mockResolvedValueOnce({ messageId: '<new@example.test>', fromEmail: 'me@example.test',
       to: [], cc: [], inReplyTo: '<parent@example.test>', references: '<parent@example.test>',
@@ -161,7 +163,8 @@ describe('live reply draft lookup', () => {
       ? { rows: [{ message_id: '<known@example.test>', thread_id: '<canonical@example.test>' }] }
       : { rows: [{ id: 'row-1', thread_id: '<canonical@example.test>' }] });
     const result = await manager._ingestDraftUidWithClient({ id: 'account-a', email_address: 'me@example.test' }, 'Drafts', 1,
-      { mailbox: { uidValidity: 9n } }, { headers: Buffer.from('headers'), bodyStructure: { type: 'text/plain' } });
+      { mailbox: { uidValidity: 9n } }, { headers: Buffer.from('headers'), bodyStructure: { type: 'text/plain' } },
+      { uidValidity: '9', providerNamespace: 'gmail-x-gm-msgid' });
     expect(result.thread_id).toBe('<canonical@example.test>');
     const [, values] = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO messages'));
     expect(values[12]).toBe('<canonical@example.test>');
@@ -175,7 +178,8 @@ describe('live reply draft lookup', () => {
       ? { rows: [{ message_id: '<known@example.test>', thread_id: '<computed@example.test>' }] }
       : { rows: [{ id: 'row-1', thread_id: '<retained@example.test>' }] });
     const result = await manager._ingestDraftUidWithClient({ id: 'account-a' }, 'Drafts', 1,
-      { mailbox: { uidValidity: 9n } }, { headers: Buffer.from('headers'), bodyStructure: { type: 'text/plain' } });
+      { mailbox: { uidValidity: 9n } }, { headers: Buffer.from('headers'), bodyStructure: { type: 'text/plain' } },
+      { uidValidity: '9', providerNamespace: 'gmail-x-gm-msgid' });
     expect(result.thread_id).toBe('<retained@example.test>');
   });
 
@@ -3603,16 +3607,15 @@ describe('syncMessages — empty mailbox still stamps last_sync', () => {
   });
 
   it('invalidates a previous UID epoch even when the rebuilt mailbox is empty', async () => {
+    observeMailboxIdentity.mockResolvedValueOnce({ uidValidity: '8', epochChanged: true, purgedCount: 0 });
     query.mockImplementation(async sql => ({ rows: sql.includes('SELECT uid_validity') ? [{ uid_validity: '7' }] : [], rowCount: 0 }));
     const mgr = { _bgConnSem: createKeyedSemaphore(2), backfillMessages: vi.fn().mockResolvedValue() };
     const client = { noop: async () => true, getMailboxLock: async () => ({ release() {} }), mailbox: { exists: 0, uidValidity: 8n } };
     await ImapManager.prototype.syncMessages.call(mgr, account, client, 'INBOX', 50, false, true);
     await new Promise(resolve => setImmediate(resolve));
-    const purge = query.mock.calls.findIndex(([sql]) => sql.startsWith('DELETE FROM messages'));
-    const stamp = query.mock.calls.findIndex(([sql]) => sql.includes('uid_validity=COALESCE'));
-    expect(purge).toBeGreaterThanOrEqual(0);
-    expect(stamp).toBeGreaterThan(purge);
-    expect(query.mock.calls[stamp][1]).toEqual([account.id, 'INBOX', 8]);
+    expect(observeMailboxIdentity).toHaveBeenCalledWith(expect.objectContaining({ accountId: account.id }), client);
+    expect(query.mock.calls.some(([sql]) => sql.includes('highest_modseq = NULL'))).toBe(true);
+    expect(mgr.backfillMessages).toHaveBeenCalledWith(account, 'INBOX');
   });
 
   it('still releases the mailbox lock on the empty path', async () => {
@@ -3904,8 +3907,8 @@ describe('Gmail label memberships (#418)', () => {
     }
   }
   for (const mode of ['sync', 'backfill']) {
-    for (const [host, expected] of [['imap.gmail.com', '9007199254740993'], ['imap.example.test', null]]) {
-      it(`${mode} scopes provider identity to Gmail on ${host}`, async () => {
+    for (const [host, expected] of [['imap.gmail.com', null], ['imap.example.test', null]]) {
+      it(`${mode} does not infer a verified provider namespace from ${host}`, async () => {
         acct.imap_host = host;
         parseMessage.mockImplementation(async m => ({ ...parsed(m.uid), providerMsgid: '9007199254740993' }));
         await (mode === 'sync' ? sync : backfill)(manager(), 'INBOX');
@@ -4845,7 +4848,8 @@ describe('ingest paths pass isBulk to computeThreadId (#649)', () => {
     query.mockImplementation(async () => ({ rows: [{ id: 'row-1' }] }));
 
     await Object.create(ImapManager.prototype)._ingestDraftUidWithClient(account, 'Drafts', 5,
-      { mailbox: { uidValidity: 9n } }, { headers: Buffer.from('headers'), bodyStructure: { type: 'text/plain' } });
+      { mailbox: { uidValidity: 9n } }, { headers: Buffer.from('headers'), bodyStructure: { type: 'text/plain' } },
+      { uidValidity: '9', providerNamespace: 'gmail-x-gm-msgid' });
 
     expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO messages'))).toBe(true);
     expect(subjectFallbackRan()).toBe(!isBulk);
@@ -5868,6 +5872,7 @@ describe('CONDSTORE-less full sync (#495)', () => {
   });
 
   it('UIDVALIDITY change: every cached identity is void, so everything reprocesses in full', async () => {
+    observeMailboxIdentity.mockResolvedValueOnce({ uidValidity: '7', epochChanged: true, purgedCount: 2 });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const serverMsgs = [{ uid: 10, seen: true }, { uid: 20, seen: true }];
     const { mgr, client, calls } = arrange({
@@ -6037,6 +6042,7 @@ describe('secondary work over the pool (#474 round 5)', () => {
       ImapFlow.mockImplementation(function () {
         const client = new EventEmitter();
         client.usable = true;
+        client.noop = vi.fn().mockResolvedValue(true);
         client.connect = vi.fn(() => Promise.resolve());
         client.logout = vi.fn(() => Promise.resolve());
         client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
@@ -6937,23 +6943,23 @@ describe('server copy identity checks', () => {
     expect(client.messageDelete).toHaveBeenCalledWith('9', { uid: true });
   });
 
-  it('bulkPermanentDelete reports the uids it tried, and those already gone, when the expunge fails and is verified', async () => {
+  it('bulkPermanentDelete retains attempted UIDs as pending when deletion acknowledgement is lost', async () => {
     const { mgr, account, client } = arrange(new Map([[7, '<a@example.test>'], [8, '<someone-elses@example.test>'], [9, '<c@example.test>']]));
     client.messageDelete.mockRejectedValueOnce(new Error('connection lost'));
     client.search = vi.fn(async () => [9]); // 7 went, 9 is still there
     const expectRows = new Map([7, 8, 9, 10].map(uid => [uid, row({ message_id: `<${'abcd'[uid - 7]}@example.test>` })]));
     expect(await mgr.bulkPermanentDelete(account, [7, 8, 9, 10], 'Trash', { expectRows }))
-      .toEqual({ succeeded: [7, 10], failed: [9], mismatched: [8] });
-    expect(client.search).toHaveBeenCalledWith({ uid: '7,9' }, { uid: true });
+      .toEqual({ succeeded: [10], failed: [], mismatched: [8],pending:[7,9],identityPending:true });
+    expect(client.search).not.toHaveBeenCalled();
   });
 
-  it('bulkPermanentDelete counts every uid it tried as failed when the expunge fails and cannot be verified', async () => {
+  it('bulkPermanentDelete does not retry or claim failure after uncertain expunge', async () => {
     const { mgr, account, client } = arrange(new Map([[7, '<a@example.test>'], [8, '<someone-elses@example.test>']]));
     client.messageDelete.mockRejectedValueOnce(new Error('connection lost'));
     client.search = vi.fn(async () => { throw new Error('connection lost'); });
     const expectRows = new Map([7, 8, 9].map(uid => [uid, row({ message_id: `<${'abc'[uid - 7]}@example.test>` })]));
     expect(await mgr.bulkPermanentDelete(account, [7, 8, 9], 'Trash', { expectRows }))
-      .toEqual({ succeeded: [9], failed: [7], mismatched: [8] });
+      .toEqual({ succeeded: [9], failed: [], mismatched: [8],pending:[7],identityPending:true });
   });
 
   it('a FETCH answered with an unsolicited flags-only response for the uid still finds its Message-ID', async () => {

@@ -85,6 +85,7 @@ export const threadKeysInFolders = (accountId, folders) => _threadKeysInFolders(
 // imapManager is injected (the hooks pass `this`) so the DB-touching logic stays unit-
 // testable without standing up a live IMAP pool.
 export async function runGtdTransitions(imapManager, account, threadKeys) {
+  account = { ...account };
   const keys = [...new Set(threadKeys || [])];
   if (keys.length === 0) return;
 
@@ -171,7 +172,7 @@ export async function runGtdTransitions(imapManager, account, threadKeys) {
         if (!survives) continue;
         anyStripped = true;
         try {
-          await imapManager.removeMessageCopy(account.id, copy.uid, copy.folder);
+          await imapManager.removeMessageCopy(account, copy.uid, copy.folder, { expectedSource: { ...copy } });
         } catch (err) {
           // An external automation may strip the same label concurrently, so the copy
           // can already be gone on the server. Treat a failed removal as a successful

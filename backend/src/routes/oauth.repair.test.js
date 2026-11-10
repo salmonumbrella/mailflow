@@ -24,14 +24,14 @@ const ENV_KEYS = ['MS_CLIENT_ID', 'MS_CLIENT_SECRET', 'MS_TENANT_ID', 'MS_REDIRE
 // The accounts the signed-in user owns, by id.
 const ACCOUNTS = {
   '11111111-1111-4111-8111-111111111111': { id: '11111111-1111-4111-8111-111111111111', user_id: 'user-1', email_address: 'Maria.Lopez@outlook.com', imap_host: 'outlook.office365.com', oauth_provider: 'microsoft', oauth_client_id: 'builtin-app-id' },
-  '22222222-2222-4222-8222-222222222222': { id: '22222222-2222-4222-8222-222222222222', user_id: 'user-1', email_address: 'maria@gmail.com', imap_host: 'imap.gmail.com', oauth_provider: 'google' },
+  '22222222-2222-4222-8222-222222222222': { id: '22222222-2222-4222-8222-222222222222', user_id: 'user-1', email_address: 'maria@gmail.com', imap_host: 'imap.gmail.com', imap_port: 993, oauth_provider: 'google' },
   '33333333-3333-4333-8333-333333333333': { id: '33333333-3333-4333-8333-333333333333', user_id: 'user-1', email_address: 'maria@example.com', imap_host: 'imap.example.com', oauth_provider: null },
   // Connected through the instance's own app on the common tenant.
   '55555555-5555-4555-8555-555555555555': { id: '55555555-5555-4555-8555-555555555555', user_id: 'user-1', email_address: 'maria@outlook.com', imap_host: 'outlook.office365.com', oauth_provider: 'microsoft', oauth_client_id: 'own-app-id', oauth_tenant_id: 'common' },
   '66666666-6666-4666-8666-666666666666': { id: '66666666-6666-4666-8666-666666666666', user_id: 'user-1', email_address: 'maria@contoso.example', imap_host: 'outlook.office365.com', oauth_provider: 'microsoft', oauth_client_id: 'own-app-id', oauth_tenant_id: 'contoso.example' },
   // Another user's accounts, which a repair must never reach.
   '77777777-7777-4777-8777-777777777777': { id: '77777777-7777-4777-8777-777777777777', user_id: 'user-2', email_address: 'maria.lopez@outlook.com', imap_host: 'outlook.office365.com', oauth_provider: 'microsoft', oauth_client_id: 'builtin-app-id' },
-  '88888888-8888-4888-8888-888888888888': { id: '88888888-8888-4888-8888-888888888888', user_id: 'user-2', email_address: 'maria@gmail.com', imap_host: 'imap.gmail.com', oauth_provider: 'google' },
+  '88888888-8888-4888-8888-888888888888': { id: '88888888-8888-4888-8888-888888888888', user_id: 'user-2', email_address: 'maria@gmail.com', imap_host: 'imap.gmail.com', imap_port: 993, oauth_provider: 'google' },
 };
 
 let session;
@@ -382,7 +382,7 @@ describe('repairing an account by signing in again', () => {
     const cb = await realFetch(`${base}/oauth/google/callback?code=c&state=${session.oauthNonce}`, { redirect: 'manual' });
     expect(cb.headers.get('location')).toBe('/?oauth_success=google&oauth_result=1');
     const [[sql]] = txOwnershipCheck('22222222-2222-4222-8222-222222222222');
-    expect(sql).toBe('SELECT id, email_address FROM email_accounts WHERE id = $1 AND user_id = $2');
+    expect(sql).toBe('SELECT id, email_address, oauth_provider, imap_host, imap_port, auth_user FROM email_accounts WHERE id = $1 AND user_id = $2 FOR UPDATE');
   });
 
   it('re-checks a Microsoft repair\'s account inside the sign-in transaction', async () => {

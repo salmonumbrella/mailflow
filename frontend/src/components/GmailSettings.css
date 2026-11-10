@@ -49,3 +49,15 @@
   .mf-gmail-settings table { min-width: 550px; }
 }
 @media (forced-colors: active) { .mf-gmail-settings button[aria-selected=true] { border-bottom-color: Highlight; } }
+
+.mf-signature-library { border: 0; padding: 0; min-width: 0; }
+.mf-signature-library-manager { display: flex; border: 1px solid var(--border); border-radius: 4px; max-width: 760px; }
+.mf-signature-library-names { flex: 0 0 220px; border-right: 1px solid var(--border); padding: 8px; }
+.mf-signature-library-names > div { display: flex; flex-wrap: wrap; margin-bottom: 8px; gap: 4px; }
+.mf-signature-library-names > div > button:first-child { width: 100%; text-align: left; overflow-wrap: anywhere; }
+.mf-signature-library-names button[aria-pressed=true] { background: var(--bg-hover); color: var(--accent); }
+.mf-signature-library-editor { padding: 8px; flex: 1; min-width: 0; }
+.mf-signature-library-editor textarea { width: 100%; min-height: 150px; box-sizing: border-box; }
+.mf-signature-library-defaults { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 12px; }
+.mf-signature-library-defaults label { display: flex; flex-direction: column; gap: 4px; }
+@media (max-width: 640px) { .mf-signature-library-manager { flex-direction: column; } .mf-signature-library-names { flex-basis: auto; border-right: 0; border-bottom: 1px solid var(--border); } }

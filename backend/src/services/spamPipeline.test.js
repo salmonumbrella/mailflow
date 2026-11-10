@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('./messageIdentity.js', () => ({ withAccountIdentity: (_account, write) => write({ query }) }));
 vi.mock('./spamModelStore.js', () => ({ getModelForUser: vi.fn() }));
 
 import { query } from './db.js';
@@ -23,6 +24,10 @@ function messageRow(overrides = {}) {
     account_id: ACCOUNT_ID,
     owner_id: USER_ID,
     account_email: 'user@example.com',
+    account_storage_generation: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    storage_generation: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    entity_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    uid_validity: '10',
     antispam_enabled: 1,
     folder_mappings: { spam: 'Junk' },
     folder: 'INBOX',
@@ -71,7 +76,13 @@ function persistedVerdict() {
 beforeEach(() => {
   query.mockReset();
   getModelForUser.mockReset();
-  query.mockResolvedValue({ rows: [] });
+  query.mockImplementation(async sql => {
+    if (sql.includes('SELECT uid_validity FROM mailbox_identity_epochs')) return { rows: [{ uid_validity: '10' }] };
+    if (sql.includes('SELECT id FROM mail_identity_operations')) return { rows: [{ id: 'confirmed-operation' }] };
+    if (sql.includes('SELECT * FROM messages WHERE id=$1')) return { rows: [messageRow()] };
+    if (sql.includes('SELECT l.entity_id')) return { rows: [{ entity_id: messageRow().entity_id, uid_validity: '20' }] };
+    return { rows: [], rowCount: 1 };
+  });
 });
 
 describe('classifyAndTagMessage — gate rules', () => {
@@ -154,7 +165,7 @@ describe('classifyAndTagMessage — scenario 2: active user moves spam', () => {
       expect(result.moved).toBe(true);
       expect(imap.moveMessage).toHaveBeenCalledWith(
         expect.objectContaining({ id: ACCOUNT_ID }),
-        100, 'INBOX', 'Junk',
+        100, 'INBOX', 'Junk', { expectedSource: expect.objectContaining({ id: MESSAGE_ID }) },
       );
     });
 
@@ -341,8 +352,8 @@ describe('autoMove: a move with or without a new UID (mirrors the manual /spam p
     expect(imap._guardMoveUid).toHaveBeenCalledWith(ACCOUNT_ID, 'INBOX', 100);
     expect(imap._guardMoveUid).not.toHaveBeenCalledWith(ACCOUNT_ID, 'Junk', 100);
     expect(query.mock.calls.some(([sql]) => sql.includes('UPDATE messages SET folder'))).toBe(false);
-    expect(query.mock.calls).toContainEqual(['DELETE FROM messages WHERE id = $1 RETURNING *', [MESSAGE_ID]]);
-    expect(imap.syncFolderOnDemand).toHaveBeenCalledWith({ id: ACCOUNT_ID }, 'Junk');
+    expect(query.mock.calls).toContainEqual(['DELETE FROM messages WHERE id=$1 RETURNING *', [MESSAGE_ID]]);
+    expect(imap.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID, storage_generation: messageRow().storage_generation }), 'Junk');
   });
 
   it('does not guard the destination on a UIDPLUS move', async () => {
@@ -363,7 +374,7 @@ describe('autoMove: a move with or without a new UID (mirrors the manual /spam p
     const update = query.mock.calls.find(
       ([sql]) => sql.includes('UPDATE messages SET folder = $1, uid = $2'),
     );
-    expect(update[1]).toEqual(['Junk', 500, MESSAGE_ID]);
+    expect(update[1]).toEqual(['Junk', 500, MESSAGE_ID, '20', messageRow().entity_id, false]);
   });
 });
 
@@ -426,6 +437,35 @@ describe('classifyAndTagMessage — deferAutoMove (backfill path)', () => {
     expect(result.autoMoveDeferred).toBe(false);
     expect(imap.moveMessage).toHaveBeenCalledTimes(1);
     expect(persistedDetails().autoMoveDeferred).toBe(false);
+  });
+});
+
+describe('classifyAndTagMessage — source and cache races', () => {
+  const spam = { subject: 'CHEAP VIAGRA!!! WIN $$$',
+    body_text: 'Click here. Buy now. Limited time offer, act now!',
+    from_email: 'spammer@spoof.biz', attachments: [{ filename: 'invoice.exe' }] };
+
+  it('does not move when an explicit override wins while the model loads', async () => {
+    getModelForUser.mockResolvedValue(trainedModel(200));
+    query.mockResolvedValueOnce({ rows: [messageRow(spam)] });
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    const imap = imapFacade();
+    expect(await classifyAndTagMessage(MESSAGE_ID, { imap })).toEqual({ skipped: 'source_changed' });
+    expect(imap.moveMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not report an acknowledged provider MOVE as failed after a cache outage', async () => {
+    getModelForUser.mockResolvedValue(trainedModel(200));
+    query.mockResolvedValueOnce({ rows: [messageRow(spam)] });
+    query.mockResolvedValueOnce({ rows: [], rowCount: 1 });
+    query.mockRejectedValueOnce(new Error('database unavailable'));
+    const imap = imapFacade();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(await classifyAndTagMessage(MESSAGE_ID, { imap })).toMatchObject({ moved: true });
+      expect(imap.moveMessage).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('cache recovery pending'), 'database unavailable');
+    } finally { warn.mockRestore(); }
   });
 });
 

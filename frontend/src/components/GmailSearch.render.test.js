@@ -378,3 +378,33 @@ test('invalid size stays visible and size searches cannot create broader filters
   assert.match(container().querySelector('[role="alert"]').textContent, /size/);
   assert.equal(query, 'from:alice larger:2M');
 });
+
+
+test('a recovery-pending historical run stays explicit after a failed status check and is never retried', async () => {
+  const status = { ruleId: 'saved-rule', runId: 'pending-run', status: 'pending_recovery', identityPending: true, pendingCount: 2 };
+  localStorage.setItem('mailflow:filter-run:user-a', JSON.stringify(status));
+  let starts = 0, checks = 0;
+  api.runRule = async () => { starts++; throw new Error('Must not replay'); };
+  api.getRuleRun = async () => { checks++; throw new Error('Connection lost'); };
+  await mount('from:alice');
+  assert.match(container().querySelector('[role="status"]').textContent, /mailbox recovery pending: 2 messages/);
+  assert.match(container().querySelector('[role="status"]').textContent, /Do not rerun/);
+  assert.equal(button('Stop run'), undefined);
+  assert.equal(button('Retry applying filter'), undefined);
+  await click(button('Check status'));
+  assert.equal(checks, 1);
+  assert.match(container().querySelector('[role="status"]').textContent, /mailbox recovery pending: 2 messages/);
+  assert.doesNotMatch(container().querySelector('[role="status"]').textContent, /unavailable|had errors/);
+  assert.equal(starts, 0);
+  assert.equal(JSON.parse(localStorage.getItem('mailflow:filter-run:user-a')).status, 'pending_recovery');
+});
+
+test('a failed run with pending operations also warns against replaying completed actions', async () => {
+  localStorage.setItem('mailflow:filter-run:user-a', JSON.stringify({ ruleId: 'saved-rule', runId: 'mixed-run', status: 'failed', identityPending: true, pendingCount: 1 }));
+  await mount();
+  const text = container().querySelector('[role="status"]').textContent;
+  assert.match(text, /had errors/);
+  assert.match(text, /Mailbox recovery is still pending/);
+  assert.match(text, /Do not rerun completed actions/);
+  assert.equal(button('Retry applying filter'), undefined);
+});

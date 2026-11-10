@@ -15,6 +15,10 @@ const imap = vi.hoisted(() => {
   return { fns, manager };
 });
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/messageIdentity.js', async () => ({
+  ...await import('../services/testSupport/identityTestAdapter.js'),
+  resolveCanonicalEntity: vi.fn(async (_tx, _scope, entityId) => entityId),
+}));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: session.userId }; next(); },
 }));
@@ -46,9 +50,9 @@ const ACCOUNT_ID = 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1';
 const MESSAGE_ID = 'b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2';
 const IMAGE_URL = 'https://img.example/pic.png';
 
-const account = () => ({ id: ACCOUNT_ID, user_id: OWNER, email_address: 'me@example.com', folder_mappings: {}, protocol: 'imap', enabled: true });
+const account = () => ({ id: ACCOUNT_ID, storage_generation: 'test-generation', user_id: OWNER, email_address: 'me@example.com', folder_mappings: {}, protocol: 'imap', enabled: true });
 const message = () => ({
-  id: MESSAGE_ID, account_id: ACCOUNT_ID, uid: 7, folder: 'INBOX', message_id: '<m1@example.com>',
+  id: MESSAGE_ID, account_id: ACCOUNT_ID, storage_generation: 'test-generation', uid_validity: '10', entity_id: MESSAGE_ID, uid: 7, folder: 'INBOX', message_id: '<m1@example.com>',
   subject: 'Hello', from_email: 'a@example.com', is_read: false, is_starred: false, is_deleted: false,
   attachments: [], bcc_addresses: ['b@example.com'], list_unsubscribe: null, list_unsubscribe_post: null,
   body_html: `<p><img src="${IMAGE_URL}"></p>`, user_id: OWNER, folder_mappings: {}, sibling_count: 1,
@@ -69,8 +73,11 @@ function fakeQuery(rawSql, params = []) {
   if (sql.includes('FROM messages m JOIN email_accounts a ON m.account_id = a.id WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1')) {
     return result(params[0] === OWNER && params[1].includes(MESSAGE_ID) ? [message()] : []);
   }
+  if (sql.startsWith('SELECT ') && sql.includes(' FROM messages WHERE id=$1')) return result([{ ...message(), ...messageOverrides }]);
   if (sql.startsWith('SELECT * FROM email_accounts WHERE id = $1')) return result([account()]);
+  if (sql === 'SELECT 1 FROM folders WHERE account_id=$1 AND path=$2 AND no_select=false') return result([{}]);
   if (junkFolder && sql.startsWith('SELECT path FROM folders') && sql.includes("special_use = '\\Junk'")) return result([{ path: 'Junk' }]);
+  if (sql.startsWith('INSERT INTO snoozed_messages')) return result([{ id: 'snooze' }]);
   if (sql.includes('count(*)')) return result([{ inbox_total: 0, bulk_total: 0 }]);
   return result([]);
 }
@@ -94,6 +101,9 @@ beforeEach(() => {
   fetchProxiedImage.mockClear();
   for (const key of Object.keys(imap.fns)) delete imap.fns[key];
   Object.assign(imap.fns, {
+    bulkMoveMessages: vi.fn(async (_account, uids) => ({ succeeded: uids, uidMap: new Map() })),
+    renameFolder: vi.fn(async () => ({ identityContext: { accountId: ACCOUNT_ID, storageGeneration: account().storage_generation } })),
+    deleteFolder: vi.fn(async () => ({ identityContext: { accountId: ACCOUNT_ID, storageGeneration: account().storage_generation } })),
     broadcast: vi.fn(),
     noteUserActivity: vi.fn(),
     scheduleCountRefresh: vi.fn(),
@@ -151,7 +161,7 @@ const cases = [
   ['PATCH /messages/:id/star', { method: 'PATCH', path: `/messages/${MESSAGE_ID}/star`, body: { starred: true } }, messageNotFound, { status: 200, json: { ok: true, is_starred: true } }],
   ['POST /messages/bulk-read', { method: 'POST', path: '/messages/bulk-read', body: { ids: [MESSAGE_ID], read: true } }, { status: 200, json: { ok: true, updated: [] } }, { status: 200 }],
   ['POST /messages/bulk-star', { method: 'POST', path: '/messages/bulk-star', body: { ids: [MESSAGE_ID], starred: true } }, { status: 200, json: { ok: true, updated: [] } }, { status: 200 }],
-  ['POST /messages/bulk-delete', { method: 'POST', path: '/messages/bulk-delete', body: { ids: [MESSAGE_ID] } }, { status: 200, json: { ok: true, deleted: [] } }, { status: 200, calls: ['_guardMoveUid'] }],
+  ['POST /messages/bulk-delete', { method: 'POST', path: '/messages/bulk-delete', body: { ids: [MESSAGE_ID] } }, { status: 200, json: { ok: true, deleted: [] } }, { status: 409, json: { ok: false, deleted: [], conflicts: [MESSAGE_ID] } }],
   ['POST /messages/bulk-move', { method: 'POST', path: '/messages/bulk-move', body: { ids: [MESSAGE_ID], folder: 'Archive' } }, { status: 200, json: { ok: true, moved: [] } }, { status: 200, calls: ['_guardMoveUid'] }],
   ['POST /messages/bulk-archive', { method: 'POST', path: '/messages/bulk-archive', body: { ids: [MESSAGE_ID] } }, { status: 200, json: { ok: true, archived: [], noArchiveFolder: [] } }, { status: 200 }],
   ['POST /messages/:id/copy', { method: 'POST', path: `/messages/${MESSAGE_ID}/copy`, body: { folder: 'Label' } }, messageNotFound, { status: 400, json: { error: 'Folder is not a copy target' } }],
@@ -170,7 +180,8 @@ const MESSAGE_VIEW = `m.id, m.uid, m.folder, m.message_id, m.subject, m.from_nam
   m.reply_to, m.in_reply_to, m.thread_references, m.date, m.snippet, m.is_read, m.is_starred,
   m.has_attachments, m.account_id, m.category, m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
   m.spam_verdict, m.spam_user_override, m.spam_score_ml, a.name AS account_name, a.email_address AS account_email, a.color AS account_color`;
-const WITH_SIBLINGS = `m.*, a.user_id, CASE WHEN m.message_id IS NULL THEN 1 ELSE (SELECT COUNT(*) FROM messages s
+const FLAG_COLUMNS = 'm.id, m.account_id, m.storage_generation, m.uid_validity, m.entity_id, m.uid, m.folder, m.message_id, m.is_read, m.is_starred, m.is_deleted';
+const WITH_SIBLINGS = `${FLAG_COLUMNS}, a.user_id, CASE WHEN m.message_id IS NULL THEN 1 ELSE (SELECT COUNT(*) FROM messages s
   WHERE s.account_id = m.account_id AND s.message_id = m.message_id) END AS sibling_count`;
 const account_ = (opts) => ['findOwnedAccount', ACCOUNT_ID, opts];
 const message_ = (opts) => ['findOwnedMessage', MESSAGE_ID, opts];
@@ -195,18 +206,18 @@ const LOOKUPS = {
   'GET /messages/:id/raw.eml': message_({ columns: 'm.id, m.uid, m.folder, m.subject, m.account_id, a.user_id' }),
   'PATCH /messages/:id/read': message_({ columns: WITH_SIBLINGS }),
   'PATCH /messages/:id/star': message_({ columns: WITH_SIBLINGS }),
-  'POST /messages/bulk-read': messages_('m.id, m.uid, m.folder, m.is_read, m.account_id, m.message_id'),
-  'POST /messages/bulk-star': messages_('m.id, m.uid, m.folder, m.is_starred, m.account_id, m.message_id'),
+  'POST /messages/bulk-read': messages_(FLAG_COLUMNS),
+  'POST /messages/bulk-star': messages_(FLAG_COLUMNS),
   'POST /messages/bulk-delete': messages_('m.*, a.user_id, a.folder_mappings'),
-  'POST /messages/bulk-move': messages_('m.*, a.user_id'),
+  'POST /messages/bulk-move': messages_('m.*, a.user_id, a.folder_mappings'),
   'POST /messages/bulk-archive': messages_('m.*, a.user_id, a.folder_mappings'),
-  'POST /messages/:id/copy': message_({ columns: 'm.id, m.account_id, m.uid, m.folder, a.folder_mappings', enabledAccount: true, live: true }),
+  'POST /messages/:id/copy': message_({ columns: 'm.*, a.folder_mappings', enabledAccount: true, live: true }),
   'POST /messages/:id/snooze': message_({ columns: 'm.*, a.user_id' }),
   'PATCH /messages/:id/snooze': message_({ columns: 'm.*, a.user_id' }),
   'POST /messages/:id/unsnooze': message_({ columns: 'm.*, a.user_id' }),
   'DELETE /messages/:id': message_({ columns: 'm.*, a.user_id' }),
-  'POST /messages/:id/spam': message_({ columns: 'm.account_id, a.folder_mappings' }),
-  'POST /messages/:id/ham': message_({ columns: 'm.account_id, m.folder, a.folder_mappings' }),
+  'POST /messages/:id/spam': message_({ columns: 'm.*, a.folder_mappings' }),
+  'POST /messages/:id/ham': message_({ columns: 'm.*, a.folder_mappings' }),
   'POST /messages/:id/unsubscribe': message_({ columns: 'm.list_unsubscribe, m.list_unsubscribe_post', live: true }),
 };
 const normalize = opts => (opts?.columns ? { ...opts, columns: flat(opts.columns) } : opts);
@@ -253,15 +264,15 @@ describe('each mail route looks up with its own columns and filters', () => {
   });
 });
 
-// The spam and ham moves look the message up again (moveForSpamLabel) before moving it.
+// Spam and ham retain the initially captured owned source through the provider call.
 describe('marking the owner\'s message as spam or not spam', () => {
-  const moverLookup = ['findOwnedMessage', OWNER, MESSAGE_ID, { columns: 'm.*, a.user_id, a.folder_mappings' }];
+  const moverLookup = ['findOwnedMessage', OWNER, MESSAGE_ID, { columns: 'm.*, a.folder_mappings' }];
 
   it('moves it to the spam folder', async () => {
     junkFolder = true;
     const res = await call(OWNER, { method: 'POST', path: `/messages/${MESSAGE_ID}/spam` });
     expect(res).toMatchObject({ status: 200, json: { ok: true, folder: 'Junk' } });
-    expect(imap.fns.moveMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 7, 'INBOX', 'Junk');
+    expect(imap.fns.moveMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 7, 'INBOX', 'Junk', { expectedSource: expect.objectContaining({ ...message(), ...messageOverrides }) });
     expect(lookupsMade()).toContainEqual(moverLookup);
   });
 
@@ -270,7 +281,7 @@ describe('marking the owner\'s message as spam or not spam', () => {
     messageOverrides = { folder: 'Junk' };
     const res = await call(OWNER, { method: 'POST', path: `/messages/${MESSAGE_ID}/ham` });
     expect(res).toMatchObject({ status: 200, json: { ok: true, folder: 'INBOX' } });
-    expect(imap.fns.moveMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 7, 'Junk', 'INBOX');
+    expect(imap.fns.moveMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 7, 'Junk', 'INBOX', { expectedSource: expect.objectContaining({ ...message(), ...messageOverrides }) });
     expect(lookupsMade()).toContainEqual(moverLookup);
   });
 

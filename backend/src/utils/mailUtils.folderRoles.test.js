@@ -46,7 +46,7 @@ describe('folderRoles', () => {
     // Trash and Drafts names' rule. 'Projects/Snoozed' is the user's own.
     expect(sql).toContain("lower(name) = 'snoozed' AND (path = name OR upper(path) = ('INBOX' || delimiter || upper(name)))");
     // Any other prefix, or where a rename took it, while mail waits there.
-    expect(sql).toContain('EXISTS (SELECT 1 FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.snoozed_folder = $2)');
+    expect(sql).toContain('EXISTS (SELECT 1 FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.storage_generation=(SELECT storage_generation FROM email_accounts WHERE id=$1) AND sm.snoozed_folder = $2)');
   });
 
   it('unions each rule with its mapping', async () => {

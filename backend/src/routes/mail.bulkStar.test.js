@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 // versions or IMAP round-trips), the 30s local-wins stamp guards the sync race, and a
 // failed IMAP \Flagged write lands in the durable retry queue instead of silently
 // reverting on the next flag sync.
+vi.mock('../services/messageIdentity.js', () => import('../services/testSupport/identityTestAdapter.js'));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
@@ -45,15 +46,15 @@ describe('POST /api/mail/messages/bulk-star (#434)', () => {
     imapManager._enqueueFlagPush.mockReset();
     imapManager._resolveFlagPush.mockReset();
     query.mockImplementation((sql, params) => {
-      if (sql.includes('FROM messages m')) {
+      if (sql.includes('FROM messages m') || sql.includes(' FROM messages WHERE id=$1')) {
         const all = [
           { id: ID_STARRED,   uid: '11', folder: 'INBOX', is_starred: true,  account_id: ACCOUNT_ID, message_id: '<m1@x>' },
           { id: ID_UNSTARRED, uid: '12', folder: 'INBOX', is_starred: false, account_id: ACCOUNT_ID, message_id: '<m2@x>' },
         ];
-        return Promise.resolve({ rows: all.filter(r => params[1].includes(r.id)) });
+        return Promise.resolve({ rows: all.map(r => ({ ...r, storage_generation: 'test-generation', uid_validity: '10', entity_id: r.id })).filter(r => sql.includes(' FROM messages WHERE id=$1') ? r.id === params[0] : params[1].includes(r.id)) });
       }
       if (sql.includes('SELECT * FROM email_accounts')) {
-        return Promise.resolve({ rows: [{ id: ACCOUNT_ID, user_id: 'user-1', imap_host: 'imap.example.com' }] });
+        return Promise.resolve({ rows: [{ id: ACCOUNT_ID, storage_generation: 'test-generation', user_id: 'user-1', imap_host: 'imap.example.com' }] });
       }
       return Promise.resolve({ rows: [] });
     });
@@ -79,6 +80,9 @@ describe('POST /api/mail/messages/bulk-star (#434)', () => {
     const res = await post({ ids: [ID_STARRED, ID_UNSTARRED], starred: true });
     expect(res.status).toBe(200);
     expect((await res.json()).updated).toEqual([ID_UNSTARRED]); // already-starred row skipped
+    const selection = query.mock.calls.find(([sql]) => sql.includes('FROM messages m'))[0];
+    expect(selection.split(' FROM messages')[0]).not.toContain('m.*');
+    expect(selection).toContain('m.storage_generation, m.uid_validity, m.entity_id');
 
     const update = query.mock.calls.find(([sql]) => sql.includes('SET is_starred'));
     expect(update[0]).toContain('star_changed_at = NOW()'); // 30s sync guard
@@ -86,7 +90,7 @@ describe('POST /api/mail/messages/bulk-star (#434)', () => {
 
     // One IMAP \Flagged write, on the row that changed; confirmation drops any queued op.
     expect(imapManager.setFlag).toHaveBeenCalledTimes(1);
-    expect(imapManager.setFlag.mock.calls[0].slice(1)).toEqual(['12', 'INBOX', '\\Flagged', true]);
+    expect(imapManager.setFlag.mock.calls[0].slice(1)).toEqual(['12', 'INBOX', '\\Flagged', true, { expectedSource: expect.objectContaining({ id: ID_UNSTARRED, storage_generation: 'test-generation', uid_validity: '10', entity_id: ID_UNSTARRED }) }]);
     expect(imapManager._resolveFlagPush).toHaveBeenCalledWith(ACCOUNT_ID, ID_UNSTARRED, '\\Flagged');
     expect(imapManager._enqueueFlagPush).not.toHaveBeenCalled();
 
@@ -107,7 +111,7 @@ describe('POST /api/mail/messages/bulk-star (#434)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const res = await post({ ids: [ID_UNSTARRED], starred: true });
     expect(res.status).toBe(200); // DB write stands; IMAP catches up via the queue
-    expect(imapManager._enqueueFlagPush).toHaveBeenCalledWith(ACCOUNT_ID, ID_UNSTARRED, '\\Flagged', true);
+    expect(imapManager._enqueueFlagPush).toHaveBeenCalledWith(ACCOUNT_ID, ID_UNSTARRED, '\\Flagged', true, { expectedSource: expect.objectContaining({ id: ID_UNSTARRED, storage_generation: 'test-generation', uid_validity: '10', entity_id: ID_UNSTARRED }) });
     expect(imapManager._resolveFlagPush).not.toHaveBeenCalled();
     vi.restoreAllMocks();
   });

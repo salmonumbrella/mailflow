@@ -31,7 +31,7 @@ const OUTLOOK_ROW = {
   auth_user: 'me@outlook.com',
   auth_pass: 'old-password',
 };
-const GMAIL_ROW = { ...OUTLOOK_ROW, email_address: 'me@gmail.com', imap_host: 'imap.gmail.com', auth_user: 'me@gmail.com' };
+const GMAIL_ROW = { ...OUTLOOK_ROW, email_address: 'me@gmail.com', imap_host: 'imap.gmail.com', imap_port: 993, auth_user: 'me@gmail.com' };
 
 function buildApp() {
   const app = express();
@@ -163,4 +163,26 @@ describe('OAuth re-link of an existing account', () => {
     expect(statements.some(sql => /UPDATE email_accounts/.test(sql))).toBe(false);
     expect(mocks.imapManager.connectAccount).not.toHaveBeenCalled();
   });
+  it.each([
+    ['a Microsoft OAuth mailbox', { ...GMAIL_ROW, oauth_provider: 'microsoft' }],
+    ['a different IMAP host', { ...GMAIL_ROW, imap_host: 'imap.example.com' }],
+    ['a different login mailbox', { ...GMAIL_ROW, auth_user: 'shared@gmail.com' }],
+    ['a different port', { ...GMAIL_ROW, imap_port: 1143 }],
+  ])('Google relink refuses %s without any account write', async (_label, row) => {
+    existingRow = row;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const location = await callback('google');
+    expect(new URL(location, 'http://x').searchParams.get('oauth_error')).toMatch(/different mailbox or non-Google/);
+    expect(statements.some(sql => /UPDATE email_accounts|INSERT INTO email_accounts/.test(sql))).toBe(false);
+    expect(mocks.imapManager.connectAccount).not.toHaveBeenCalled();
+  });
+
+  it('Google credential-only relink preserves mailbox generation and selectors', async () => {
+    existingRow = { ...GMAIL_ROW, oauth_provider: 'google', storage_generation: 'generation-1' };
+    expect(successOf(await callback('google'))).toBe('google');
+    const update = statements.find(sql => /UPDATE email_accounts/.test(sql));
+    expect(update).not.toMatch(/storage_generation|imap_host|imap_port|auth_user/);
+    expect(statements.some(sql => /FOR UPDATE/.test(sql))).toBe(true);
+  });
+
 });

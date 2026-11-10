@@ -1,4 +1,5 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
+vi.mock('./messageIdentity.js', () => import('./testSupport/identityTestAdapter.js'));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 import { query } from './db.js';
 import { validFolderStatus, observeFolder, folderNeedsSync, publicFolderCounts, FolderStatusMonitor, folderStaleMs, STATUS_FOLDER_BATCH, STATUS_STALE_MS } from './folderStatus.js';

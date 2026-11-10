@@ -25,7 +25,10 @@
 // deferred intent is recorded in spam_details (PR review, 2026-09-15).
 
 import { query } from './db.js';
+import { adjustFolderCounts } from '../utils/mailUtils.js';
 import { rememberDroppedRows } from './movedRowCarry.js';
+import { withAccountIdentity } from './messageIdentity.js';
+import { applyConfirmedMoveCache } from './messageMoveCache.js';
 import { tokenize, extractFlagFeatures } from './spamTokenizer.js';
 import { scoreRules } from './spamRules.js';
 import { extractAuthservIds, normalizeAuthservId } from './spamParser.js';
@@ -63,6 +66,7 @@ export async function classifyAndTagMessage(messageId, opts = {}) {
   const data = await query(`
     SELECT m.*, a.user_id AS owner_id, a.email_address AS account_email,
            a.antispam_enabled, a.folder_mappings, a.trusted_authserv_id,
+           a.storage_generation AS account_storage_generation,
            u.preferences->>'spamEnabled' AS master_spam_enabled
     FROM messages m
     JOIN email_accounts a ON m.account_id = a.id
@@ -174,12 +178,17 @@ export async function classifyAndTagMessage(messageId, opts = {}) {
     autoMoveDeferred: wouldAutoMove && deferAutoMove,
   };
 
-  await query(
+  const tagged = await withAccountIdentity(accountFor(row), tx => tx.query(
     `UPDATE messages SET
        spam_verdict = $1, spam_score_ml = $2, spam_analyzed_at = NOW(), spam_details = $3
-     WHERE id = $4`,
-    [verdict, mlProbability ?? rules.score, JSON.stringify(details), messageId],
-  );
+     WHERE id = $4 AND account_id = $5 AND folder = $6 AND uid = $7
+       AND storage_generation IS NOT DISTINCT FROM $8::uuid
+       AND uid_validity IS NOT DISTINCT FROM $9::bigint
+       AND entity_id IS NOT DISTINCT FROM $10::uuid AND spam_user_override IS NULL`,
+    [verdict, mlProbability ?? rules.score, JSON.stringify(details), messageId,
+      row.account_id, row.folder, row.uid, row.storage_generation, row.uid_validity, row.entity_id],
+  ));
+  if (tagged.rowCount === 0) return { skipped: 'source_changed' };
 
   let moved = false;
   if (shouldMove && opts.imap) {
@@ -202,30 +211,35 @@ export async function classifyAndTagMessage(messageId, opts = {}) {
   };
 }
 
+const accountFor = row => ({ id: row.account_id, email_address: row.account_email,
+  storage_generation: row.account_storage_generation });
+
 async function autoMove(row, spamFolder, imap, messageId) {
+  const account = accountFor(row);
   imap._guardMoveUid?.(row.account_id, row.folder, row.uid);
   try {
-    const newUid = await imap.moveMessage(
-      { id: row.account_id, email_address: row.account_email },
-      row.uid, row.folder, spamFolder,
-    );
-    if (newUid != null) {
-      await query(
-        'DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 AND id != $4',
-        [row.account_id, newUid, spamFolder, messageId],
-      );
-      await query(
-        'UPDATE messages SET folder = $1, uid = $2 WHERE id = $3',
-        [spamFolder, newUid, messageId],
-      );
-    } else {
-      // The new uid is not known, and the source uid can belong to another message in the spam
-      // folder (#665), as in the manual /spam path: drop the row rather than keep it on that uid,
-      // and let a sync of the spam folder file the message under its real one.
-      const dropped = await query('DELETE FROM messages WHERE id = $1 RETURNING *', [messageId]);
-      rememberDroppedRows(spamFolder, dropped?.rows);
-      Promise.resolve(imap.syncFolderOnDemand?.({ id: row.account_id }, spamFolder))
-        .catch(err => console.warn(`Sync of ${spamFolder} after an auto-move without a new uid failed: ${err.message}`));
+    const newUid = await imap.moveMessage(account, row.uid, row.folder, spamFolder,
+      { expectedSource: row });
+    try {
+      const applied = await applyConfirmedMoveCache(account, row, spamFolder, newUid, {
+        onApplied: async (tx, source, destinationKnown, destinationAlreadyCached, previousDestination) => {
+          // Ingest sync owns arrival/removal totals. Replacing its already-counted
+          // destination still changes unread state when the source flags differ.
+          if (destinationKnown && destinationAlreadyCached) {
+            const unreadDelta = Number(!source.is_read) - Number(!previousDestination.is_read);
+            await adjustFolderCounts(account.id, spamFolder, 0, unreadDelta, tx.query.bind(tx));
+          }
+        },
+      });
+      if (applied.dropped?.length) rememberDroppedRows(spamFolder, applied.dropped);
+      if (applied.sync) {
+        Promise.resolve(imap.syncFolderOnDemand?.(account, spamFolder))
+          .catch(err => console.warn(`Sync of ${spamFolder} after an auto-move failed: ${err.message}`));
+      }
+    } catch (err) {
+      // MOVE already succeeded. Never present a cache race/outage as permission to
+      // replay a provider write. The durable journal and normal sync recover it.
+      console.warn(`spam auto-move cache recovery pending for message ${messageId}:`, err.message);
     }
     imap.broadcast?.(
       { type: 'folder_updated', folder: spamFolder, accountId: row.account_id },

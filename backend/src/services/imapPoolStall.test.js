@@ -18,6 +18,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import net from 'node:net';
 
+vi.mock('./messageIdentity.js', () => import('./testSupport/identityTestAdapter.js'));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((p) => p) }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
@@ -248,7 +249,7 @@ describe('pooled command that never gets a reply', () => {
     const manager = Object.create(ImapManager.prototype);
     const result = await manager.appendToFolder(ACCOUNT, 'Sent', Buffer.from('Subject: hi\r\n\r\nhello\r\n'), ['\\Seen']);
 
-    expect(result).toEqual({ uid: 7, folder: 'Sent' });
+    expect(result).toEqual({ uid: 7, folder: 'Sent', identityContext: null });
     expect(fake.state.appended).toBe(1);
   });
 });

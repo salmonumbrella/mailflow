@@ -711,7 +711,7 @@ export async function deliverAndRecord(
         sentCopySaved = false;
         let appendTimer;
         try {
-          const { uid } = await Promise.race([
+          const { uid, identityContext } = await Promise.race([
             imapManager.appendToSent(account, sentFolder, rawMessage),
             new Promise((_, rej) => {
               appendTimer = setTimeout(() => rej(new Error('Sent APPEND timed out')), SENT_APPEND_TIMEOUT_MS);
@@ -719,7 +719,7 @@ export async function deliverAndRecord(
           ]).finally(() => clearTimeout(appendTimer));
           sentCopySaved = true;
           if (uid && sentMeta) {
-            await imapManager.upsertSentMessageRecord(account, sentFolder, uid, sentMeta)
+            await imapManager.upsertSentMessageRecord(account, sentFolder, uid, { ...sentMeta, identityContext })
               .catch(err => console.warn('Sent metadata upsert failed:', err.message));
           }
           setTimeout(() => {

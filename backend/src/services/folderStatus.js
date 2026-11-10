@@ -1,4 +1,5 @@
 import { query } from './db.js';
+import { withAccountIdentity } from './messageIdentity.js';
 import { extractImapError } from './imapError.js';
 
 export const STATUS_INTERVAL_MS = 60000;
@@ -40,7 +41,9 @@ export function folderNeedsSync(row, s, now = Date.now()) {
   return now - new Date(row.status_synced_at).getTime() >= 15 * 60000;
 }
 
-export async function observeFolder(client, accountId, path) {
+export async function observeFolder(client, accountId, path, storageGeneration = client.mailflowStorageGeneration) {
+  const identityAccount = { id: accountId, storage_generation: storageGeneration };
+  const identityQuery = (sql, params) => withAccountIdentity(identityAccount, tx => tx.query(sql, params));
   // Allocate before network I/O. A slower old request must never replace a newer sample.
   const { rows: [sample] } = await query("SELECT nextval('folder_status_revision')::text AS revision, clock_timestamp() AS started_at");
   let timer;
@@ -60,7 +63,7 @@ export async function observeFolder(client, accountId, path) {
       }, 10000); }),
     ]);
     if (!validFolderStatus(status)) throw new Error('Incomplete folder STATUS response');
-    const { rows } = await query(`
+    const { rows } = await identityQuery(`
       UPDATE folders SET server_total_count=$3, server_unread_count=$4,
         server_uid_next=$5, server_uid_validity=$6, server_highest_modseq=$7,
         server_counts_at=$8, server_count_revision=$9, status_attempt_revision=$9,
@@ -72,16 +75,16 @@ export async function observeFolder(client, accountId, path) {
     return rows.length ? status : null;
   } catch (err) {
     // Never turn an unavailable mailbox into an empty one or erase the last good sample.
-    await query(`UPDATE folders SET status_attempt_revision=$3, status_attempted_at=NOW(), status_error=$4
+    await identityQuery(`UPDATE folders SET status_attempt_revision=$3, status_attempted_at=NOW(), status_error=$4
       WHERE account_id=$1 AND path=$2 AND (status_attempt_revision IS NULL OR status_attempt_revision < $3)`,
     [accountId, path, sample.revision, String(err.message).slice(0, 300)]);
     throw err;
   } finally { clearTimeout(timer); }
 }
 
-export async function checkpointFolderStatus(accountId, path, status) {
+export async function checkpointFolderStatus(accountId, path, status, client = { query }) {
   // Only the completed ingestion/reconciliation callback calls this; STATUS itself never does.
-  await query(`UPDATE folders SET status_synced_uid_next=$3, status_synced_uid_validity=$4,
+  await client.query(`UPDATE folders SET status_synced_uid_next=$3, status_synced_uid_validity=$4,
     status_synced_modseq=$5, status_synced_at=NOW() WHERE account_id=$1 AND path=$2 AND uid_validity=$4`,
   [accountId, path, status.uidNext, String(status.uidValidity),
     status.highestModseq == null ? null : String(status.highestModseq)]);
@@ -159,7 +162,7 @@ export class FolderStatusMonitor {
       await this.withClient(account, async client => {
         for (const row of rows) {
           try {
-            const status = await observeFolder(client, account.id, row.path);
+            const status = await observeFolder(client, account.id, row.path, client.mailflowStorageGeneration ?? account.storage_generation);
             if (!status) continue;
             any = true;
             if (folderNeedsSync(row, status)) changed.push({ row, status });

@@ -2,9 +2,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import pg from 'pg';
 import express from 'express';
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
 const boundary = vi.hoisted(() => ({ manager: null, database: null, kv: new Map(), transactions: 0 }));
+vi.mock('../services/messageIdentity.js', () => import('../services/testSupport/identityTestAdapter.js'));
 vi.mock('../services/db.js', () => ({
   query: vi.fn(),
   pool: { query: (...args) => boundary.database.query(...args) },
@@ -46,6 +48,8 @@ vi.mock('../services/hostValidation.js', async importOriginal => ({ ...await imp
 
 import { ImapFlow } from 'imapflow';
 import { query } from '../services/db.js';
+import { readMailboxIdentity, assertMailboxIdentity, writeObservedMessage, prepareIdentityOperations,
+  prepareAppendIdentityOperation, completeIdentityOperations } from '../services/messageIdentity.js';
 import { createAccountSmtpTransport } from '../services/smtpTransport.js';
 import { ImapManager } from '../services/imapManager.js';
 import { setMailEngine } from '../plugins/mailEngine.js';
@@ -66,6 +70,7 @@ const missingRow = '99999999-9999-4999-8999-999999999999';
 describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through real routes and PostgreSQL', () => {
   let database, server, base, provider, account, sent, watch;
   let observerReads, observerSnapshots, events, observe, failInsert, databaseFailures, siblingInserted;
+  let identityOperations;
   const managers = [];
   const pendingSync = new Set();
 
@@ -100,6 +105,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through rea
       return { path, created: false };
     }
     async append(folder, raw, flags) {
+      expect(identityOperations.some(op => op.state === 'prepared' && op.operation_type === 'append'
+        && op.account_id === this.accountId && op.destination_folder === folder)).toBe(true);
       const source = Buffer.from(raw).toString();
       const header = name => source.match(new RegExp(`^${name}: ([^\\r\\n]+)`, 'mi'))?.[1];
       const uid = provider.nextUid++;
@@ -108,9 +115,12 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through rea
           inReplyTo: header('In-Reply-To'), date: new Date(),
           from: [{ address: 'owner@synthetic.test' }], to: [{ address: 'recipient@synthetic.test' }] } });
       provider.commands.push({ command: 'APPEND', accountId: this.accountId, folder, uid });
-      return provider.appendUid ? { uid } : {};
+      return provider.appendUid ? { uid, uidValidity: 1n } : {};
     }
     async messageCopy(uid, to, options) {
+      expect(identityOperations.some(op => op.state === 'prepared' && op.operation_type === 'copy'
+        && op.account_id === this.accountId && op.destination_folder === to
+        && op.source_locator.folder === this.folder && Number(op.source_locator.uid) === Number(uid))).toBe(true);
       if (options?.uid !== true || Object.keys(options).length !== 1) {
         provider.assertionFailures.push(`COPY must address UIDs: ${JSON.stringify(options)}`);
       }
@@ -122,7 +132,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through rea
       this.box(to).push({ ...source, uid: copiedUid, flags: new Set(source.flags), visible: !provider.delayCopy });
       provider.commands.push({ command: 'COPY', accountId: this.accountId, from: this.folder, to,
         uid: Number(uid), copiedUid, messageId: source.envelope.messageId });
-      return provider.copyUid ? { uidMap: new Map([[Number(uid), copiedUid]]) } : {};
+      return provider.copyUid ? { uidMap: new Map([[Number(uid), copiedUid]]), uidValidity: 1n } : {};
     }
     async *fetch(range, fields, options = {}) {
       const rows = this.box(this.folder).filter(row => row.visible);
@@ -215,7 +225,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through rea
         include_in_unified_inbox boolean DEFAULT true, name text, email_address text, color text,
         folder_mappings jsonb, sort_order int DEFAULT 0, created_at timestamptz DEFAULT now(),
         imap_host text, imap_port int, imap_tls boolean, auth_user text, auth_pass text,
-        smtp_host text, oauth_provider text, protocol text DEFAULT 'imap', last_sync timestamptz);
+        smtp_host text, oauth_provider text, protocol text DEFAULT 'imap', last_sync timestamptz,
+        storage_generation uuid NOT NULL DEFAULT gen_random_uuid());
       CREATE TEMP TABLE account_aliases (account_id uuid, email text);
       CREATE TEMP TABLE plugin_account_config (plugin_id text, account_id uuid, config jsonb);
       CREATE TEMP TABLE system_settings (key text, value text);
@@ -236,7 +247,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through rea
         spam_details jsonb, spam_user_override text, category text, list_unsubscribe text,
         list_unsubscribe_post text, unsubscribed_at timestamptz, delivery_addresses jsonb,
         sender_name text, sender_email text, forwarded_from_name text, forwarded_from_email text,
-        forwarded_via text, provider_msgid text, rfc822_size_bytes bigint, plugin_annotations jsonb DEFAULT '{"gtd":{"gist":"Synthetic waiting"}}',
+        forwarded_via text, provider_msgid text, rfc822_size_bytes bigint,
+        entity_id uuid, storage_generation uuid, uid_validity bigint, plugin_annotations jsonb DEFAULT '{"gtd":{"gist":"Synthetic waiting"}}',
         UNIQUE(account_id,uid,folder));
       CREATE TEMP TABLE address_books (id uuid DEFAULT gen_random_uuid(), user_id text, name text,
         updated_at timestamptz, sync_token text, UNIQUE(user_id,name));
@@ -264,7 +276,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through rea
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     sent = 'Sent'; watch = 'Watch';
     observerReads = []; observerSnapshots = []; events = []; observe = false; failInsert = false; databaseFailures = [];
-    boundary.kv.clear(); boundary.transactions = 0; siblingInserted = false;
+    boundary.kv.clear(); boundary.transactions = 0; siblingInserted = false; identityOperations = [];
     provider = { boxes: new Map(), commands: [], assertionFailures: [], attempts: 0, nextUid: 101,
       appendUid: true, copyUid: true, delayAppend: false, delayCopy: false, failCopy: false };
     ImapFlow.mockImplementation(function (config) { return new FakeImap(config); });
@@ -301,6 +313,60 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through rea
     createAccountSmtpTransport.mockImplementation(async acct => ({ account: acct, transport: {
       sendMail: async options => { provider.commands.push({ command: 'SEND', messageId: options.messageId }); return { accepted: options.to }; },
     } }));
+    // This fixture tests real mail SQL and provider ordering, not resolver transactions
+    // (covered by the full-schema identity suites). Its adapter must still model the
+    // exact proof contract: negotiated epoch, pre-write intent, UIDPLUS mapping, and a
+    // bound source. Neither Message-ID nor a guessed destination UID supplies proof.
+    readMailboxIdentity.mockImplementation(async (acct, folderPath) => {
+      const stored = (await database.query('SELECT storage_generation FROM email_accounts WHERE id=$1', [acct.id])).rows[0];
+      return { accountId: acct.id, storageGeneration: stored.storage_generation, folderPath, revision: '1', uidValidity: '1' };
+    });
+    assertMailboxIdentity.mockImplementation(async (context, client) => {
+      expect(client.mailbox.path).toBe(context.folderPath);
+      expect(String(client.mailbox.uidValidity)).toBe(context.uidValidity);
+      expect((await database.query('SELECT storage_generation FROM email_accounts WHERE id=$1', [context.accountId])).rows[0].storage_generation)
+        .toBe(context.storageGeneration);
+    });
+    writeObservedMessage.mockImplementation(async (context, message, write) => {
+      expect(context.uidValidity).toBe('1');
+      const result = await write({ query });
+      await database.query(`UPDATE messages SET entity_id=COALESCE(entity_id,gen_random_uuid()),
+        storage_generation=$4,uid_validity=$5 WHERE account_id=$1 AND folder=$2 AND uid=$3`,
+      [context.accountId, context.folderPath, message.uid, context.storageGeneration, context.uidValidity]);
+      return result;
+    });
+    prepareAppendIdentityOperation.mockImplementation(async snapshot => {
+      const op = { id: randomUUID(), state: 'prepared', operation_type: 'append',
+        account_id: snapshot.accountId, storage_generation: snapshot.storageGeneration,
+        destination_folder: snapshot.folderPath };
+      identityOperations.push(op); return op;
+    });
+    prepareIdentityOperations.mockImplementation(async (context, destination, uids, type) => {
+      const operations = [];
+      for (const uid of uids) {
+        const source = (await database.query(`SELECT entity_id,storage_generation,uid_validity FROM messages
+          WHERE account_id=$1 AND folder=$2 AND uid=$3`, [context.accountId, context.folderPath, uid])).rows[0];
+        const op = { id: randomUUID(), state: 'prepared', operation_type: type,
+          account_id: context.accountId, storage_generation: context.storageGeneration,
+          source_entity_id: source?.entity_id || null,
+          source_locator: { folder: context.folderPath, uid: String(uid), uidValidity: context.uidValidity },
+          destination_folder: destination };
+        identityOperations.push(op); operations.push(op);
+      }
+      return operations;
+    });
+    completeIdentityOperations.mockImplementation(async (operations, result, { outcome }) => operations.map(operation => {
+      const uid = operation.operation_type === 'append' ? result?.uid : result?.uidMap?.get(Number(operation.source_locator.uid));
+      if (outcome !== 'confirmed' || !uid || result?.uidValidity == null) {
+        operation.state = outcome === 'failed' ? 'failed' : outcome === 'unknown' ? 'outcome_unknown' : 'unresolved';
+        return operation;
+      }
+      operation.state = 'bound';
+      operation.destination_locator = { folder: operation.destination_folder, uid: String(uid), uidValidity: String(result.uidValidity) };
+      operation.destinationContext = { accountId: operation.account_id, storageGeneration: operation.storage_generation,
+        folderPath: operation.destination_folder, uidValidity: String(result.uidValidity), revision: '1', providerNamespace: null };
+      return operation;
+    }));
     newManager();
   });
   afterEach(async () => {
@@ -430,8 +496,11 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through rea
   });
 
   it('recovers a successful COPY with failed sibling persistence after manager restart without another COPY', async () => {
-    await send(); const [source] = await rows(sent); failInsert = true;
-    expect((await classify(source.id)).status).toBe(500); expect(await rows(watch)).toHaveLength(0);
+    await send(); const [source] = await rows(sent); failInsert = true; provider.delayCopy = true;
+    // The provider acknowledged COPY: a cache outage must not invite another provider write.
+    expect((await classify(source.id)).status).toBe(200);
+    await settleSync(); expect(await rows(watch)).toHaveLength(0);
+    reveal(watch);
     await boundary.manager.disconnectAccount(A); newManager();
     await sync(sent); await sync(watch);
     expect(await rows(watch)).toHaveLength(1);

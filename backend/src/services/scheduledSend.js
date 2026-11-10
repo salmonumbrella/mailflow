@@ -79,6 +79,9 @@ const RECOVERY_BUDGET_MS = CLAIM_CAP_MS - QUIESCE_MS - RECOVERY_MARGIN_MS;
 // folders never takes a send's slot.
 const MAX_RECOVERING = 5;
 
+const sameMailbox = (row, account) => !!row.storage_generation && row.storage_generation === account?.storage_generation;
+const mailboxChanged = { code: 'storage_generation_conflict', error: 'This message belongs to a previous or unverified mailbox. Review it and create a new message for the current mailbox.' };
+
 const ms = n => `${Math.round(n)} milliseconds`;
 // A column set to the database's clock plus a delay, for settle(). Every due time comes from
 // NOW(), as the claim compares it with NOW().
@@ -140,17 +143,18 @@ export function attachmentRows(id, version, attachments) {
 // `client` (inside the caller's transaction). `id` may be given (the caller built the payload
 // for it); otherwise one is made. The same clientKey again returns the row the first
 // call made and stores nothing. Limits are the caller's to check. Resolves { id, created }.
-export async function storeScheduledMessage(client, { id = randomUUID(), userId, accountId, clientKey, sendAt, timeZone = null, payload, summary, attachments = [] }) {
+// storageGeneration is the account read before preparation, never a refreshed insert-time value.
+export async function storeScheduledMessage(client, { id = randomUUID(), userId, accountId, storageGeneration, clientKey, sendAt, timeZone = null, payload, summary, attachments = [] }) {
   const row = { id, user_id: userId, version: 1 };
   const payloadJson = Buffer.from(JSON.stringify(payload), 'utf8');
   const { rows } = await client.query(
     `INSERT INTO scheduled_messages
-       (id, user_id, account_id, client_key, send_at, due_at, time_zone, summary_enc, payload_enc, payload_bytes, attachment_bytes)
-     VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10)
+       (id, user_id, account_id, client_key, send_at, due_at, time_zone, summary_enc, payload_enc, payload_bytes, attachment_bytes, storage_generation)
+     VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10, $11)
      ON CONFLICT (user_id, client_key) DO NOTHING RETURNING id`,
     [id, userId, accountId, clientKey, sendAt, timeZone, sealJson(summary, aad.summary(row)),
       encryptBytes(payloadJson, { purpose: PURPOSE, aad: aad.payload(row) }), payloadJson.length,
-      attachments.reduce((sum, a) => sum + a.content.length, 0)],
+      attachments.reduce((sum, a) => sum + a.content.length, 0), storageGeneration],
   );
   if (!rows.length) {
     const existing = await client.query('SELECT id FROM scheduled_messages WHERE user_id = $1 AND client_key = $2', [userId, clientKey]);
@@ -489,9 +493,10 @@ export class ScheduledSender {
         `WITH due AS (
            SELECT s.id FROM scheduled_messages s
             WHERE s.status = 'scheduled' AND s.due_at <= NOW()
+              AND EXISTS (SELECT 1 FROM email_accounts a WHERE a.id = s.account_id AND a.storage_generation = s.storage_generation)
               AND NOT EXISTS (SELECT 1 FROM scheduled_messages x WHERE x.account_id = s.account_id AND x.status = 'sending')
               AND NOT EXISTS (SELECT 1 FROM scheduled_messages e
-                               WHERE e.account_id = s.account_id AND e.status = 'scheduled'
+                               WHERE e.account_id = s.account_id AND e.status = 'scheduled' AND e.storage_generation = s.storage_generation
                                  AND (e.due_at, e.id) < (s.due_at, s.id))
             ORDER BY s.due_at, s.id
             LIMIT 1
@@ -540,12 +545,13 @@ export class ScheduledSender {
   }
 
   async send(row) {
+    const account = await findOwnedAccount(row.user_id, row.account_id, { client: this.db });
+    if (!account) return this.end(row, { outcome: 'failed', code: 'account_missing' });
+    if (!sameMailbox(row, account)) return this.end(row, { outcome: 'failed', code: mailboxChanged.code }, mailboxChanged);
     if (row.overdue) {
       return this.end(row, { outcome: 'paused', pauseReason: 'overdue', code: 'overdue' },
         { code: 'overdue', offline: row.lateReason === 'offline' });
     }
-    const account = await findOwnedAccount(row.user_id, row.account_id, { client: this.db });
-    if (!account) return this.end(row, { outcome: 'failed', code: 'account_missing' });
     if (!account.enabled) return this.end(row, { outcome: 'paused', pauseReason: 'account_disabled', code: 'account_disabled' });
 
     let built, delivery;
@@ -759,7 +765,9 @@ export class ScheduledSender {
       if (!row) continue;
       const action = recoveryAction(row);
       console.warn(`[scheduledSend] recovering message ${row.id}: ${action}`);
-      if (action === 'reschedule' && row.attempts >= MAX_ATTEMPTS) {
+      if (action === 'reschedule' && !sameMailbox(row, await findOwnedAccount(row.user_id, row.account_id, { client: this.db }))) {
+        await this.end(row, { outcome: 'failed', code: mailboxChanged.code }, mailboxChanged);
+      } else if (action === 'reschedule' && row.attempts >= MAX_ATTEMPTS) {
         // A message whose sends keep stopping their process is not claimed for ever.
         await this.end(row, { outcome: 'failed', code: 'gave_up', lastCode: 'interrupted' });
       } else if (action === 'reschedule') {
@@ -828,12 +836,14 @@ export class ScheduledSender {
     try {
       const account = await findOwnedAccount(row.user_id, row.account_id, { client: this.db });
       if (!account) throw new ScheduledSendError('account_missing');
+      if (!sameMailbox(row, account)) throw new ScheduledSendError(mailboxChanged.code);
       if (!account.enabled) throw new ScheduledSendError('account_disabled');
       const built = await this.build(row, account);
       result.messageId = built.payload.messageId;
       const found = await this.awaitSentFolder(row, account);
       // Stopping while it waits: left to the next process, which waits again.
       if (found.stopped) return false;
+      if (!sameMailbox(row, await findOwnedAccount(row.user_id, row.account_id, { client: this.db }))) throw new ScheduledSendError(mailboxChanged.code);
       const sentFolder = found.path;
       if (!sentFolder) throw new ScheduledSendError('no_sent_folder');
       result.sentFolder = sentFolder;
@@ -852,6 +862,7 @@ export class ScheduledSender {
           console.warn(`[scheduledSend] message ${row.id} lost its claim during recovery; its Sent copy is left to the new claimant`);
           return false;
         }
+        if (!sameMailbox(row, await findOwnedAccount(row.user_id, row.account_id, { client: this.db }))) throw new ScheduledSendError(mailboxChanged.code);
         // Exactly once, as for any send: APPEND is not idempotent, so it is not retried.
         await withTimeout(this.imap().appendToSent(account, sentFolder, raw), APPEND_TIMEOUT_MS, 'Sent APPEND timed out');
         result.sentCopySaved = true;
@@ -872,10 +883,12 @@ export class ScheduledSender {
     try {
       const payload = openJson(row.payload_enc, aad.payload(row));
       const account = await findOwnedAccount(row.user_id, row.account_id, { client: this.db });
+      if (account && !sameMailbox(row, account)) return this.end(row, { outcome: 'uncertain', code: mailboxChanged.code }, mailboxChanged);
       if (payload?.messageId && account?.enabled) {
         // A copy a lookup would find must not end uncertain because Sent was not known yet.
         const waited = await this.awaitSentFolder(row, account);
         if (waited.stopped) return false;
+        if (!sameMailbox(row, await findOwnedAccount(row.user_id, row.account_id, { client: this.db }))) return this.end(row, { outcome: 'uncertain', code: mailboxChanged.code }, mailboxChanged);
         const sentFolder = waited.path;
         if (sentFolder && await this.findInSent(account, sentFolder, payload.messageId)) {
           found = { sentFolder, messageId: payload.messageId };
@@ -900,6 +913,8 @@ export class ScheduledSender {
               due_at = CASE WHEN status_before IN ('paused', 'failed', 'uncertain') THEN due_at ELSE send_at END,
               edit_token = NULL, edit_lease_until = NULL, status_before = NULL, updated_at = NOW()
         WHERE status = 'editing' AND edit_lease_until < NOW()
+          AND EXISTS (SELECT 1 FROM email_accounts a WHERE a.id = scheduled_messages.account_id
+                      AND a.storage_generation = scheduled_messages.storage_generation)
         RETURNING id, user_id, version, status, pause_reason, summary_enc, send_at, time_zone`,
     );
     for (const row of rows) {

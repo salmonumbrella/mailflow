@@ -4,6 +4,7 @@ import { resolveAccountScope } from '../services/unifiedInbox.js';
 import { query } from '../services/db.js';
 import { findOwnedAccount, findOwnedMessage } from '../services/ownership.js';
 import { requireAuth } from '../middleware/auth.js';
+import { accountJobGenerationConflict } from '../services/accountJobGeneration.js';
 import { applyInboxRules, isDangerousRegex, RULE_CATEGORIES } from '../services/inboxRules.js';
 
 const router = Router();
@@ -299,13 +300,13 @@ router.post('/:id/run', async (req, res) => {
     // Recheck after awaits so concurrent starts cannot both acquire the run.
     if (runInFlight.has(userId)) return res.status(409).json({ error: 'Rules are already running' });
     runInFlight.add(userId);
-    const run = { runId: req.body?.runId || randomUUID(), ruleId: rule.id, accountIds, status: 'running', processed: 0, matched: 0, failed: 0, startedAt: new Date().toISOString(), cancelRequested: false };
+    const run = { runId: req.body?.runId || randomUUID(), ruleId: rule.id, accountIds, status: 'running', processed: 0, matched: 0, failed: 0, pendingCount: 0, identityPending: false, startedAt: new Date().toISOString(), cancelRequested: false };
     targetedRuns.set(userId, run);
     res.status(202).json({ ok: true, started: true, ...publicRun(run) });
     (async () => {
       try {
         const totals = await runRulesSweep(userId, accountIds, imapMgr, rule, run);
-        Object.assign(run, totals, { status: totals.cancelled ? 'cancelled' : totals.failed ? 'failed' : 'completed', finishedAt: new Date().toISOString() });
+        Object.assign(run, totals, { status: totals.cancelled ? 'cancelled' : totals.failed ? 'failed' : totals.identityPending ? 'pending_recovery' : 'completed', finishedAt: new Date().toISOString() });
         imapMgr.broadcast?.({ type: 'rules_run_complete', ok: run.status === 'completed', ...publicRun(run) }, userId);
       } catch (err) {
         console.error('Targeted rules sweep error:', err.message);
@@ -357,6 +358,7 @@ async function runRulesSweep(userId, accountIds, imapMgr, rule = null, run = nul
   let processed = 0;
   let matched = 0;
   let failed = 0;
+  let pendingCount = 0;
   let cancelled = false;
   const shouldContinue = async () => {
     if (run?.cancelRequested) { cancelled = true; return false; }
@@ -438,8 +440,9 @@ async function runRulesSweep(userId, accountIds, imapMgr, rule = null, run = nul
         processed += rule ? (result.processedCount ?? before) : before;
         matched += rule ? (result.matchedCount || 0) : before - result.remaining.length;
         failed += result.failedCount || 0;
+        pendingCount += result.pendingIds?.length ? new Set(result.pendingIds).size : (result.identityPending ? 1 : 0);
         cancelled ||= !!result.cancelled;
-        if (run) Object.assign(run, { processed, matched, failed });
+        if (run) Object.assign(run, { processed, matched, failed, pendingCount, identityPending: pendingCount > 0 });
 
         if (cancelled || msgResult.rows.length < BATCH) break;
       }
@@ -451,7 +454,8 @@ async function runRulesSweep(userId, accountIds, imapMgr, rule = null, run = nul
   }
 
   cancelled ||= !!run?.cancelRequested;
-  return { processed, matched, ...(rule ? { failed, cancelled } : {}) };
+  return { processed, matched, ...(rule ? { failed, cancelled, pendingCount, identityPending: pendingCount > 0 } : {}),
+    ...(!rule && pendingCount ? { pendingCount, identityPending: true } : {}) };
 }
 
 router.post('/', async (req, res) => {
@@ -474,9 +478,11 @@ router.post('/', async (req, res) => {
         return res.status(400).json({ error: 'Choose one displayed account for this filter.' });
       }
     }
+    let storageGeneration = null;
     if (accountId) {
-      const owned = await findOwnedAccount(req.session.userId, accountId, { columns: 'id' });
+      const owned = await findOwnedAccount(req.session.userId, accountId, { columns: 'id, storage_generation' });
       if (!owned) return res.status(403).json({ error: 'Account not found' });
+      storageGeneration = owned.storage_generation;
     }
     // Strip move actions for all-account rules — a move needs a known account to
     // resolve folder paths. The UI enforces this but a direct API call could bypass it.
@@ -499,8 +505,8 @@ router.post('/', async (req, res) => {
     const priority = parseInt(countResult.rows[0].cnt);
     const result = await query(
       `INSERT INTO inbox_rules
-         (user_id, account_id, name, enabled, stop_processing, priority, condition_logic, conditions, actions)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (user_id, account_id, name, enabled, stop_processing, priority, condition_logic, conditions, actions, storage_generation)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         req.session.userId,
@@ -512,10 +518,13 @@ router.post('/', async (req, res) => {
         conditionLogic === 'OR' ? 'OR' : 'AND',
         JSON.stringify(conditions),
         JSON.stringify(normalizedActions),
+        storageGeneration,
       ]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    const conflict = accountJobGenerationConflict(err, 'rule');
+    if (conflict) return res.status(409).json(conflict);
     console.error('POST /rules error:', err.message);
     res.status(500).json({ error: 'Failed to create rule' });
   }
@@ -534,9 +543,11 @@ router.put('/:id', async (req, res) => {
   normalizedActions = normalizedActions
     .filter(a => accountId || a.type !== 'move');
   try {
+    let storageGeneration = null;
     if (accountId) {
-      const owned = await findOwnedAccount(req.session.userId, accountId, { columns: 'id' });
+      const owned = await findOwnedAccount(req.session.userId, accountId, { columns: 'id, storage_generation' });
       if (!owned) return res.status(403).json({ error: 'Account not found' });
+      storageGeneration = owned.storage_generation;
     }
     const moveAction = normalizedActions.find(a => a.type === 'move' && a.value?.trim());
     if (moveAction && accountId) {
@@ -550,10 +561,12 @@ router.put('/:id', async (req, res) => {
         return res.status(400).json({ error: 'Move destination folder not found for this account' });
       }
     }
+    // Same-account edits, including re-enabling, must retain the original mailbox provenance.
     const result = await query(
       `UPDATE inbox_rules
        SET name = $1, account_id = $2, enabled = $3, stop_processing = $4,
-           condition_logic = $5, conditions = $6, actions = $7, updated_at = NOW()
+           condition_logic = $5, conditions = $6, actions = $7, updated_at = NOW(),
+           storage_generation = CASE WHEN account_id IS NOT DISTINCT FROM $2::uuid THEN storage_generation ELSE $10::uuid END
        WHERE id = $8 AND user_id = $9
        RETURNING *`,
       [
@@ -566,12 +579,15 @@ router.put('/:id', async (req, res) => {
         JSON.stringify(normalizedActions),
         req.params.id,
         req.session.userId,
+        storageGeneration,
       ]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Rule not found' });
     cancelActiveRuleRun(req.session.userId, req.params.id);
     res.json(result.rows[0]);
   } catch (err) {
+    const conflict = accountJobGenerationConflict(err, 'rule');
+    if (conflict) return res.status(409).json(conflict);
     console.error('PUT /rules/:id error:', err.message);
     res.status(500).json({ error: 'Failed to update rule' });
   }

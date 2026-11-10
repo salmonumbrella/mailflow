@@ -4,7 +4,7 @@ import { getGtdSections } from './gtdSections.js';
 import { queueGistGeneration } from './gtdGist.js';
 import { importPet, decodeUploadedSheet, getPetMeta, getPetSheet, parsePetSlug, customPetSlug } from './gtdPet.js';
 import { getGtdConfig, resolveGtdStateFolder, sanitizeGtdFolders, sanitizeGtdFoldersDetailed, DEFAULT_GTD_FOLDERS, planGtdFolderPersist, invalidateGtdConfigCache } from './gtdConfig.js';
-import { applyLabel, hasMessageCopy, resolveLabelCopyUid, removeExactLabelCopy, removeLabel, markThreadRead, markCopySeen, isLabelStoreAccount, supportsUidPlus, ensureLabelFolders, archiveInboxCopy, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getLabelMetadata, getMessagesByThreadKeys, getAccountConfig, setAccountConfig, resolveAllDraftsPaths, resolveAllTrashPaths, resolveAllSpamPaths } from '../api.js';
+import { applyLabel, hasMessageCopy, resolveLabelCopyUid, resolveLabelCopy, removeExactLabelCopy, removeLabel, markThreadRead, markCopySeen, isLabelStoreAccount, supportsUidPlus, ensureLabelFolders, archiveInboxCopy, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getLabelMetadata, getMessagesByThreadKeys, getAccountConfig, setAccountConfig, resolveAllDraftsPaths, resolveAllTrashPaths, resolveAllSpamPaths } from '../api.js';
 
 // removeMessageCopy refused a label row whose uid holds another message on the server (#665).
 const LABEL_CHANGED = 'This label changed on the server and was not removed. Refresh and try again.';
@@ -236,8 +236,8 @@ router.post('/classify', async (req, res) => {
       present.add(msg.folder);
       for (const folder of oldStateFolders) {
         if (!present.has(folder)) continue;
-        const uid = await resolveLabelCopyUid(msg, folder);
-        if (uid != null) oldCopies.push({ message: { ...msg, uid, folder }, folder });
+        const copy = await resolveLabelCopy(msg, folder);
+        if (copy) oldCopies.push({ message: copy, folder });
       }
     }
 
@@ -619,7 +619,8 @@ router.post('/done', async (req, res) => {
   // and archives the other messages. The inbox checkmark acts on one message: in the flat list
   // its thread-mates are rows of their own, which the user may not have seen.
   const threadCopies = enabled && !allStates && msg.thread_key
-    ? await getMessagesByThreadKeys(msg.account_id, [msg.thread_key])
+    ? (await getMessagesByThreadKeys(msg.account_id, [msg.thread_key]))
+      .filter(copy => copy.storage_generation === msg.storage_generation)
     : [];
   const copyFolders = enabled ? await getMessageCopyFolders(msg.account_id, msg.message_id) : [];
   let existing;
@@ -630,6 +631,9 @@ router.post('/done', async (req, res) => {
   if (target.error) return res.status(target.status).json({ error: target.error });
 
   const account = await getOwnedAccount(req.session.userId, msg.account_id);
+  if (!account || account.storage_generation !== msg.storage_generation) {
+    return res.status(409).json({ error: 'This mailbox changed. Refresh before marking done.', changed: true });
+  }
 
   // (a) Strip the thread's GTD label copies: the acted message's, resolved from its Message-ID,
   // and every other message's copy in those folders (clearOtherThreadCopy).
@@ -680,6 +684,9 @@ router.post('/done', async (req, res) => {
     const result = await markThreadRead(account, msg, { excludeFolders: stripOrder });
     inboxCopy = result.inboxCopy;
     pushedIds = result.pushedIds || [];
+    if (/^(identity_|storage_generation_)/.test(result.error?.code || '')) {
+      return res.status(409).json({ error: 'This message changed. Refresh before marking done.', changed: true });
+    }
     if (result.error) console.warn(`GTD done: mark-read for ${id} degraded:`, result.error.message);
   } catch (err) {
     console.error(`GTD done: INBOX lookup for ${id} failed:`, err.message);

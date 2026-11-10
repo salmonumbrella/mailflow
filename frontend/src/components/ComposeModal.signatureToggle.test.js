@@ -190,3 +190,155 @@ for (const plain of [true, false]) test(`the toggle is reachable on a phone (${p
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
   }
 });
+
+
+const { api } = await import('../utils/api.js');
+const LIB_ACCOUNT = '11111111-1111-4111-8111-111111111111';
+const LIB_OTHER = '22222222-2222-4222-8222-222222222222';
+const LIB_ALIAS = '33333333-3333-4333-8333-333333333333';
+const SIG_NEW = '44444444-4444-4444-8444-444444444444';
+const SIG_REPLY = '55555555-5555-4555-8555-555555555555';
+const literal = 'Me <me@example.test>\nA & B <b>literal</b>';
+const libraryData = () => ({ accountId: LIB_ACCOUNT, revision: '1', signatures: [
+  { id: SIG_NEW, name: 'Business', content: '<b>New signature</b>', isPlainText: false },
+  { id: SIG_REPLY, name: 'Personal', content: literal, isPlainText: true },
+], defaults: [{ senderKey: 'main', newSignatureId: SIG_NEW, replySignatureId: SIG_REPLY }, { senderKey: LIB_ALIAS, newSignatureId: null, replySignatureId: null }] });
+async function mountLibrary(data = {}, { plain = true, load = async () => libraryData() } = {}) {
+  requests.length = 0; api.getSignatureLibrary = load;
+  useStore.setState({ accounts: [{ id: LIB_ACCOUNT, email_address: 'library@example.test', signature: '<p>Stale legacy signature</p>', signature_enabled: true,
+    aliases: [{ id: LIB_ALIAS, email: 'alias@example.test', name: 'Alias', signature: null }] },
+    { id: LIB_OTHER, email_address: 'other@example.test', signature: '', aliases: [] }], plaintextEmail: plain, composing: true, prepareComposeSwitch: null,
+    composeData: { accountId: LIB_ACCOUNT, to: ['to@example.test'], subject: 's', body: 'Typed body <literal>', ...data } });
+  const root = createRoot(document.getElementById('root'));
+  await React.act(async () => root.render(React.createElement(ComposeModal)));
+  return root;
+}
+const librarySelect = () => document.querySelector('[aria-label="signatureLibrary.insert"]');
+const selectValue = (el, value) => React.act(async () => {
+  Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set.call(el, value);
+  el.dispatchEvent(new window.Event('change', { bubbles: true }));
+});
+const sigText = () => [...document.querySelectorAll('textarea')].map(el => el.value).find(value => value.includes('signature') || value.includes('me@example.test'));
+
+test('named defaults distinguish new messages, replies and forwards and preserve literal signature text', async () => {
+  for (const data of [{}, { isReply: true }, { isForward: true }]) {
+    const root = await mountLibrary(data);
+    try {
+      const expected = data.isReply || data.isForward ? literal : 'New signature';
+      assert.equal(sigText(), expected);
+      assert.equal(librarySelect().value, data.isReply || data.isForward ? SIG_REPLY : SIG_NEW);
+      const [payload] = await send();
+      assert.equal(payload.editedSignature, expected);
+      assert.equal(payload.body, 'Typed body <literal>');
+      assert.equal(payload.plaintextEmail, true);
+    } finally { await unmount(root); }
+  }
+});
+
+test('library selection never changes typed body and confirms replacing per-message signature edits', async () => {
+  const root = await mountLibrary();
+  try {
+    const signature = [...document.querySelectorAll('textarea')].find(el => el.value === 'New signature');
+    await setText(signature, 'Edited signature');
+    let prompts = 0; window.confirm = () => { prompts++; return false; };
+    await selectValue(librarySelect(), SIG_REPLY);
+    assert.equal(sigText(), 'Edited signature'); assert.equal(prompts, 1);
+    window.confirm = () => true; await selectValue(librarySelect(), SIG_REPLY);
+    assert.equal(sigText(), literal);
+    const [payload] = await send(); assert.equal(payload.editedSignature, literal); assert.equal(payload.body, 'Typed body <literal>');
+  } finally { await unmount(root); }
+});
+
+test('library refresh/delete does not mutate a composer snapshot or restored literal signature', async () => {
+  const root = await mountLibrary({ signature: literal, signatureIsPlainText: true });
+  try {
+    assert.equal(sigText(), literal);
+    api.getSignatureLibrary = async () => ({ ...libraryData(), revision: '2', signatures: [], defaults: libraryData().defaults.map(d => ({ ...d,newSignatureId:null,replySignatureId:null })) });
+    await React.act(async () => window.dispatchEvent(new window.CustomEvent('mailflow:signatures-changed', { detail: { accountId: LIB_ACCOUNT } })));
+    assert.equal(sigText(), literal);
+    const [payload] = await send(); assert.equal(payload.editedSignature, literal);
+  } finally { await unmount(root); }
+});
+
+test('alias No signature overrides inherited legacy signature and account choices stay isolated', async () => {
+  const root = await mountLibrary({ aliasId: LIB_ALIAS });
+  try {
+    assert.equal(librarySelect().value, '');
+    const [payload] = await send(); assert.equal(payload.editedSignature, ''); assert.equal(payload.aliasId, LIB_ALIAS);
+  } finally { await unmount(root); }
+});
+
+test('late library load preserves an already edited signature and failure blocks default-dependent send', async () => {
+  let resolve;
+  const root = await mountLibrary({}, { load: () => new Promise(r => { resolve = r; }) });
+  try {
+    assert.equal((await send()).length, 0, 'do not send a stale fallback while defaults are loading');
+    const signature = [...document.querySelectorAll('textarea')].find(el => el.value === 'Stale legacy signature');
+    await setText(signature, 'Edited signature');
+    await React.act(async () => resolve(libraryData()));
+    assert.equal(sigText(), 'Edited signature');
+    const [payload] = await send(); assert.equal(payload.editedSignature, 'Edited signature');
+  } finally { await unmount(root); }
+});
+
+test('rich composer inserts a literal library signature as escaped text and draft snapshots preserve it', async () => {
+  const root = await mountLibrary({ body: '<p>Typed rich body</p>', bodyIsHtml: true }, { plain: false });
+  try {
+    await selectValue(librarySelect(), SIG_REPLY);
+    const edited = [...document.querySelectorAll('[contenteditable]')].find(el => el.textContent.includes('me@example.test'));
+    assert.ok(edited); assert.equal(edited.querySelector('b'), null); assert.ok(edited.innerHTML.includes('&lt;b&gt;literal&lt;/b&gt;'));
+    const payloads = await save(); assert.ok(payloads.length); assert.ok(payloads.at(-1).editedSignature.includes('&lt;me@example.test&gt;'));
+    assert.equal(payloads.at(-1).body, '<p>Typed rich body</p>');
+  } finally { await unmount(root); }
+});
+
+
+test('a stale account response cannot cross sender boundaries and library errors can be retried', async () => {
+  let oldResolve;
+  const other = { accountId: LIB_OTHER, revision: '1', signatures: [{ id: SIG_REPLY, name: 'Other account', content: 'Other signature', isPlainText: true }], defaults: [{ senderKey: 'main', newSignatureId: SIG_REPLY, replySignatureId: SIG_REPLY }] };
+  const root = await mountLibrary({}, { load: id => id === LIB_ACCOUNT ? new Promise(r => { oldResolve = r; }) : Promise.resolve(other) });
+  try {
+    await selectValue(document.querySelector('select'), `account:${LIB_OTHER}`);
+    assert.equal(sigText(), 'Other signature');
+    await React.act(async () => oldResolve(libraryData()));
+    assert.equal(sigText(), 'Other signature');
+    assert.equal(librarySelect().textContent.includes('Business'), false);
+    const [payload] = await send(); assert.equal(payload.accountId, LIB_OTHER); assert.equal(payload.editedSignature, 'Other signature');
+  } finally { await unmount(root); }
+  const failed = await mountLibrary({}, { load: async () => { throw new Error('Library unavailable'); } });
+  try {
+    assert.equal((await send()).length, 0);
+    assert.ok([...document.querySelectorAll('button')].some(b => b.textContent === 'signatureLibrary.retry'));
+    api.getSignatureLibrary = async () => libraryData();
+    await click([...document.querySelectorAll('button')].find(b => b.textContent === 'signatureLibrary.retry'));
+    assert.equal(sigText(), 'New signature');
+  } finally { await unmount(failed); }
+});
+
+for (const plain of [true, false]) test(`named signature selection is available on mobile (${plain ? 'plain' : 'rich'})`, async () => {
+  const width = window.innerWidth; Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+  const root = await mountLibrary({}, { plain });
+  try { assert.ok(librarySelect()); await selectValue(librarySelect(), ''); assert.equal(toggle(), null); }
+  finally { await unmount(root); Object.defineProperty(window, 'innerWidth', { configurable: true, value: width }); }
+});
+
+
+test('returning to a sender while another library request is pending reapplies that sender’s library default', async () => {
+  let otherResolve;
+  const root = await mountLibrary({}, { load: id => id === LIB_ACCOUNT ? Promise.resolve(libraryData()) : new Promise(r => { otherResolve = r; }) });
+  try {
+    assert.equal(sigText(), 'New signature');
+    await selectValue(document.querySelector('select'), `account:${LIB_OTHER}`);
+    await selectValue(document.querySelector('select'), `account:${LIB_ACCOUNT}`);
+    assert.equal(sigText(), 'New signature');
+    await React.act(async () => otherResolve({ accountId: LIB_OTHER, revision: '1', signatures: [], defaults: [] }));
+    assert.equal(sigText(), 'New signature');
+  } finally { await unmount(root); }
+});
+
+test('explicit literal draft signatures retain repeated and trailing newlines exactly', async () => {
+  const exact = 'Literal signature\n\n\nEnd\n';
+  const root = await mountLibrary({ signature: exact, signatureIsPlainText: true });
+  try { assert.equal(sigText(), exact); const [payload] = await send(); assert.equal(payload.editedSignature, exact); }
+  finally { await unmount(root); }
+});

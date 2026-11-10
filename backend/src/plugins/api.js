@@ -43,6 +43,7 @@ export const markThreadRead = (account, message, options) => labelsWrite.markThr
 export const markCopySeen = (account, message) => labelsWrite.markCopySeen(getMailEngine(), account, message);
 export const ensureLabelFolders = (account, folderPaths) => labelsWrite.ensureLabelFolders(getMailEngine(), account, folderPaths);
 export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
+export const resolveLabelCopy = labelsWrite.resolveLabelCopy;
 
 // ── Archive ───────────────────────────────────────────────────────────────────
 // Archive a message's INBOX copy (used by GTD "done"). Engine bound by the platform.

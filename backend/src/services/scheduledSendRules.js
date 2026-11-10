@@ -148,6 +148,7 @@ const FAILED_TEXT = {
   alias_missing: 'The address it was to be sent from no longer exists.',
   decrypt_failed: 'It could not be decrypted on this server.',
   account_missing: 'Its account no longer exists.',
+  storage_generation_conflict: 'Its mailbox changed or could not be verified. Review it and create a new message for the current mailbox.',
   gave_up: 'The mail server kept failing, so MailFlow stopped trying.',
   smtp_auth_disabled: 'Microsoft has turned off sending from mail apps (SMTP) for this account. You can still send from Outlook on the web. For a work or school account, your admin can turn it back on.',
 };

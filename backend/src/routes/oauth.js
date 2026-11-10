@@ -4,6 +4,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { query, withTransaction } from '../services/db.js';
 import { findOwnedAccount } from '../services/ownership.js';
 import { imapManager } from '../index.js';
+import { normalizeStorageHost } from '../services/accountStorageIdentity.js';
 import { providerProfile, PROVIDERS } from '../services/imapManager.js';
 import { encrypt, decrypt } from '../services/encryption.js';
 import { redactEmail } from '../utils/redact.js';
@@ -667,6 +668,7 @@ router.get('/google/callback', async (req, res) => {
   } catch (err) {
     if (err instanceof WrongAccountError) return res.redirect(wrongAccountRedirect(req, err));
     console.error('Google OAuth callback error:', err);
+    if (err.code === 'storage_identity_decision_required') return res.redirect(`/?oauth_error=${encodeURIComponent(err.message)}`);
     res.redirect('/?oauth_error=Authentication+failed');
   }
 });
@@ -712,8 +714,8 @@ async function processGoogleTokens(userId, tokens, { clientId, repairAccountId =
 
     // Same repair rule as Microsoft: update the named account, and only for its own address.
     const existing = repairAccountId
-      ? await findOwnedAccount(userId, repairAccountId, { columns: 'id, email_address', client })
-      : (await client.query('SELECT id FROM email_accounts WHERE user_id = $1 AND email_address = $2', [userId, email])).rows[0];
+      ? await findOwnedAccount(userId, repairAccountId, { columns: 'id, email_address, oauth_provider, imap_host, imap_port, auth_user', client, forUpdate: true })
+      : (await client.query('SELECT id, email_address, oauth_provider, imap_host, imap_port, auth_user FROM email_accounts WHERE user_id = $1 AND email_address = $2 FOR UPDATE', [userId, email])).rows[0];
     if (repairAccountId) {
       if (!existing) throw new Error('Account not found');
       if (existing.email_address.trim().toLowerCase() !== email.trim().toLowerCase()) {
@@ -723,6 +725,14 @@ async function processGoogleTokens(userId, tokens, { clientId, repairAccountId =
 
     let accountId;
     if (existing) {
+      // A matching email is not proof that a different provider/login is this mailbox.
+      // Credential repair may retain a Gmail mailbox, never silently repurpose one.
+      const gmailHost = ['imap.gmail.com', 'imap.googlemail.com'].includes(normalizeStorageHost(existing.imap_host));
+      const mailbox = String(existing.auth_user || existing.email_address || '').trim().toLowerCase();
+      if ((existing.oauth_provider && existing.oauth_provider !== 'google') || !gmailHost
+        || Number(existing.imap_port) !== 993 || mailbox !== email.trim().toLowerCase()) {
+        throw Object.assign(new Error('This account uses a different mailbox or non-Google mail server. Review its mailbox identity in account settings before signing in with Google.'), { code: 'storage_identity_decision_required' });
+      }
       accountId = existing.id;
       await client.query(`
         UPDATE email_accounts SET

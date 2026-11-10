@@ -28,14 +28,14 @@ export const UNFETCHABLE_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  * whatever the server omitted, so a UID that fails repeatedly climbs toward the threshold
  * while one that succeeds next time is cleared by clearUnfetchable.
  */
-export async function recordUnfetchable(accountId, folder, uids, uidValidity) {
+export async function recordUnfetchable(accountId, folder, uids, uidValidity, client = { query }) {
   if (!uids?.length) return;
   // A record with no epoch cannot be scoped, and an unscoped record suppresses a UID under
   // every future generation: after a renumbering that UID number belongs to a different
   // message, which we would then silently never fetch. Better to forget the ghost than to
   // risk skipping real mail, so if the server did not tell us the UIDVALIDITY, record nothing.
   if (uidValidity == null) return;
-  await query(
+  await client.query(
     `INSERT INTO unfetchable_uids (account_id, folder, uid, uid_validity)
      SELECT $1, $2, unnest($3::bigint[]), $4
      ON CONFLICT (account_id, folder, uid) DO UPDATE
@@ -72,9 +72,9 @@ export async function suppressedUids(accountId, folder, uidValidity) {
 }
 
 /** A UID that finally arrived is not unfetchable. Clears any record so the count restarts. */
-export async function clearUnfetchable(accountId, folder, uids) {
+export async function clearUnfetchable(accountId, folder, uids, client = { query }) {
   if (!uids?.length) return;
-  await query(
+  await client.query(
     'DELETE FROM unfetchable_uids WHERE account_id = $1 AND folder = $2 AND uid = ANY($3::bigint[])',
     [accountId, folder, uids.map(String)]
   );

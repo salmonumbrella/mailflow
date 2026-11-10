@@ -16,6 +16,7 @@ import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('./messageIdentity.js', async () => await import('./testSupport/identityTestAdapter.js'));
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((p) => p) }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
@@ -113,6 +114,7 @@ function managerFor({ uids, exists, condstore, storedModseq, localUids }) {
   const client = {
     mailbox: { exists, uidValidity: 8n, highestModseq: 999n },
     capabilities: condstore ? new Map([['CONDSTORE', true]]) : new Map(),
+    noop: vi.fn().mockResolvedValue(true),
     getMailboxLock: async () => lock,
     search: async () => uids,
     fetch: async function* () { /* changedsince: nothing changed */ },
@@ -190,7 +192,8 @@ describe('the flag watermark', () => {
     mgr._withCountClient = async (_a, fn) => fn({
       mailbox: { exists: 3, uidValidity: 8n, highestModseq: 999n },
       capabilities: new Map(),
-      getMailboxLock: async () => ({ release: vi.fn() }),
+      noop: vi.fn().mockResolvedValue(true),
+    getMailboxLock: async () => ({ release: vi.fn() }),
       search: async () => uids,
       // Hangs forever; the unreachable yield is only to satisfy require-yield.
       fetch: async function* () { await new Promise(() => {}); yield null; },
@@ -229,7 +232,8 @@ describe('the delta flag fetch', () => {
       _withCountClient: async (_a, fn) => fn({
         mailbox,
         capabilities: new Map([['CONDSTORE', true]]),
-        getMailboxLock: async () => ({ release: vi.fn() }),
+        noop: vi.fn().mockResolvedValue(true),
+    getMailboxLock: async () => ({ release: vi.fn() }),
         search: async () => Array.from({ length: Math.max(1, mailbox.exists) }, (_, i) => i + 1),
         fetch: (range, fields, opts) => {
           calls.push({ range, opts });
@@ -343,7 +347,8 @@ describe('repairing read state from the server', () => {
     const client = {
       mailbox: { exists: rows.length, uidValidity: 8n, highestModseq: 999n, uidNext: 100 },
       capabilities: new Map([['CONDSTORE', true]]),
-      getMailboxLock: async () => ({ release: vi.fn() }),
+      noop: vi.fn().mockResolvedValue(true),
+    getMailboxLock: async () => ({ release: vi.fn() }),
       search: async (criteria) => {
         searches.push(criteria);
         return criteria.seen === false ? unseenOnServer : rows.map(r => r.uid);
