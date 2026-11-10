@@ -43,6 +43,10 @@ import {
 } from '../utils/scheduledCompose.js';
 import { normalizeComposeLink } from '../utils/composeLink.js';
 import { splitRecipientTokens, mergeRecipientTokens } from '../utils/recipientTokens.js';
+import { composerHtmlToText, composerTextToHtml } from '../utils/composerBodyMode.js';
+import { ParagraphIndent, indentEditor, removeEditorFormatting } from '../utils/editorIndent.js';
+import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/printMessage.js';
+import GmailComposeMore from './GmailComposeMore.jsx';
 import GmailContactPicker from './GmailContactPicker.jsx';
 import { ComposeQuestion, ScheduledStrip, SendLaterIcon, SendLaterMenu, SendLaterSheet } from './SendLater.jsx';
 
@@ -214,7 +218,10 @@ function resolveFrom(val) {
 
 export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const { t, i18n } = useTranslation();
-  const { closeCompose, composeData, accounts, addNotification, plaintextEmail, setThreadMessages, setPrepareComposeSwitch, updateComposePersistedKey } = useStore();
+  const { closeCompose, composeData, accounts, addNotification, plaintextEmail: defaultPlaintextEmail, composeDefaultFullscreen, setComposeDefaultFullscreen, setThreadMessages, setPrepareComposeSwitch, updateComposePersistedKey } = useStore();
+  const [plaintextEmail, setPlaintextEmail] = useState(() => typeof composeData?.plaintextEmail === 'boolean' ? composeData.plaintextEmail : typeof composeData?.bodyIsHtml === 'boolean' ? !composeData.bodyIsHtml : defaultPlaintextEmail);
+  const [spellcheck, setSpellcheck] = useState(true);
+  const richModeSnapshotRef = useRef(null);
   const composeSession = useRef(useStore.getState().composeSession).current;
   const composeOwner = useRef(useStore.getState().user?.id).current;
   const isMobile = useMobile();
@@ -272,7 +279,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const [bccChips, setBccChips] = useState(autoInit.bcc);
   const [bccInput, setBccInput] = useState('');
   const [subject, setSubject] = useState(() => composeData?.subject || '');
-  const [body, setBody] = useState(() => composeData?.body || '');
+  const [body, setBody] = useState(() => plaintextEmail && composeData?.bodyIsHtml ? composerHtmlToText(composeData.body) : composeData?.body || '');
   const [quotedBody, setQuotedBody] = useState(() => composeData?.quotedBody || '');
   const [quotedBodyHtml] = useState(() => composeData?.quotedBodyHtml || null);
   const [showDiscardSheet, setShowDiscardSheet] = useState(false);
@@ -348,7 +355,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     if (autoInit.cc.length) { setCcChips(autoInit.cc); setShowCc(true); }
     if (autoInit.bcc.length) { setBccChips(autoInit.bcc); setShowBcc(true); }
     if (composeData?.subject) setSubject(composeData.subject);
-    if (composeData?.body !== undefined) setBody(composeData.body);
+    if (composeData?.body !== undefined) setBody(plaintextEmail && composeData.bodyIsHtml ? composerHtmlToText(composeData.body) : composeData.body);
     if (composeData?.quotedBody !== undefined) setQuotedBody(composeData.quotedBody);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps -- form initialisation runs once on mount; re-running on composeData changes would reset user edits
 
@@ -374,7 +381,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const [error, setError] = useState(() => composeData?.sendError || (composeData?.unsupportedFrom ? t('compose.unsupportedDraftFrom', { defaultValue: 'Choose a configured sender before saving or sending this draft.' }) : ''));
   const [priority, setPriority] = useState(() => composeData?.priority || 'normal');
   const [minimized, setMinimized] = useState(false);
-  const [maximized, setMaximized] = useState(false);
+  const [maximized, setMaximized] = useState(() => gmailLayout && !isReply && !isMobile && !!composeDefaultFullscreen);
   const [pos, setPos] = useState(null);
   const [inlineDetached, setInlineDetached] = useState(false);
   const inlineReply = Boolean(gmailLayout && !isMobile && !inlineDetached && !maximized && !pos
@@ -421,6 +428,12 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const imageInputRef = useRef(null);
   const signatureRef = useRef(null);
   const quotedHtmlRef = useRef(null);
+  const quotedHtmlSnapshotRef = useRef(quotedBodyHtml);
+  const attachQuotedEditor = useCallback(node => {
+    if (quotedHtmlRef.current) quotedHtmlSnapshotRef.current = quotedHtmlRef.current.innerHTML;
+    quotedHtmlRef.current = node;
+    if (node) node.innerHTML = sanitizeEmailForApp(quotedHtmlSnapshotRef.current || '', { FORBID_TAGS: ['style'] });
+  }, []);
   const composeWindowRef = useRef(null);
   const posRef = useRef(null);
   const customSizeRef = useRef(null);
@@ -430,7 +443,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
 
   // A reopened draft saved without a signature ('') starts with the signature turned off, but the
   // From signature is kept ready, so turning it on shows it.
-  const [plainSig, setPlainSig] = useState(() => stripHtml(composeData?.signature || fromSignature || ''));
+  const [plainSig, setPlainSig] = useState(() => composerHtmlToText(composeData?.signature || fromSignature || ''));
   // Tracks the user's current (possibly edited) rich-text signature; kept current by onInput.
   const signatureContentRef = useRef(DOMPurify.sanitize(composeData?.signature || fromSignature || ''));
   const [hasRichSignature, setHasRichSignature] = useState(() => Boolean(signatureContentRef.current));
@@ -488,6 +501,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       BackgroundColor,
       FontSize,
       PasteWithoutPageColors,
+      ParagraphIndent,
       TextAlign.configure({ types: ['heading', 'paragraph'] }),
       ResizableImage.configure({ inline: true, allowBase64: true }),
       Table.configure({ resizable: false }),
@@ -496,7 +510,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       TableCell,
       Placeholder.configure({ placeholder: t('compose.bodyPh') }),
     ],
-    content: composeData?.body || '',
+    content: composeData?.bodyIsHtml === false ? composerTextToHtml(composeData?.body || '') : composeData?.body || '',
     // TipTap rewrites the HTML it loads, so a draft saved by another client never equals its
     // own source. Baseline on what the editor holds, or merely opening a draft counts as an
     // edit and autosave replaces it, expunging the original along with its attachments.
@@ -786,7 +800,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       if (signatureRef.current) signatureRef.current.innerHTML = draftSig;
       signatureContentRef.current = draftSig;
       setHasRichSignature(Boolean(draftSig));
-      setPlainSig(stripHtml(draftSig));
+      setPlainSig(composerHtmlToText(draftSig));
       return;
     }
     if (!signatureInitializedRef.current && fromSignature != null) {
@@ -795,7 +809,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       if (signatureRef.current) signatureRef.current.innerHTML = sanitized;
       signatureContentRef.current = sanitized;
       setHasRichSignature(Boolean(sanitized));
-      setPlainSig(stripHtml(fromSignature));
+      setPlainSig(composerHtmlToText(fromSignature));
     } else if (fromValueChanged && fromSignature == null) {
       signatureContentRef.current = '';
       setHasRichSignature(false);
@@ -861,9 +875,9 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   // attribute alone for programmatically-created editors.
   useEffect(() => {
     if (editor?.view?.dom) {
-      editor.view.dom.spellcheck = true;
+      editor.view.dom.spellcheck = spellcheck;
     }
-  }, [editor]);
+  }, [editor, spellcheck, plaintextEmail]);
 
   // Files the user picked or dropped, added as attachments. A name already attached is not added
   // twice.
@@ -1144,6 +1158,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     const sentQuotedHtml = !plaintextEmail && (quotedBodyHtml != null || quotedHtmlRef.current)
       ? (quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedBodyHtml)
       : null;
+    const sentQuotedBody = !plaintextEmail && sentQuotedHtml != null ? composerHtmlToText(sentQuotedHtml) : quotedBody;
     const savedDraft = draftPointerRef.current;
     const hasDraft = savedDraft.uid != null && savedDraft.folder != null && savedDraft.accountId;
     const payload = {
@@ -1156,7 +1171,8 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       // Images shown through MailFlow's proxy go out as the email's own references.
       body: plaintextEmail ? bodyToSend : unproxyImages(bodyToSend),
       bodyIsHtml: !plaintextEmail,
-      ...(quotedBody ? { quotedBody } : {}),
+      plaintextEmail,
+      ...(sentQuotedBody ? { quotedBody: sentQuotedBody } : {}),
       ...(sentQuotedHtml != null ? { quotedBodyHtml: unproxyImages(sentQuotedHtml) } : {}),
       // Off sends an empty override, or the server would add the account's signature.
       ...(!signatureEnabled || signatureContentRef.current || fromSignature != null || composeData?.signature !== undefined
@@ -1182,13 +1198,13 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         forwardedMessages: fwdAttachments.filter(a => a.asMessage).map(a => a.messageId),
       } : {}),
     };
-    return { accountId, aliasId, toFinal, ccFinal, bccFinal, bodyToSend, sentQuotedHtml, autoAtSend, savedDraft, hasDraft, payload };
+    return { accountId, aliasId, toFinal, ccFinal, bccFinal, bodyToSend, sentQuotedHtml, sentQuotedBody, autoAtSend, savedDraft, hasDraft, payload };
   };
 
   // Everything needed to put a message back in front of the user exactly as it went, attachments
   // included: after an undone send or schedule, or a send that failed once this composer is gone.
   // `built` is buildSendPayload's result.
-  const buildRestoreData = ({ accountId, aliasId, toFinal, ccFinal, bccFinal, bodyToSend, sentQuotedHtml, autoAtSend, savedDraft, hasDraft }) => ({
+  const buildRestoreData = ({ accountId, aliasId, toFinal, ccFinal, bccFinal, bodyToSend, sentQuotedHtml, sentQuotedBody, autoAtSend, savedDraft, hasDraft }) => ({
     ...composeData,
     // A sender chosen since opening a draft from an address MailFlow cannot send as replaces it.
     unsupportedFrom: unsupportedSenderRef.current ? composeData?.unsupportedFrom : undefined,
@@ -1202,7 +1218,9 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     bcc: bccFinal,
     subject,
     body: bodyToSend,
-    quotedBody,
+    bodyIsHtml: !plaintextEmail,
+    plaintextEmail,
+    quotedBody: sentQuotedBody,
     quotedBodyHtml: sentQuotedHtml,
     // '' means no signature. The composer reads this as HTML, so plain text is escaped.
     signature: !signatureEnabled ? ''
@@ -1707,8 +1725,8 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     subject,
     body: plaintextEmail ? body : htmlMode ? htmlSource : editor?.isEmpty ? '' : editor?.getHTML() ?? '',
     bodyIsHtml: !plaintextEmail,
-    quotedBody,
-    quotedBodyHtml: quotedHtmlRef.current?.innerHTML || quotedBodyHtml || '',
+    quotedBody: !plaintextEmail && quotedBodyHtml != null ? composerHtmlToText(quotedHtmlRef.current?.innerHTML ?? quotedHtmlSnapshotRef.current ?? quotedBodyHtml) : quotedBody,
+    quotedBodyHtml: quotedHtmlRef.current?.innerHTML ?? quotedHtmlSnapshotRef.current ?? quotedBodyHtml ?? '',
     // Off is saved as an empty signature, so toggling counts as an edit and is autosaved.
     editedSignature: !signatureEnabled ? '' : plaintextEmail ? plainSig : signatureContentRef.current,
     attachments: attachments.map(a => a.name),
@@ -1726,7 +1744,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const draftFields = value => ({
     to: value.to, cc: value.cc, bcc: value.bcc, subject: value.subject,
     // Images shown through MailFlow's proxy are saved as the email's own references.
-    body: value.bodyIsHtml ? unproxyImages(value.body) : value.body, bodyIsHtml: value.bodyIsHtml,
+    body: value.bodyIsHtml ? unproxyImages(value.body) : value.body, bodyIsHtml: value.bodyIsHtml, plaintextEmail: !value.bodyIsHtml,
     ...(composeData?.inReplyTo ? { inReplyTo: composeData.inReplyTo } : {}),
     ...(composeData?.references ? { references: composeData.references } : {}),
     ...(value.quotedBody ? { quotedBody: value.quotedBody } : {}),
@@ -1761,6 +1779,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         updateComposePersistedKey(composeSession, `${accountId}:${result.folder}:${result.uid}:${result.messageId || ""}:${composeData?.draftUidValidity || ""}`,
           useStore.getState().composeData?.restored ? { draftUid: result.uid, draftFolder: result.folder, draftAccountId: accountId } : {});
       }
+      richModeSnapshotRef.current = null;
       unsavedRestoreRef.current = false;
       const before = useStore.getState().replyDraftRevision;
       useStore.getState().invalidateReplyDrafts();
@@ -1779,7 +1798,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   useEffect(() => {
     // TipTap mounts asynchronously. Seed the saved body from the opening draft so its
     // initial null editor cannot make an untouched draft look dirty.
-    initialSavedSnapshotRef.current = { ...snapshotRef.current(), body: composeData?.body || '' };
+    initialSavedSnapshotRef.current = { ...snapshotRef.current(), body: plaintextEmail ? body : composeData?.body || '' };
     composeSwitchRef.current.markSaved(initialSavedSnapshotRef.current);
     const prepare = async ({ onDraftSaved } = {}) => {
       if (sendingRef.current || sendWaitingRef.current) return false;
@@ -2066,6 +2085,47 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     setCloseDialogMode('discard');
     if (sheet) setShowDiscardSheet(true); else setShowCloseDialog(true);
   };
+
+  const togglePlainText = () => {
+    if (!plaintextEmail) {
+      const html = htmlMode ? htmlSource : (editor?.getHTML() || '');
+      const text = htmlMode ? composerHtmlToText(htmlSource) : (editor?.getText({ blockSeparator: '\n' }) || '');
+      const plainQuote = quotedBodyHtml ? composerHtmlToText(quotedHtmlRef.current?.innerHTML ?? quotedHtmlSnapshotRef.current ?? quotedBodyHtml) : quotedBody;
+      richModeSnapshotRef.current = { html, text, plainQuote, signature: signatureContentRef.current, plainSig: composerHtmlToText(signatureContentRef.current) };
+      setBody(text);
+      setPlainSig(richModeSnapshotRef.current.plainSig);
+      if (quotedBodyHtml) setQuotedBody(plainQuote);
+      setHtmlMode(false);
+      setPlaintextEmail(true);
+    } else {
+      const saved = richModeSnapshotRef.current;
+      if (quotedBodyHtml && (!saved || saved.plainQuote !== quotedBody)) quotedHtmlSnapshotRef.current = composerTextToHtml(quotedBody);
+      editor?.commands.setContent(saved?.text === body ? saved.html : composerTextToHtml(body), { parseOptions: { preserveWhitespace: 'full' } });
+      signatureContentRef.current = saved?.plainSig === plainSig ? saved.signature : composerTextToHtml(plainSig);
+      setHasRichSignature(Boolean(signatureContentRef.current));
+      setPlaintextEmail(false);
+    }
+    bodyEditedRef.current = true;
+    lastEditAtRef.current = Date.now();
+  };
+  const printDraft = () => {
+    const win = openPrintWindow();
+    if (!win) { setError(t('compose.more.printBlocked', 'Allow pop-ups to print this draft.')); return; }
+    const value = snapshotRef.current();
+    const sig = signatureEnabled ? (plaintextEmail ? plainSig : signatureContentRef.current) : '';
+    const content = plaintextEmail
+      ? { text: [value.body, sig, value.quotedBody].filter(Boolean).join('\n\n') }
+      : { html: [value.body, sig, value.quotedBodyHtml].filter(Boolean).join('<br>') };
+    printInWindow(win, buildPrintDocument([{ message: {
+      subject, from_email: fromAccount?.email_address || '', from_name: fromAccount?.name || '',
+      to_addresses: value.to.map(email => ({ email })), cc_addresses: value.cc.map(email => ({ email })), date: new Date().toISOString(),
+    }, body: { ...content, remoteImagesBlocked: true } }]));
+  };
+
+  const renderGmailMore = () => gmailLayout && <GmailComposeMore plainText={plaintextEmail} onPlainText={togglePlainText}
+    spellcheck={spellcheck} onSpellcheck={() => setSpellcheck(value => !value)}
+    fullscreen={!!composeDefaultFullscreen} onFullscreen={() => setComposeDefaultFullscreen(!composeDefaultFullscreen)}
+    onPrint={printDraft} busy={sending || savingDraft} />;
 
   const renderSignatureEditor = () => plaintextEmail ? (
     <textarea
@@ -2593,6 +2653,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
             />
           </div>
 
+          {gmailLayout && <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{renderGmailMore()}</div>}
           {/* Body */}
           {/* Plain text has no toolbar on a phone: a strip for attaching and the signature toggle. */}
           {plaintextEmail && (
@@ -2611,6 +2672,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
           {plaintextEmail ? (
             <textarea
               ref={textareaRef}
+              spellCheck={spellcheck}
               value={body}
               onChange={e => setBody(e.target.value)}
               placeholder={t('compose.bodyPh')}
@@ -2683,7 +2745,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
           {(quotedBody || quotedBodyHtml) && (
             !plaintextEmail && quotedBodyHtml ? (
               <div
-                ref={quotedHtmlRef}
+                ref={attachQuotedEditor}
                 contentEditable
                 suppressContentEditableWarning
                 spellCheck={false}
@@ -3288,6 +3350,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         {plaintextEmail ? (
           <textarea
             ref={textareaRef}
+            spellCheck={spellcheck}
             value={body}
             onChange={e => setBody(e.target.value)}
             placeholder={t('compose.bodyPh')}
@@ -3334,7 +3397,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         {(quotedBody || quotedBodyHtml) ? (
           !plaintextEmail && quotedBodyHtml ? (
             <div
-              ref={quotedHtmlRef}
+              ref={attachQuotedEditor}
               contentEditable
               suppressContentEditableWarning
               spellCheck={false}
@@ -3448,6 +3511,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
           </button>
         )}
         {plaintextEmail && renderSignatureToggle()}
+        {renderGmailMore()}
 
         {error && <span style={{ fontSize: 12, color: 'var(--red)', flex: 1 }}>{error}</span>}
 
@@ -3741,6 +3805,7 @@ const TBtn = forwardRef(function TBtn({ active, title, onMouseDown, children }, 
       ref={ref}
       title={title}
       onMouseDown={onMouseDown}
+      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') onMouseDown?.(event); }}
       style={{
         background: active ? 'var(--bg-hover)' : 'none',
         border: 'none', borderRadius: 4, padding: '3px 6px',
@@ -3932,11 +3997,41 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
   const linkPopRef = useRef(null);
   const linkInputRef = useRef(null);
   const [showMobileMore, setShowMobileMore] = useState(false);
+  const [compactFormatting, setCompactFormatting] = useState(false);
+  const [showExtraFormatting, setShowExtraFormatting] = useState(false);
 
   // Refs on the toolbar rows so we can keep their controls out of the Tab order (#266).
   const desktopBarRef = useRef(null);
   const mobileBarRef = useRef(null);
   const mobileMoreRef = useRef(null);
+
+  useEffect(() => {
+    const bar = desktopBarRef.current;
+    if (!bar || typeof ResizeObserver === 'undefined') return;
+    const measure = () => { if (bar.clientWidth) setCompactFormatting(bar.clientWidth < 700); };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(bar);
+    return () => observer.disconnect();
+  }, [isMobile]);
+
+  useEffect(() => {
+    const keydown = event => {
+      const bar = desktopBarRef.current || mobileBarRef.current;
+      if (event.altKey && event.key === 'F10') {
+        event.preventDefault(); bar?.querySelector('button:not(:disabled)')?.focus();
+      }
+      if (!bar?.contains(event.target)) return;
+      if (event.key === 'Escape') { event.preventDefault(); editor?.commands.focus(); }
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const buttons = [...bar.querySelectorAll('button:not(:disabled), select')];
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (buttons.indexOf(event.target) + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    };
+    document.addEventListener('keydown', keydown);
+    return () => document.removeEventListener('keydown', keydown);
+  }, [editor]);
 
   // Keep every formatting-toolbar control out of the Tab sequence so Tab from the
   // Subject field lands directly in the editor body (#266). Formatting stays reachable
@@ -3978,6 +4073,9 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
   const es = useEditorState({
     editor,
     selector: ({ editor: ed }) => ed ? {
+      canUndo: ed.can().undo(),
+      canRedo: ed.can().redo(),
+      quote: ed.isActive('blockquote'),
       bold: ed.isActive('bold'),
       italic: ed.isActive('italic'),
       underline: ed.isActive('underline'),
@@ -4016,6 +4114,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
   const openEmoji = async (e) => {
     e.preventDefault();
     if (emojiPos) { setEmojiPos(null); return; }
+    saveSelection();
     if (!emojiPickerRef.current) {
       const [{ default: Picker }, { default: data }] = await Promise.all([
         import('@emoji-mart/react'),
@@ -4082,6 +4181,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
   const openTable = (e) => {
     e.preventDefault();
     if (tablePos) { setTablePos(null); return; }
+    saveSelection();
     const r = tableBtnRef.current.getBoundingClientRect();
     const left = Math.max(4, Math.min(r.left, window.innerWidth - 200));
     setTablePos({ top: r.bottom + 4, left });
@@ -4125,6 +4225,18 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
     <button key={title} title={title} onMouseDown={onMD} style={{ background: active ? 'var(--bg-hover)' : 'none', border: 'none', borderRadius: 4, padding: '6px 4px', color: active ? 'var(--accent)' : 'var(--text-secondary)', cursor: 'pointer', fontSize: 14, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: 1, WebkitTapHighlightColor: 'transparent' }}>{children}</button>
   );
 
+  const extraControls = <span style={{ display: 'inline-flex', gap: 2, flexWrap: 'wrap' }}>
+    {[[t('compose.toolbar.undo', 'Undo'), '↶', () => editor.chain().focus().undo().run(), !es.canUndo],
+      [t('compose.toolbar.redo', 'Redo'), '↷', () => editor.chain().focus().redo().run(), !es.canRedo],
+      [t('compose.toolbar.quote', 'Quote'), '❞', () => editor.chain().focus().toggleBlockquote().run()],
+      [t('compose.toolbar.decreaseIndent', 'Decrease indent'), '⇤', () => indentEditor(editor, -1)],
+      [t('compose.toolbar.increaseIndent', 'Increase indent'), '⇥', () => indentEditor(editor, 1)],
+      [t('compose.toolbar.removeFormatting', 'Remove formatting'), 'Tx', () => removeEditorFormatting(editor)]].map(([label, icon, run, disabled]) =>
+      <button type="button" key={label} title={label} aria-label={label} disabled={disabled || htmlMode}
+        aria-pressed={label === t('compose.toolbar.quote', 'Quote') ? !!es.quote : undefined} onMouseDown={event => event.preventDefault()} onClick={run}
+        style={{ border: 0, background: 'transparent', color: 'var(--text-secondary)', opacity: disabled || htmlMode ? 0.4 : 1, cursor: 'pointer', padding: '4px 6px' }}>{icon}</button>)}
+  </span>;
+
   return (
     <>
       {isMobile ? (
@@ -4142,7 +4254,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
                 </svg>
               </button>
             )}
-            <button ref={linkBtnRef} title={t('compose.toolbar.insertLink')} onMouseDown={openLink}
+            <button ref={linkBtnRef} title={t('compose.toolbar.insertLink')} onMouseDown={openLink} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') openLink(event); }}
               style={{ background: es.link ? 'var(--bg-hover)' : 'none', border: 'none', borderRadius: 4, padding: '6px 4px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: 1, color: es.link ? 'var(--accent)' : 'var(--text-secondary)', WebkitTapHighlightColor: 'transparent' }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
             </button>
@@ -4170,7 +4282,8 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
           </div>
           {showMobileMore && (
             <div ref={mobileMoreRef} style={{ borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', padding: '2px 0', flexWrap: 'wrap' }}>
-              <button ref={typeMenuBtnRef} title={t('compose.toolbar.typography')} onMouseDown={openTypeMenu}
+              {extraControls}
+              <button ref={typeMenuBtnRef} title={t('compose.toolbar.typography')} onMouseDown={openTypeMenu} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') openTypeMenu(event); }}
                 style={{ background: typeMenuPos ? 'var(--bg-hover)' : 'none', border: 'none', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', display: 'inline-flex', flexDirection: 'row', alignItems: 'center', gap: 6, color: typeMenuPos ? 'var(--accent)' : 'var(--text-secondary)', WebkitTapHighlightColor: 'transparent' }}>
                 <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
                   <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-secondary)', lineHeight: 1 }}>A</span>
@@ -4199,6 +4312,13 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
         </>
       ) : (
       <div ref={desktopBarRef} className="mailflow-compose-formatting" style={{ borderBottom: '1px solid var(--border-subtle)', display: 'flex', gap: 2, padding: '4px 10px', flexWrap: 'wrap', alignItems: 'center' }}>
+        {compactFormatting ? <span style={{ position: 'relative' }}>
+          <button type="button" aria-label={t('compose.toolbar.moreFormatting', 'More formatting')} aria-expanded={showExtraFormatting}
+            onMouseDown={event => event.preventDefault()} onClick={() => setShowExtraFormatting(value => !value)}
+            style={{ border: 0, background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', padding: '4px 6px' }}>⋯</button>
+          {showExtraFormatting && <span role="group" aria-label={t('compose.toolbar.moreFormatting', 'More formatting')} onKeyDown={event => { if (event.key === 'Escape') setShowExtraFormatting(false); }}
+            style={{ position: 'absolute', top: '100%', left: 0, width: 236, zIndex: 2, padding: 6, background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6 }}>{extraControls}</span>}
+        </span> : extraControls}
         {onAttach && (
           <button title={t('compose.toolbar.attachFile')} onMouseDown={e => { e.preventDefault(); onAttach(); }}
             style={{ background: 'none', border: 'none', borderRadius: 4, padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', color: 'var(--text-secondary)' }}>
@@ -4217,7 +4337,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
 
         <Sep />
         
-        <button ref={typeMenuBtnRef} title={t('compose.toolbar.typography')} onMouseDown={openTypeMenu}
+        <button ref={typeMenuBtnRef} title={t('compose.toolbar.typography')} onMouseDown={openTypeMenu} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') openTypeMenu(event); }}
           style={{ background: typeMenuPos ? 'var(--bg-hover)' : 'none', border: 'none', borderRadius: 4, padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', flexDirection: 'row', alignItems: 'center', gap: 1, color: typeMenuPos ? 'var(--accent)' : 'var(--text-secondary)' }}>
           <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-secondary)', lineHeight: 1 }}>A</span>
@@ -4246,10 +4366,10 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
 
         <Sep />
 
-        <TBtn ref={linkBtnRef} active={es.link} title={t('compose.toolbar.insertLink')} onMouseDown={openLink}>
+        <TBtn ref={linkBtnRef} active={es.link} title={t('compose.toolbar.insertLink')} onMouseDown={openLink} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') openLink(event); }}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
         </TBtn>
-        <button ref={emojiBtnRef} title="Emoji" onMouseDown={openEmoji}
+        <button ref={emojiBtnRef} title="Emoji" onMouseDown={openEmoji} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') openEmoji(event); }}
           style={{ background: 'none', border: 'none', borderRadius: 4, padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>
           <span style={{ fontSize: 13, lineHeight: 1 }}>😀</span>
         </button>
@@ -4265,7 +4385,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
           </button>
         )}
 
-        <button ref={tableBtnRef} title={t('compose.toolbar.insertTable')} onMouseDown={openTable}
+        <button ref={tableBtnRef} title={t('compose.toolbar.insertTable')} onMouseDown={openTable} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') openTable(event); }}
           style={{ background: tablePos ? 'var(--bg-hover)' : 'none', border: 'none', borderRadius: 4, padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', color: 'var(--text-secondary)' }}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <rect x="3" y="3" width="18" height="18" rx="1"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/>
@@ -4410,7 +4530,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
 
       {emojiPos && emojiPickerRef.current && (
         <div ref={emojiPopRef} style={{ position: 'fixed', top: descale(emojiPos.top, uiScale), bottom: descale(emojiPos.bottom, uiScale), left: descale(emojiPos.left, uiScale), zIndex: 9900, height: 284, overflow: 'hidden', borderRadius: 8 }}>
-          <emojiPickerRef.current.Picker data={emojiPickerRef.current.data} onEmojiSelect={emoji => { editor.chain().focus().insertContent(emoji.native).run(); setEmojiPos(null); }}
+          <emojiPickerRef.current.Picker data={emojiPickerRef.current.data} onEmojiSelect={emoji => { editor.chain().focus().setTextSelection(restoreSelection()).insertContent(emoji.native).run(); setEmojiPos(null); }}
             theme="auto" previewPosition="none" skinTonePosition="none"
             perLine={7} emojiSize={18} emojiButtonSize={26} maxFrequentRows={1} />
         </div>
@@ -4432,7 +4552,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, signatureControl, htmlMo
             ].map(({ label, rows, cols }) => (
               <button key={label} onMouseDown={e => {
                 e.preventDefault();
-                editor.chain().focus().insertTable({ rows, cols, withHeaderRow: true }).run();
+                editor.chain().focus().setTextSelection(restoreSelection()).insertTable({ rows, cols, withHeaderRow: true }).run();
                 setTablePos(null);
               }} style={{
                 background: 'var(--bg-tertiary)', border: '1px solid var(--border)',

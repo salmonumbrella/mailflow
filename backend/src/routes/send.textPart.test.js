@@ -61,3 +61,12 @@ describe('the text part of a rich-text message', () => {
     expect(await textOf({ body: 'Line one\n\nA & B < C' })).toBe('Line one\n\nA & B < C');
   });
 });
+
+
+describe('per-message output mode', () => {
+  it('sends literal plain text without an HTML alternative, independent of the default', async () => {
+    expect(await textOf({ plaintextEmail: true, bodyIsHtml: false, body: 'Hello <you>',
+      editedSignature: 'Me <me@example.com>' })).toBe('Hello <you>\n\n-- \nMe <me@example.com>');
+    expect(sendMail.mock.calls[0][0].html).toBeUndefined();
+  });
+});

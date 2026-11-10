@@ -217,7 +217,7 @@ describe('composeDataFromScheduled', () => {
     assert.deepEqual(data, {
       isReply: true, isReplyAll: false, threadId: 't1', originalFrom: 'Bob <b@x>', allRecipients: ['b@x'],
       accountId: 'acct', aliasId: 'al1', to: ['Bob <b@x>'], cc: ['c@x'], bcc: [], subject: 'Re: Q4', body: '<p>Hi</p>',
-      quotedBody: '> old', quotedBodyHtml: '<blockquote>old</blockquote>', signature: '', priority: 'high',
+      bodyIsHtml: true, quotedBody: '> old', quotedBodyHtml: '<blockquote>old</blockquote>', signature: '', priority: 'high',
       inReplyTo: '<orig@x>', references: '<orig@x>',
       scheduled: {
         id: 'id1', version: 4, sendAt: '2026-10-26T07:00:00Z', timeZone: 'Europe/Berlin',
@@ -231,8 +231,9 @@ describe('composeDataFromScheduled', () => {
   test('a plain-text signature is escaped, since the composer reads it as HTML', () => {
     const data = composeDataFromScheduled({
       id: 'i', accountId: 'a', version: 1, sendAt: 'x', attachments: [],
-      spec: { to: [], subject: '', body: 'Hi', bodyIsHtml: false, plaintextEmail: true, signature: 'Maria <maria@x.com>\nR&D' },
+      spec: { to: [], subject: '', body: 'Hi', bodyIsHtml: false, plaintextEmail: true, signatureIsPlainText: true, signature: 'Maria <maria@x.com>\nR&D' },
     });
+    assert.equal(data.bodyIsHtml, false);
     assert.equal(data.signature, 'Maria &lt;maria@x.com&gt;\nR&amp;D');
     const html = composeDataFromScheduled({
       id: 'i', accountId: 'a', version: 1, sendAt: 'x', attachments: [], spec: { to: [], signature: '<b>Maria</b>' },

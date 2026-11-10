@@ -1,4 +1,6 @@
-import GmailSelectionMenu from './GmailSelectionMenu.jsx';
+import GmailToolbar from './GmailToolbar.jsx';
+import { openGmailSenderFilter } from '../utils/gmailSenderFilter.js';
+import { quoteSearch } from '../utils/gmailSearch.js';
 import { Fragment, useEffect, useLayoutEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import GmailSearch, { GmailSearchRefinements } from './GmailSearch.jsx';
@@ -13,7 +15,7 @@ import { useMobile } from '../hooks/useMobile.js';
 import { isAccountInUnifiedInbox } from '../utils/unifiedInbox.js';
 import { shouldSyncFolder, folderSyncKey } from '../utils/folderSync.js';
 import { resolveThreadMessages } from '../utils/threadActions.js';
-import { keepDraftsApart } from '../utils/conversationActions.js';
+import { conversationSpamTargets, keepDraftsApart } from '../utils/conversationActions.js';
 import { unreadDeltaByAccount } from '../utils/countSnapshots.js';
 import { splitDraftSignature } from '../utils/draftSignature.js';
 import { draftAttachmentFields } from '../utils/openSavedDraft.js';
@@ -297,6 +299,8 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   // Bulk selection state
   const [selectedIds, setSelectedIds] = useState(new Set());
+  const gmailActionLock = useRef(false);
+  const [gmailActionBusy, setGmailActionBusy] = useState(false);
   const [selectionModeActive, setSelectionModeActive] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [pickerFolders, setPickerFolders] = useState([]);
@@ -773,7 +777,6 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     if (loadingMessages) return;
     listGenRef.current += 1;
     setLoadingMessages(true);
-    setCurrentPage(pageNum);
     try {
       const params = { limit: pageSize, offset: (pageNum - 1) * pageSize };
       scopeListParams(params, selectedAccountId, selectedFolder);
@@ -784,6 +787,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       await refreshRequestRef.current.run(
         () => api.getMessages(params),
         (data) => {
+          setCurrentPage(pageNum);
           setMessagesTotal(data.total);
           setMessages(applyReadGuard(data.messages));
           setMessagesOffset((pageNum - 1) * pageSize + data.messages.length);
@@ -794,10 +798,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       );
     } catch (err) {
       console.error('Failed to load page:', err);
+      addNotification({ type: 'error', title: t("gmailToolbar.couldNotLoadThisPage", "Could not load this page"), body: t("gmailToolbar.yourCurrentPageHasBeenKeptPleaseTryAgain", "Your current page has been kept. Please try again.") });
     } finally {
       setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, addNotification, t, applyReadGuard, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   const handleSync = async () => {
     if (syncing) return;
@@ -826,6 +831,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       }, delay));
     } catch (err) {
       console.error('Sync failed:', err);
+      addNotification({ type: 'error', title: t("gmailToolbar.couldNotRefreshMail", "Could not refresh mail"), body: t("gmailToolbar.pleaseCheckTheConnectionAndTryAgain", "Please check the connection and try again.") });
       setSyncing(false);
     }
   };
@@ -1008,7 +1014,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       }
       if (read && estimatedDelta > 0) { incrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, estimatedDelta); }
       else if (!read && estimatedDelta > 0) { decrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, -estimatedDelta); }
-      return;
+      return false;
     }
 
     actionMessages.forEach(msg => cancelScheduledMarkReadFor(msg.id));
@@ -1062,7 +1068,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     } catch (err) {
       console.error('markRead failed:', err);
       // A read the user has since undone by hand is theirs now: nothing to roll back.
-      if (read && !actionMessages.map((msg, i) => failMarkRead(msg.id, tokens[i])).some(Boolean)) return;
+      if (read && !actionMessages.map((msg, i) => failMarkRead(msg.id, tokens[i])).some(Boolean)) return false;
       if (isThreadRow) {
         updateMessage(message.id, { is_read: !read, unread_count: read ? actualDelta : 0 });
         setCachedThreadRead(message, !read);
@@ -1074,7 +1080,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         if (read) incrementUnread(accountId, n); else decrementUnread(accountId, n);
       }
       if (actualDelta > 0) adjustCategoryCount(message.category, read ? actualDelta : -actualDelta);
+      return false;
     }
+    return true;
   }, [
     resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadRead,
     decrementUnread, incrementUnread, adjustCategoryCount,
@@ -1091,7 +1099,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       actionMessages = await resolveMessagesForThreadAction(message);
     } catch (err) {
       console.error('Failed to load thread for star state change:', err.message);
-      return;
+      return false;
     }
 
     const isThreadRow = isThreadListRow(message);
@@ -1102,9 +1110,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       await Promise.all(actionMessages.map(msg => api.markStarred(msg.id, starred)));
     } catch (err) {
       console.error('markStarred failed:', err.message);
-      updateMessage(message.id, { is_starred: !starred });
+      updateMessage(message.id, { is_starred: message.is_starred });
       if (isThreadRow) setCachedThreadStarred(message, !starred);
+      return false;
     }
+    return true;
   }, [resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadStarred]);
 
   const handleStar = (e, message) => {
@@ -1213,16 +1223,20 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // Bulk is handled by collecting `messages` from selectedIds if multiple are
   // selected; the caller (handleContextAction) decides which set to pass.
 
-  const performSpamLabel = useCallback(async (messages, label) => {
+  const performSpamLabel = useCallback(async (messages, label, originView = null, visibleRows = messages) => {
     if (!messages.length) return;
     const ids = messages.map(m => m.id);
     const isBulk = ids.length > 1;
 
     // Optimistic local update: remove from view + drop unread badge.
-    const unreadCount = messages.reduce((sum, m) => sum + (m.is_read ? 0 : 1), 0);
-    const accountId = messages[0].account_id;
+    const unreadByAccount = rows => {
+      const counts = new Map();
+      rows.forEach(message => { if (!message.is_read) counts.set(message.account_id, (counts.get(message.account_id) || 0) + 1); });
+      return counts;
+    };
+    const accountIds = [...new Set(messages.map(message => message.account_id))];
     messages.forEach(m => removeMessage(m.id));
-    if (unreadCount > 0) decrementUnread(accountId, unreadCount, { undoable: true });
+    unreadByAccount(messages).forEach((count, accountId) => decrementUnread(accountId, count, { undoable: true }));
 
     // Sidebar folder badges are not adjusted here. They render the counts the IMAP server
     // reported for each folder, so a local guess would be overwritten by the next observation
@@ -1239,8 +1253,8 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       timers.forEach(timer => releaseUndoable(timer));
       timers.clear();
       // Restore the messages in their original position (re-sort by date).
-      useStore.getState().restoreMessages(messages);
-      if (unreadCount > 0) incrementUnread(accountId, unreadCount);
+      if (originView === null || originView === archiveViewKeyRef.current) useStore.getState().restoreMessages(visibleRows);
+      unreadByAccount(messages).forEach((count, accountId) => incrementUnread(accountId, count));
     };
 
     const performCall = (id) => {
@@ -1258,9 +1272,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       });
       if (failed.length) {
         const failedMsgs = messages.filter(m => failed.includes(m.id));
-        useStore.getState().restoreMessages(failedMsgs);
-        const failedUnread = failedMsgs.reduce((sum, m) => sum + (m.is_read ? 0 : 1), 0);
-        if (failedUnread > 0) incrementUnread(accountId, failedUnread);
+        if (originView === null || originView === archiveViewKeyRef.current) useStore.getState().restoreMessages(visibleRows.filter(row => failed.includes(row.id)));
+        unreadByAccount(failedMsgs).forEach((count, accountId) => incrementUnread(accountId, count));
+        if (originView !== null) window.dispatchEvent(new Event('mailflow:refresh'));
         const titleKey = label === 'spam' ? 'spam.failTitle' : 'spam.failHamTitle';
         const bodyKey = label === 'spam' ? 'spam.failBody' : 'spam.failHamBody';
         addNotification({
@@ -1275,7 +1289,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       // moving messages between two folders that share a parent, or a
       // concurrent IMAP IDLE update, can desync the local counters.
       api.getUnreadCounts().then(c => useStore.getState().setUnreadCounts(c)).catch(() => {});
-      api.getFolders(accountId).then(f => useStore.getState().setFolders(accountId, f)).catch(() => {});
+      accountIds.forEach(accountId => api.getFolders(accountId).then(f => useStore.getState().setFolders(accountId, f)).catch(() => {}));
     }, UNDO_COMMIT_DELAY_MS));
 
     addNotification({
@@ -1593,14 +1607,16 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     lastSelectIdxRef.current = clickedIdx;
   }, [displayMessages]);
 
-  const handleBulkDelete = useCallback(async (ids, msgs) => {
+  const handleBulkDelete = useCallback(async (ids, msgs, resolvedMessages = null) => {
+    const originView = archiveViewKeyRef.current;
+    const restore = rows => resolvedMessages ? restoreMessagesIfViewCurrent(originView, archiveViewKeyRef, rows) : useStore.getState().restoreMessages(rows);
     const key = `bulk:${ids[0]}`;
     // Selected thread rows delete the whole conversation, matching the
     // single-row delete path — without this only each thread's visible
     // (newest) message was deleted and the rest of the thread survived.
     let deleteIds = ids;
     try {
-      const resolved = await Promise.all(msgs.map(async m => keepDraftsApart(await resolveMessagesForThreadAction(m), m.id)));
+      const resolved = resolvedMessages || await Promise.all(msgs.map(async m => keepDraftsApart(await resolveMessagesForThreadAction(m), m.id)));
       deleteIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
     } catch (err) {
       console.error('Failed to load thread for bulk delete:', err.message);
@@ -1638,7 +1654,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       if (failedIds.length > 0) {
         const failedSet = new Set(failedIds);
         const failedMsgs = msgs.filter(msg => failedSet.has(msg.id));
-        useStore.getState().restoreMessages(failedMsgs);
+        restore(failedMsgs);
         failedMsgs.forEach(msg => {
           const delta = parseInt(msg.unread_count) || (msg.is_read ? 0 : 1);
           if (delta > 0) incrementUnread(msg.account_id, delta);
@@ -1661,7 +1677,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         clearTimeout(timer);
         pendingDeleteTimers.current.delete(key);
         deleteIds.forEach(id => clearPendingDelete(id));
-        useStore.getState().restoreMessages(msgs);
+        restore(msgs);
         msgs.forEach(msg => {
           const delta = parseInt(msg.unread_count) || (msg.is_read ? 0 : 1);
           if (delta > 0) incrementUnread(msg.account_id, delta);
@@ -1670,14 +1686,16 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     });
   }, [searchHasMore, removeMessage, prefetchSearchAfterRemoval, resolveMessagesForThreadAction, decrementUnread, incrementUnread, addNotification, t]);
 
-  const handleBulkMove = useCallback(async (ids, msgs, folder) => {
+  const handleBulkMove = useCallback(async (ids, msgs, folder, resolvedMessages = null) => {
+    const originView = archiveViewKeyRef.current;
+    const restore = rows => resolvedMessages ? restoreMessagesIfViewCurrent(originView, archiveViewKeyRef, rows) : useStore.getState().restoreMessages(rows);
     // Selected thread rows move the whole conversation. A folder path is
     // account-specific, so scope each thread's expansion to its row's own
     // account — the server would just skip (and previously silently drop)
     // another account's copies from a folder that doesn't exist there.
     let moveIds = ids;
     try {
-      const resolved = await Promise.all(msgs.map(async (m) => {
+      const resolved = resolvedMessages || await Promise.all(msgs.map(async (m) => {
         const thread = keepDraftsApart(await resolveMessagesForThreadAction(m), m.id);
         return thread.filter(tm => tm?.account_id === m.account_id);
       }));
@@ -1699,14 +1717,16 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         const failedCount = moveIds.filter(id => !movedSet.has(id)).length;
         if (failedCount > 0) {
           const failedMsgs = msgs.filter(msg => !movedSet.has(msg.id));
-          if (failedMsgs.length > 0) useStore.getState().restoreMessages(failedMsgs);
+          if (failedMsgs.length > 0) restore(failedMsgs);
+          if (resolvedMessages) failedMsgs.forEach(msg => { if (!msg.is_read) incrementUnread(msg.account_id); });
           addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
         } else if (msgs[0]?.account_id) {
           useStore.getState().recordRecentFolder({ accountId: msgs[0].account_id, path: folder });
         }
       } catch (err) {
         console.error('Bulk move failed:', err);
-        useStore.getState().restoreMessages(msgs);
+        restore(msgs);
+        if (resolvedMessages) msgs.forEach(msg => { if (!msg.is_read) incrementUnread(msg.account_id); });
         addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: moveIds.length }) });
       }
     }, UNDO_COMMIT_DELAY_MS);
@@ -1717,7 +1737,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         // Already sent (a flush, as the page went into the back-forward cache): nothing to undo.
         if (!releaseUndoable(timer)) return;
         undone = true;
-        useStore.getState().restoreMessages(msgs);
+        restore(msgs);
         msgs.forEach(msg => { if (!msg.is_read) incrementUnread(msg.account_id); });
       },
     });
@@ -2838,6 +2858,80 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const bulkMoveFoldersEmpty = movePickerFoldersEmpty(bulkMoveSections, pickerFolders);
   const closeBulkPickerAfterAction = () => { setShowFolderPicker(false); clearSelection(); };
 
+  const handleGmailToolbarAction = async (action, rows, value) => {
+    if (gmailActionLock.current) return;
+    if (action === 'newer' || action === 'older') {
+      clearSelection();
+      await loadPage(currentPage + (action === 'newer' ? -1 : 1));
+      return;
+    }
+    if (!rows.length) return;
+    const originView = archiveViewKeyRef.current;
+    const ids = rows.map(row => row.id);
+    gmailActionLock.current = true;
+    setGmailActionBusy(true);
+    try {
+      if (action === 'archive') handleBulkArchive(ids, rows);
+      else if (action === 'delete' || action === 'move' || action === 'spam') {
+        // Never degrade a selected conversation to its representative if resolution fails.
+        const resolved = await Promise.all(rows.map(async row => {
+          const members = keepDraftsApart(await resolveMessagesForThreadAction(row), row.id);
+          return action === 'move' ? members.filter(member => member.account_id === row.account_id) : members;
+        }));
+        if (archiveViewKeyRef.current !== originView) return;
+        if (action === 'delete') await handleBulkDelete(ids, rows, resolved);
+        else if (action === 'move') await handleBulkMove(ids, rows, value, resolved);
+        else {
+          const unique = conversationSpamTargets([...new Map(resolved.flat().map(message => [message.id, message])).values()], accounts);
+          if (!unique.length) throw new Error(t("gmailToolbar.noReceivedMessagesInThisSelectionCanBeReportedAsSpam", "No received messages in this selection can be reported as spam."));
+          await performSpamLabel(unique, 'spam', originView, rows);
+          clearSelection();
+        }
+      } else if (['read', 'unread', 'star', 'unstar'].includes(action)) {
+        for (const row of rows) {
+          if (archiveViewKeyRef.current !== originView) break;
+          const succeeded = action === 'read' || action === 'unread'
+            ? await setMessagesReadState(row, action === 'read')
+            : await setMessagesStarredState(row, action === 'star');
+          if (succeeded === false) throw new Error(t("gmailToolbar.theSelectedMessageCouldNotBeUpdatedPleaseTryAgain", "The selected message could not be updated. Please try again."));
+        }
+      } else if (['snooze', 'changeSnooze', 'unsnooze'].includes(action)) {
+        // The server owns reply-chain expansion. A successful representative does not mean
+        // every member of a subject-group thread was snoozed. Refresh from the server.
+        let failed = 0;
+        for (const row of rows) {
+          if (archiveViewKeyRef.current !== originView) break;
+          try {
+            if (action === 'snooze') await api.snoozeMessage(row.id, value);
+            else if (action === 'changeSnooze') await api.changeSnooze(row.id, value);
+            else await api.unsnoozeMessage(row.id);
+            if (archiveViewKeyRef.current === originView && action !== 'changeSnooze') removeMessage(row.id);
+            else if (action === 'changeSnooze') updateMessage(row.id, { snooze_until: value });
+          } catch { failed++; }
+        }
+        refreshCounts();
+        window.dispatchEvent(new Event('mailflow:refresh'));
+        if (useStore.getState().searchQuery.trim()) setSearchReloadToken(token => token + 1);
+        if (failed) throw new Error(t("gmailToolbar.partialFailure", { defaultValue: "{{count}} selected message(s) could not be updated. They remain selected for retry.", count: failed }));
+        if (archiveViewKeyRef.current === originView) clearSelection();
+      } else if (action === 'findSender' && rows.length === 1) {
+        const sender = rows[0].from_email?.trim();
+        if (!sender) throw new Error(t("gmailToolbar.thisMessageHasNoSearchableSenderAddress", "This message has no searchable sender address."));
+        setSearchQuery(`from:${quoteSearch(sender)}`);
+        clearSelection();
+      } else if (action === 'filterSender' && rows.length === 1) {
+        if (!openGmailSenderFilter(rows[0])) throw new Error(t("gmailToolbar.couldNotOpenAFilterForThisSenderAndAccount", "Could not open a filter for this sender and account."));
+      } else if (action === 'forwardAsAttachment' && rows.length === 1) {
+        await openForwardAsAttachmentFromMessage(rows[0], { openCompose });
+      }
+    } catch (error) {
+      addNotification({ type: 'error', title: t("gmailToolbar.couldNotCompleteTheSelectedAction", "Could not complete the selected action"), body: error.message || t("gmailToolbar.pleaseTryAgain", "Please try again.") });
+    } finally {
+      gmailActionLock.current = false;
+      setGmailActionBusy(false);
+    }
+  };
+
   const gmailSearchChange = query => {
     if (useStore.getState().selectedMessageId && !gmailSearchOpeningRef.current) {
       gmailSearchOpeningRef.current = true;
@@ -3125,8 +3219,23 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
             row, the header takes its two-row form (headerCompact), with Sort, Unread, page size and layout
             on the row below. In a list narrower still, the controls wrap below the title, right-aligned,
             instead of squeezing the title away (#766). */}
+        {layout === 'gmail' ? <GmailToolbar
+          messages={showGtdTab ? [] : displayMessages} selectedIds={selectedIds}
+          onSelect={rows => rows.length ? selectAll(rows) : clearSelection()}
+          onAction={handleGmailToolbarAction} onRefresh={handleSync} busy={gmailActionBusy || loadingMessages} syncing={syncing}
+          permanentDelete={selectedMsgs.some(message => {
+            const account = accounts.find(item => item.id === message.account_id);
+            const folder = folders[message.account_id]?.find(item => item.path === message.folder) || { path: message.folder };
+            return Boolean(message.in_trash) || folderRole(folder, account?.folder_mappings) === 'trash'
+              || /^(?:\[gmail\]\/|\[google mail\]\/)?(?:trash|bin|deleted items|deleted messages)$/i.test(message.folder || '');
+          })}
+          canMove={canMove} loadFolders={async () => { const data = await api.getFolders(selectedMsgs[0].account_id); const listed = Array.isArray(data) ? data : data.folders || []; return listed.map(folder => ({ ...folder, name: folderDisplayName(folder, t, bulkMoveAccount?.folder_mappings, listed) })); }}
+          order={listOrder} count={searchQuery.trim() ? displayMessages.length : messagesTotal} page={currentPage} pageSize={pageSize}
+          totalKnown={!searchQuery.trim() || !searchHasMore} paginated={scrollMode === 'paginated' && !searchQuery.trim() && !showGtdTab}
+          onPage={page => { clearSelection(); loadPage(page); }} contextKey={archiveViewKeyRef.current} snoozed={isSnoozedView}
+          sortControl={<>{sortable && <ListSortMenu accountId={selectedAccountId} folder={selectedFolder} />}<button type="button" className="gmail-toolbar-filter" aria-label={t("gmailToolbar.unreadOnly", "Unread only")} aria-pressed={unreadOnly} onClick={() => setUnreadOnly(value => !value)}>{unreadOnly ? t("gmailToolbar.unreadOnlyActive", "Unread only ✓") : t("gmailToolbar.allMessages", "All messages")}</button></>}
+        /> : <>
         <div ref={headerFit.rowRef} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: 6, rowGap: 6, marginBottom: headerCompact ? 6 : 10 }}>
-          {layout === 'gmail' && <GmailSelectionMenu messages={displayMessages} selectedIds={selectedIds} onSelect={rows => rows.length ? selectAll(rows) : clearSelection()} />}
           <h2 ref={headerFit.titleRef} style={{
             margin: 0, fontSize: 15, fontWeight: 600,
             color: 'var(--text-primary)',
@@ -3435,6 +3544,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           </div>
         )}
 
+        </>}
         {gmailSearchTarget ? createPortal(desktopSearch, gmailSearchTarget) : desktopSearch}
       </div>}
 
@@ -3825,7 +3935,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         )}
 
         {/* ── Bulk-action toolbar ───────────────────────────── */}
-        {selectionMode && (
+        {selectionMode && (layout !== 'gmail' || isMobile) && (
           <div style={{
             position: 'sticky', top: 0, zIndex: 10,
             display: 'flex', alignItems: 'center', gap: 6,
@@ -4331,7 +4441,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         </>)}
 
         {/* Pagination footer */}
-        {scrollMode === 'paginated' && !searchQuery.trim() && !loadingMessages && messagesTotal > 0 && (() => {
+        {(layout !== 'gmail' || isMobile) && scrollMode === 'paginated' && !searchQuery.trim() && !loadingMessages && messagesTotal > 0 && (() => {
           const totalPages = Math.ceil(messagesTotal / pageSize) || 1;
           const btnStyle = (disabled) => ({
             padding: '5px 14px', fontSize: 12, borderRadius: 6, cursor: disabled ? 'default' : 'pointer',

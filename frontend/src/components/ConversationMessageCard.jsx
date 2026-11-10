@@ -11,6 +11,11 @@ import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/pri
 import { openReplyFromMessage, openForwardFromMessage } from '../utils/composeFromMessage.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import MessageBodyView from './MessageBodyView.jsx';
+import GmailMessageDetails from './GmailMessageDetails.jsx';
+import GmailQuotedText from './GmailQuotedText.jsx';
+import GmailDeleteMessageConfirmation from './GmailDeleteMessageConfirmation.jsx';
+import { readerDeleteMode } from '../utils/readerDeleteMode.js';
+import { openGmailSenderFilter } from '../utils/gmailSenderFilter.js';
 import AttachmentStrip from './AttachmentStrip.jsx';
 import { isDarkTheme, canShowDark, showDark } from '../utils/darkScheme.js';
 import AiResultBox from './AiResultBox.jsx';
@@ -23,7 +28,7 @@ import MessageHeaderModal from './MessageHeaderModal.jsx';
 import TodoistTaskModal from './TodoistTaskModal.jsx';
 import {
   ActionBtn, MessageTools, ReplySplitButton, RemoteImagesNotice, UnsubscribeNotice,
-  AiReplyIcon, ForwardIcon, TodoistIcon, ReadStateIcon, HeadersIcon, DownloadIcon, PrintIcon, DarkToggleIcon, StarIcon,
+  AiReplyIcon, ForwardIcon, TodoistIcon, ReadStateIcon, HeadersIcon, DownloadIcon, PrintIcon, DarkToggleIcon, StarIcon, TrashIcon,
 } from './MessageActions.jsx';
 
 // One message inside a conversation.
@@ -37,8 +42,9 @@ import {
 // Design from #317 by YunQue0912.
 // `onUpdate(id, patch)` applies a flag change to the conversation's own copy of the message and to
 // the list's, since the pane holds the thread apart from the list.
-export default function ConversationMessageCard({ message, expanded, onToggle, onUpdate, aiEnabled = false, aiReplyEnabled = false, selected = false }) {
+export default function ConversationMessageCard({ message, expanded, onToggle, onUpdate, onDelete, aiEnabled = false, aiReplyEnabled = false, selected = false }) {
   const { t } = useTranslation();
+  const gmailLayout = useStore(s => s.layout === 'gmail');
   const accounts = useStore(s => s.accounts);
   const openCompose = useStore(s => s.openCompose);
   const addNotification = useStore(s => s.addNotification);
@@ -50,6 +56,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   const addToImageWhitelist = useStore(s => s.addToImageWhitelist);
   const isMobile = useMobile();
   const [showHeaderModal, setShowHeaderModal] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [showTodoistModal, setShowTodoistModal] = useState(false);
   const [savingAllow, setSavingAllow] = useState(false);
   // null | 'loading' | 'done' | 'error', as the reading pane's unsubscribe notice.
@@ -288,10 +295,14 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   const darkLabel = darkRefused ? t('message.cannotShowDark') : shownDark ? t('message.showOriginal') : t('message.showDark');
   // By Reply, or in More on a phone, as in the reading pane.
   const aiReply = () => openReplyFromMessage(message, { accounts, folders: useStore.getState().folders, openCompose, getMessageBody: loadedBody, replyAll: replyDefault === 'replyAll', aiReply: true });
+  const deleteMode = readerDeleteMode(message, accounts, useStore.getState().folders);
+  const requestDelete = () => deleteMode === 'trash' ? onDelete(message) : setConfirmDeleteId(message.id);
   const toolItems = [
     aiReplyEnabled && isMobile && { key: 'aiReply', label: t('compose.toolbar.aiReply'), icon: <AiReplyIcon />, onClick: aiReply },
     todoistConnected && { key: 'todoist', label: t('todoist.title'), icon: <TodoistIcon />, onClick: () => setShowTodoistModal(true) },
     { key: 'read', label: message.is_read ? t('contextMenu.markUnread') : t('contextMenu.markRead'), icon: <ReadStateIcon isRead={message.is_read} />, onClick: handleToggleRead },
+    gmailLayout && message.from_email && { key: 'filterSender', label: t('gmailReader.filterSender', { defaultValue: 'Filter messages like this' }), icon: <HeadersIcon />, onClick: () => { if (!openGmailSenderFilter(message)) addNotification({ type: 'error', title: t('gmailReader.filterUnavailable', { defaultValue: 'Sender filtering is unavailable in this view or account.' }) }); } },
+    gmailLayout && onDelete && { key: 'deleteMessage', label: deleteMode === 'permanent' ? t('gmailReader.deletePermanently', { defaultValue: 'Delete this message permanently' }) : t('gmailReader.deleteMessage', { defaultValue: 'Delete this message' }), icon: <span style={{ color: 'var(--red)' }}><TrashIcon /></span>, onClick: requestDelete },
     { key: 'headers', label: t('contextMenu.viewHeaders'), icon: <HeadersIcon />, onClick: () => setShowHeaderModal(true) },
     { key: 'eml', label: t('message.downloadEml'), icon: <DownloadIcon />, onClick: () => downloadEml(message.id) },
     { key: 'print', label: t('message.print'), icon: <PrintIcon />, onClick: handlePrint },
@@ -338,6 +349,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
 
       {expanded && (
         <div style={{ padding: '0 12px 12px' }}>
+          {gmailLayout && <GmailMessageDetails message={message} body={body} />}
           {/* The reading pane's toolbar, from the same buttons in the same order (#650), less what the
               conversation's own bar does for all of it. Reply and forward are per message, not per
               thread: replying to a conversation means replying to one message in it, and which one
@@ -431,6 +443,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
               <MessageBodyView
                 iframeRef={iframeRef}
                 body={body}
+                collapseQuotes={gmailLayout}
                 dark={bodyDark}
                 onDarkResult={setDarkResult}
                 messageId={message.id}
@@ -449,12 +462,14 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
                 padding: '14px 16px 12px', background: 'white', color: '#1a1a1a',
                 borderRadius: 4, border: '1px solid var(--border-subtle)',
               } : {}),
-            }}>{body.text}</div>
+            }}>{gmailLayout ? <GmailQuotedText key={message.id} text={body.text} /> : body.text}</div>
           )}
 
         </div>
       )}
 
+      {gmailLayout && confirmDeleteId === message.id && <GmailDeleteMessageConfirmation message={message} permanent={deleteMode === 'permanent'}
+        onCancel={() => setConfirmDeleteId(null)} onConfirm={() => { setConfirmDeleteId(null); onDelete(message); }} />}
       {showHeaderModal && (
         <MessageHeaderModal
           messageId={message.id}

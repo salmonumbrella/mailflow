@@ -1,0 +1,21 @@
+.gmail-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:40px; color:var(--text-secondary); font:inherit; flex-wrap:wrap; }
+.gmail-toolbar-actions,.gmail-toolbar-pagination { display:flex; align-items:center; gap:2px; }
+.gmail-toolbar-pagination { margin-left:auto; }
+.gmail-toolbar-icon { display:flex; align-items:center; justify-content:center; width:36px; height:36px; border:0; border-radius:50%; background:none; color:inherit; cursor:pointer; flex-shrink:0; }
+.gmail-toolbar-icon:hover,.gmail-toolbar-range:hover { background:var(--bg-hover); }
+.gmail-toolbar-icon:disabled,.gmail-toolbar-menu button:disabled { opacity:.4; cursor:default; }
+.gmail-toolbar-divider { height:20px; width:1px; margin:0 5px; background:var(--border); }
+.gmail-toolbar-range,.gmail-toolbar-filter { border:0; background:none; color:inherit; font:inherit; font-size:12px; padding:8px; cursor:pointer; border-radius:4px; }
+.gmail-toolbar-menu { position:fixed; z-index:1200; width:280px; max-width:calc(100vw - 16px); max-height:calc(100dvh - 16px); overflow:auto; box-sizing:border-box; padding:6px 0; border:1px solid var(--border); border-radius:6px; background:var(--bg-elevated); color:var(--text-primary); box-shadow:var(--shadow-popover); font:inherit; font-size:13px; }
+.gmail-toolbar-menu button { width:100%; display:block; border:0; background:none; color:inherit; font:inherit; padding:9px 16px; text-align:left; cursor:pointer; }
+.gmail-toolbar-menu button:hover:not(:disabled),.gmail-toolbar-menu button:focus-visible { background:var(--bg-hover); }
+.gmail-toolbar-menu p { margin:8px 16px; line-height:1.5; color:var(--text-secondary); }
+.gmail-toolbar-menu label { display:block; padding:8px 16px; }
+.gmail-toolbar-menu input { display:block; box-sizing:border-box; width:100%; padding:8px; margin-top:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-primary); color:var(--text-primary); font:inherit; }
+.gmail-toolbar-menu small { display:block; color:var(--text-tertiary); margin-top:3px; }
+.gmail-snooze-calendar { padding:8px 16px; }
+.gmail-snooze-month { display:flex; align-items:center; justify-content:space-between; }
+.gmail-snooze-month button { width:32px; text-align:center; padding:8px; }
+.gmail-snooze-days { display:grid; grid-template-columns:repeat(7,1fr); text-align:center; gap:2px; }
+.gmail-snooze-days button { padding:6px 0; text-align:center; border-radius:50%; }
+.gmail-snooze-days button[aria-pressed="true"] { background:var(--accent-dim); color:var(--accent); }

@@ -84,6 +84,47 @@ describe('POST /api/mail/draft — local row persistence', () => {
     expect(meta.messageId).toMatch(/^<[0-9a-f]+@mailflow\.sh>$/);
   });
 
+  it('stores explicit plain mode as plain-only MIME and a plain-only local row', async () => {
+    const signature = 'Me <me@example.com>\nA  & B <b>literal</b>';
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, body: 'Hi <you>', bodyIsHtml: false,
+        plaintextEmail: true, editedSignature: signature }),
+    });
+    expect(res.status).toBe(200);
+    const raw = imapManager.appendToFolder.mock.calls[0][2].toString();
+    expect(raw).toContain('Content-Type: text/plain');
+    expect(raw).not.toContain('text/html');
+    expect(imapManager.upsertDraftMessageRecord.mock.calls[0][3]).toMatchObject({
+      bodyHtml: null, bodyText: 'Hi <you>\n\n-- \n' + signature,
+    });
+  });
+
+  it('safely converts rich input and quote when saving a plain draft with attachments', async () => {
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, plaintextEmail: true, bodyIsHtml: true,
+        body: '<p>A &amp; B</p><script>unsafe()</script>', editedSignature: '<b>Me</b>',
+        quotedBodyHtml: '<p>Earlier</p>', attachments: [{ filename: 'note.txt', contentBase64: 'aGk=' }] }),
+    });
+    expect(res.status).toBe(200);
+    const raw = imapManager.appendToFolder.mock.calls[0][2].toString();
+    expect(raw).toContain('multipart/mixed');
+    expect(raw).not.toContain('text/html');
+    expect(raw).toContain('A & B');
+    expect(raw).toContain('Earlier');
+    expect(raw).not.toContain('unsafe()');
+  });
+
+  it('rejects non-boolean draft modes without writing a draft', async () => {
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, body: 'Hi', plaintextEmail: 'false' }),
+    });
+    expect(res.status).toBe(400);
+    expect(imapManager.appendToFolder).not.toHaveBeenCalled();
+  });
+
   it("tells the user's other tabs that a Drafts folder changed", async () => {
     imapManager.broadcast.mockReset();
     const res = await fetch(`${base}/api/mail/draft`, {

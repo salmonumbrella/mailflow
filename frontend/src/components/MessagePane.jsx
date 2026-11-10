@@ -1,5 +1,11 @@
 import { Fragment, useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
 import GmailReplyTarget from './GmailReplyTarget.jsx';
+import GmailMessageDetails from './GmailMessageDetails.jsx';
+import GmailQuotedText from './GmailQuotedText.jsx';
+import GmailDeleteMessageConfirmation from './GmailDeleteMessageConfirmation.jsx';
+import { readerDeleteMode } from '../utils/readerDeleteMode.js';
+import { installQuotedContent } from '../utils/quotedContent.js';
+import { openGmailSenderFilter } from '../utils/gmailSenderFilter.js';
 import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
@@ -80,6 +86,7 @@ function linkifyText(text) {
 export default function MessagePane({ windowMessageId = null, onWindowClose = null, onReplyDockTarget } = {}) {
   const { t } = useTranslation();
   const gmailLayout = useStore(s => s.layout === 'gmail');
+  const quoteLabel = t('gmailReader.quotedContent', { defaultValue: 'Quoted content' });
   const {
     messages, searchResults, searchQuery, selectedMessageId: globalSelectedId, setSelectedMessage,
     updateMessage, removeMessage, decrementUnread, incrementUnread, openCompose, accounts, addNotification,
@@ -227,6 +234,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const [savingAllow, setSavingAllow] = useState(false);
   const [paneScrolled, setPaneScrolled] = useState(false);
   const [showHeaderModal, setShowHeaderModal] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [resolvedSubject, setResolvedSubject] = useState(null);
   const [showMovePicker, setShowMovePicker] = useState(false);
   const [movePickerFolders, setMovePickerFolders] = useState([]);
@@ -550,14 +558,18 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       ro.observe(innerRef.current);
     }
 
+    const removeQuotes = gmailLayout ? installQuotedContent(innerRef.current, {
+      label: quoteLabel, onToggle: scheduleScale,
+    }) : null;
     scheduleScale();
 
     return () => {
+      removeQuotes?.();
       if (rafId) cancelAnimationFrame(rafId);
       if (ro) ro.disconnect();
       imageListeners.forEach(({ img, handler }) => img.removeEventListener('load', handler));
     };
-  }, [prepared]);
+  }, [prepared, gmailLayout, quoteLabel]);
 
   // Fade in pane content when switching messages on desktop. Before the paint: started after it,
   // the new message showed at full opacity for a frame, then blinked out and faded back in.
@@ -888,6 +900,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   useEffect(() => {
     setShowMovePicker(false);
     setShowHeaderModal(false);
+    setConfirmDeleteId(null);
     setContextMenu(null);
     setUnsubscribeStatus(null);
     setAiClassifying(false);
@@ -1003,6 +1016,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       },
     });
   };
+
+  const deleteMode = readerDeleteMode(message, accounts, useStore.getState().folders);
+  const requestDelete = () => gmailLayout && deleteMode !== 'trash' ? setConfirmDeleteId(message.id) : handleDelete();
 
   const handleArchive = () => {
     const archived = message;
@@ -1319,6 +1335,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     inSpamFolder && { key: 'ham', label: t('contextMenu.markAsHam'), icon: <HamIcon />, onClick: () => performSingleSpamLabel('ham') },
     todoistConnected && { key: 'todoist', label: t('todoist.title'), icon: <TodoistIcon />, onClick: () => setShowTodoistModal(true) },
     { key: 'read', label: message.is_read ? t('contextMenu.markUnread') : t('contextMenu.markRead'), icon: <ReadStateIcon isRead={message.is_read} />, onClick: handleToggleRead },
+    gmailLayout && message.from_email && { key: 'filterSender', label: t('gmailReader.filterSender', { defaultValue: 'Filter messages like this' }), icon: <HeadersIcon />, onClick: () => { if (!openGmailSenderFilter(message)) addNotification({ type: 'error', title: t('gmailReader.filterUnavailable', { defaultValue: 'Sender filtering is unavailable in this view or account.' }) }); } },
     { key: 'headers', label: t('contextMenu.viewHeaders'), icon: <HeadersIcon />, onClick: () => setShowHeaderModal(true) },
     // The raw RFC 822 source as an .eml file (#381).
     { key: 'eml', label: t('message.downloadEml'), icon: <DownloadIcon />, onClick: () => downloadEml(message.id) },
@@ -1537,7 +1554,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
           <StarIcon filled={message.is_starred} />
         </ActionBtn>
 
-        <ActionBtn onClick={handleDelete} label={t('message.delete')} danger touch={isMobile}>
+        <ActionBtn onClick={requestDelete} label={gmailLayout && deleteMode === 'permanent' ? t('gmailReader.deletePermanently', { defaultValue: 'Delete this message permanently' }) : t('message.delete')} danger touch={isMobile}>
           <TrashIcon />
         </ActionBtn>
       </div>
@@ -1615,6 +1632,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
 
             {/* Sender info */}
             <div style={{ flex: 1, minWidth: 0 }}>
+              {gmailLayout && <GmailMessageDetails message={message} body={body} />}
               {isMobile ? (
                 <>
                   <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -1951,6 +1969,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
               <MessageBodyView
                 iframeRef={iframeRef}
                 body={body}
+                collapseQuotes={gmailLayout}
                 dark={bodyDark}
                 onDarkResult={result => setDarkResult({ id: selectedMessageId, ...result })}
                 messageId={selectedMessageId}
@@ -2005,8 +2024,11 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
             // and React writes this body in one piece, so the translator has nothing of React's
             // to break in here.
             translate="yes"
-            dangerouslySetInnerHTML={{ __html: linkifyText(body.text) }}
-          />
+            {...(!gmailLayout ? { dangerouslySetInnerHTML: { __html: linkifyText(body.text) } } : {})}
+          >
+            {gmailLayout ? <GmailQuotedText key={message.id} text={body.text} renderText={text => <span dangerouslySetInnerHTML={{ __html: linkifyText(text) }} />} />
+              : null}
+          </div>
         </div>
       )}
       {gmailLayout && <div className="mailflow-reader-replies">
@@ -2224,6 +2246,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
         </div>
       )}
 
+      {gmailLayout && confirmDeleteId === message.id && <GmailDeleteMessageConfirmation message={message} permanent={deleteMode === 'permanent'}
+        onCancel={() => setConfirmDeleteId(null)} onConfirm={() => { setConfirmDeleteId(null); handleDelete(); }} />}
       {showHeaderModal && (
         <MessageHeaderModal
           messageId={message.id}

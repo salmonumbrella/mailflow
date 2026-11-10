@@ -6,6 +6,7 @@ import { forwardIframeKeydown } from '../utils/iframeKeys.js';
 import { buildFrameDoc, DARK_DEFAULTS, SCALE_WRAPPER } from '../utils/emailFrameDoc.js';
 import { applyDarkBody, restoreBody } from '../utils/darkBody.js';
 import { loadImagesNearView } from '../utils/frameLazyImages.js';
+import { installQuotedContent } from '../utils/quotedContent.js';
 import { fitEmailToFrame, contentOverflows, createFitGuard, FIT_TOLERANCE_PX } from '../utils/emailFrameFit.js';
 
 // The theme's colors for a body shown dark (#228). They come from CSS variables that an admin's
@@ -55,8 +56,9 @@ let frameDocCount = 0;
 //
 // The experimental div renderer (VITE_EMAIL_DIV_RENDER) is deliberately NOT here: it is off
 // by default and untested, and moving it would double the size of this change.
-function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarget, onContextMenu, iframeRef, dark = false, onDarkResult }) {
+function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarget, onContextMenu, iframeRef, dark = false, onDarkResult, collapseQuotes = false }) {
   const { t } = useTranslation();
+  const quoteLabel = t('gmailReader.quotedContent', { defaultValue: 'Quoted content' });
   // Holds the ResizeObserver watching the frame's document, so the effect can disconnect the
   // previous one before observing a new document.
   const roRef = useRef(null);
@@ -121,6 +123,7 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
     let iframeKeyHandler = null;
     let focusReturn = null;
     let stopLazyImages = null;
+    let removeQuotes = null;
     let frameRo = null;
     // Shown once the dark pass has run (see the layout effect below), or if the document never
     // turns up, so a frame can never be left hidden.
@@ -201,6 +204,10 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
       forceEagerImages(doc);
 
       pinFrameRoot(doc);
+      if (collapseQuotes) removeQuotes = installQuotedContent(doc.getElementById(SCALE_WRAPPER), {
+        label: quoteLabel,
+        onToggle: () => { heights.reset(); scheduleMeasure({ fit: 'refit' }); },
+      });
 
       // Some marketing emails (e.g. Avis) use class-based !important rules that
       // lock layout to a fixed pixel width and cannot be overridden by our injected
@@ -404,10 +411,11 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
       }
       focusReturn?.();
       stopLazyImages?.();
+      removeQuotes?.();
       iframe.removeEventListener('load', onLoaded);
       emailScaleRef.current = 1;
     };
-  }, [body?.html, messageId, docKey, emailScaleRef, iframeRef]);
+  }, [body?.html, messageId, docKey, emailScaleRef, iframeRef, collapseQuotes, quoteLabel]);
 
   // With dark bodies on, the frame stays hidden until the dark pass has run. The browser parses
   // and paints the frame's document on its own schedule, and could paint it before the page's

@@ -52,6 +52,15 @@ describe('validateSendInput', () => {
     expect(valid({ priority: 'high' }).priority).toBe('high');
   });
 
+  it('preserves explicit per-message modes and rejects non-booleans', () => {
+    expect(valid().plaintextEmail).toBeUndefined();
+    expect(valid({ plaintextEmail: true }).plaintextEmail).toBe(true);
+    expect(valid({ plaintextEmail: false }).plaintextEmail).toBe(false);
+    for (const plaintextEmail of [null, 'false', 0, {}]) {
+      expect(thrown(() => valid({ plaintextEmail }))).toMatchObject({ status: 400 });
+    }
+  });
+
   it('throws a 400 SendError with the message the route answers', () => {
     const cases = [
       [{ to: [] }, 'accountId and to required'],
@@ -94,6 +103,15 @@ describe('resolveIdentity', () => {
     const id = await resolveIdentity('u1', valid());
     expect(findOwnedAccount).toHaveBeenCalledWith('u1', 'a1');
     expect(id).toEqual({ account, plaintextEmail: true, fromName: 'Me', fromEmail: 'me@example.com', replyTo: null, signature: '<b>Sig</b>' });
+  });
+
+  it('overrides the preference for this message only and preserves a literal plain signature', async () => {
+    const input = valid({ plaintextEmail: true, editedSignature: 'Me <me@example.com>\nA  &  B <b>literal</b>' });
+    const id = await resolveIdentity('u1', input);
+    expect(id).toMatchObject({ plaintextEmail: true, signature: input.editedSignature, signatureIsPlainText: true });
+    expect(buildMailOptions(input, id).text).toBe('Hello\n\n-- \n' + input.editedSignature);
+    expect((await resolveIdentity('u1', valid({ plaintextEmail: false }))).plaintextEmail).toBe(false);
+    expect(query.mock.calls.every(([sql]) => sql.startsWith('SELECT'))).toBe(true);
   });
 
   it('takes an alias of the account, which inherits the signature unless it has its own', async () => {
@@ -176,6 +194,14 @@ describe('buildMailOptions', () => {
 
   it('sends no HTML part for a plain-text user', () => {
     expect(buildMailOptions(valid(), identity({ plaintextEmail: true })).html).toBeUndefined();
+  });
+
+  it('honors explicit per-message modes over either account default', () => {
+    const plain = buildMailOptions(valid({ plaintextEmail: true, bodyIsHtml: true,
+      body: '<p>A &amp; B</p><script>unsafe()</script><p>C</p>', quotedBodyHtml: '<p>Earlier &lt;x&gt;</p>' }), identity());
+    expect(plain.html).toBeUndefined();
+    expect(plain.text).toBe('A & B\nC\nEarlier <x>');
+    expect(buildMailOptions(valid({ plaintextEmail: false }), identity({ plaintextEmail: true })).html).toContain('Hello');
   });
 
   it('gives every call its own Message-ID', () => {

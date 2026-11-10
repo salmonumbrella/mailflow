@@ -340,3 +340,34 @@ describe('a right-click on the email', () => {
     assert.equal(opened.length, 1);
   });
 });
+
+test('Gmail quote disclosures stay in the sandbox and persist across read-state rerenders', async () => {
+  const body = { html: '<p>New reply</p><div class="gmail_quote"><blockquote>Prior message</blockquote></div>', remoteImagesBlocked: true };
+  const iframeRef = React.createRef();
+  const emailScaleRef = { current: 1 };
+  await React.act(async () => root.render(null));
+  const render = async collapseQuotes => React.act(async () => root.render(React.createElement(MessageBodyView, {
+    body, messageId: 'quoted-message', collapseQuotes, emailScaleRef, iframeRef, onContextMenu: () => {},
+  })));
+  await render(true);
+  const iframe = iframeRef.current;
+  const source = iframe.getAttribute('srcdoc');
+  const doc = iframe.contentDocument;
+  doc.body.innerHTML = `<div id="mf-scale-wrapper" data-mf-doc="${/data-mf-doc="(\d+)"/.exec(source)[1]}">${body.html}</div>`;
+  await React.act(async () => iframe.dispatchEvent(new window.Event('load')));
+  const details = doc.querySelector('details');
+  assert.ok(details, 'quoted body has a disclosure');
+  assert.equal(document.querySelector('details'), null, 'untrusted body stays out of parent DOM');
+  assert.equal(details.open, false);
+  assert.equal(iframe.getAttribute('sandbox'), 'allow-same-origin allow-popups allow-popups-to-escape-sandbox');
+  assert.match(source, /script-src 'none'/);
+  assert.match(source, /img-src data: blob:/);
+  details.open = true;
+  await render(true);
+  assert.equal(doc.querySelector('details'), details, 'no new DOM transform on read-state update');
+  assert.equal(details.open, true);
+  assert.equal(iframe.getAttribute('srcdoc'), source, 'original source never rewritten');
+  await render(false);
+  assert.equal(doc.querySelector('details'), null, 'native layout keeps full message body');
+  assert.ok(doc.querySelector('blockquote'));
+});

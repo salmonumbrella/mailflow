@@ -8,7 +8,8 @@ vi.mock('./db.js', () => ({ query: vi.fn(), pool: { connect: vi.fn() } }));
 vi.mock('./pushNotifications.js', () => ({ sendPushToUser: vi.fn() }));
 vi.mock('../utils/mailUtils.js', () => ({ resolveSentFolder: vi.fn() }));
 
-import { ScheduledSender } from './scheduledSend.js';
+import { ScheduledSender, storeScheduledMessage, openJson, aad } from './scheduledSend.js';
+import { buildMailOptions, renderRawMessage } from './outgoingMail.js';
 import { resolveSentFolder } from '../utils/mailUtils.js';
 import { MAX_TICK_MS } from './scheduledSendRules.js';
 
@@ -261,5 +262,44 @@ describe('a claimed message', () => {
     expect(push).toHaveBeenCalledWith('u1', expect.objectContaining({
       title: 'Scheduled message', body: expect.stringMatching(/^Not sent: was scheduled for .*MailFlow was offline/), url: '/?scheduled=m1',
     }));
+  });
+});
+
+
+describe('scheduled per-message format persistence', () => {
+  it.each([true, false])('keeps mode %s and literal signatures through encrypted storage and sender restart', async plaintextEmail => {
+    const id = '11111111-1111-4111-8111-111111111111';
+    const account = { id: 'a1', name: 'Me', email_address: 'me@example.com', signature: '<p>Changed account signature</p>' };
+    const signature = 'Me <me@example.com>\nA  &  B <b>literal</b>';
+    const db = { query: vi.fn(async sql => ({ rows: sql.includes('INSERT INTO scheduled_messages') ? [{ id }] : [] })) };
+    await storeScheduledMessage(db, { id, userId: 'u1', accountId: account.id, clientKey: 'key', sendAt: new Date(),
+      payload: { v: 1, messageId: '<stable@example.com>', to: ['you@example.com'], body: 'Hello <you>',
+        bodyIsHtml: false, plaintextEmail, signature, signatureIsPlainText: true }, summary: {} });
+    const stored = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO scheduled_messages'))[1];
+    const row = { id, user_id: 'u1', account_id: account.id, version: 1, payload_enc: stored[7] };
+    expect(openJson(row.payload_enc, aad.payload(row))).toMatchObject({ plaintextEmail, signatureIsPlainText: true, signature });
+    sender = new ScheduledSender({ db });
+    const built = await sender.build(row, account);
+    expect(built.input.plaintextEmail).toBe(plaintextEmail);
+    expect(built.identity).toMatchObject({ plaintextEmail, signature, signatureIsPlainText: true });
+    const options = buildMailOptions(built.input, built.identity, built.forwarded, { messageId: built.payload.messageId });
+    expect(options.text).toBe('Hello <you>\n\n-- \n' + signature);
+    if (plaintextEmail) {
+      expect(options.html).toBeUndefined();
+      expect((await renderRawMessage(options)).toString()).not.toContain('text/html');
+    } else {
+      expect(options.html).toContain('&lt;me@example.com&gt;');
+      expect(options.html).not.toContain('<b>literal</b>');
+    }
+    expect(options.messageId).toBe('<stable@example.com>');
+  });
+
+  it('continues to treat unmarked legacy scheduled signatures as sanitized HTML', async () => {
+    sender = new ScheduledSender({ db: fakeDb() });
+    const identity = await sender.identityFor({ email_address: 'me@example.com', name: 'Me' },
+      { plaintextEmail: true, signature: '<b>Me</b><script>unsafe()</script>' });
+    expect(identity.signature).toBe('<b>Me</b>');
+    expect(identity.signatureIsPlainText).toBeUndefined();
+    expect(buildMailOptions({ body: 'Hello', to: [], cc: [], bcc: [] }, identity).text).toBe('Hello\n\n-- \nMe');
   });
 });

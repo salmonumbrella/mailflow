@@ -257,3 +257,25 @@ describe('PATCH /auth/preferences listSort', () => {
     });
   }
 });
+
+describe('PATCH /auth/preferences composeDefaultFullscreen', () => {
+  it.each([true, false])('persists explicit %s without changing presentation preferences', async value => {
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await patchPreferences({ session: { userId: 'user-1' }, body: { composeDefaultFullscreen: value } }, res);
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain("jsonb_build_object('composeDefaultFullscreen', $49::boolean)");
+    expect(params[48]).toBe(value);
+    expect(params.slice(1, 4)).toEqual([null, null, null]);
+  });
+  it.each(['true', 1, null, {}])('rejects malformed value %s without a write', async value => {
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await patchPreferences({ session: { userId: 'user-1' }, body: { composeDefaultFullscreen: value } }, res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(query).not.toHaveBeenCalled();
+  });
+  it('preserves the saved preference when omitted', async () => {
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await patchPreferences({ session: { userId: 'user-1' }, body: { theme: 'dark' } }, res);
+    expect(query.mock.calls[0][1][48]).toBeNull();
+  });
+});

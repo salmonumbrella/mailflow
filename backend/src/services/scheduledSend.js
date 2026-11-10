@@ -623,6 +623,7 @@ export class ScheduledSender {
       subject: payload.subject,
       body: payload.body ?? '',
       bodyIsHtml: payload.bodyIsHtml === true,
+      plaintextEmail: payload.plaintextEmail === true,
       quotedBody: payload.quotedBody,
       quotedBodyHtml: payload.quotedBodyHtml,
       inReplyTo: payload.inReplyTo,
@@ -657,7 +658,8 @@ export class ScheduledSender {
       fromName,
       fromEmail,
       replyTo,
-      signature: payload.signature ? sanitizeSignature(payload.signature) : null,
+      signature: payload.signature ? (payload.signatureIsPlainText === true ? payload.signature : sanitizeSignature(payload.signature)) : null,
+      ...(payload.signatureIsPlainText === true ? { signatureIsPlainText: true } : {}),
     };
   }
 

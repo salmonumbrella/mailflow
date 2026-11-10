@@ -9,7 +9,7 @@ registerHooks({
   load(url, context, nextLoad) {
     if (url.endsWith('react-i18next/dist/es/index.js') || url.endsWith('/react-i18next')) {
       return { format: 'module', shortCircuit: true, source: [
-        'export const useTranslation = () => ({ t: (k, d) => (typeof d === "string" ? d : d?.defaultValue ?? k), i18n: { language: "en", changeLanguage: () => {} } });',
+        'export const useTranslation = () => ({ t: (k, d) => (typeof d === "string" ? d : (d?.defaultValue ?? k).replace(/{{(\\w+)}}/g, (_, name) => d[name])), i18n: { language: "en", changeLanguage: () => {} } });',
         'export const initReactI18next = { type: "3rdParty", init: () => {} };',
         'export const Trans = ({ children }) => children ?? null;',
         'export const I18nextProvider = ({ children }) => children ?? null;',
@@ -412,4 +412,265 @@ test('Gmail selection menu keyboard navigation, Escape and outside dismissal pre
   await React.act(async () => document.body.dispatchEvent(new window.Event('pointerdown', { bubbles: true })));
   assert.equal(container.querySelector('[role="menu"][aria-label="Select messages"]'), null);
   assert.equal(container.querySelectorAll('.mailflow-message-row[data-checked="true"]').length, 0);
+});
+
+const toolbarButton = label => container.querySelector(`.gmail-toolbar [aria-label="${label}"]`);
+const toolbarClick = async label => { const el = toolbarButton(label); assert.ok(el, label); await React.act(async () => el.click()); };
+const menuClick = async label => { const el = [...document.querySelectorAll('.gmail-toolbar-menu button')].find(button => button.textContent === label); assert.ok(el, label); await React.act(async () => el.click()); };
+async function selectToolbarRows(rows, threadedView = false) {
+  useStore.setState({ notifications: [], layout: 'gmail', scrollMode: 'infinite', enabledPlugins: [] });
+  await mount({ rows, threadedView });
+  await React.act(async () => container.querySelector('[data-gmail-select-all]').click());
+}
+
+test('Gmail toolbar More and Escape preserve selected identity and restore focus across layout changes', async () => {
+  await selectToolbarRows([MESSAGE]);
+  const trigger = toolbarButton('More');
+  await toolbarClick('More');
+  assert.equal(document.activeElement.textContent, 'Mark as read');
+  await React.act(async () => document.activeElement.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'End', bubbles: true })));
+  assert.equal(document.activeElement.textContent, 'Forward as attachment');
+  await React.act(async () => document.activeElement.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+  assert.equal(document.activeElement, trigger);
+  assert.equal(document.querySelector('.gmail-toolbar-menu'), null);
+  assert.ok(toolbarButton('Archive'), 'Escape only dismisses the menu, not the selection');
+  await toolbarClick('More');
+  await switchLayout('comfortable');
+  assert.equal(document.querySelector('.gmail-toolbar-menu'), null);
+  assert.equal(document.querySelector('.gmail-toolbar'), null);
+  await switchLayout('gmail');
+  assert.ok(toolbarButton('Archive'));
+});
+
+test('Gmail toolbar read resolves the selected thread and excludes unselected conversations', async () => {
+  const originalThread = api.getThread, originalRead = api.bulkRead;
+  const calls = [];
+  const member = { ...MESSAGE, id: 'member', thread_id: THREAD.thread_id, is_read: true };
+  api.getThread = async (...args) => { calls.push(['thread', ...args]); return { messages: [THREAD, member] }; };
+  api.bulkRead = async (...args) => { calls.push(['read', ...args]); };
+  try {
+    const { clearReadGuard } = await import('../utils/pendingReads.js');
+    clearReadGuard(THREAD.id);
+    await selectToolbarRows([THREAD], true);
+    await toolbarClick('Mark as read');
+    assert.deepEqual(calls[0], ['thread', 'thr-1', 'INBOX', false]);
+    assert.deepEqual(calls[1], ['read', ['msg-2', 'member'], true]);
+    assert.equal(useStore.getState().messages[0].is_read, true);
+  } finally { api.getThread = originalThread; api.bulkRead = originalRead; }
+});
+
+test('Gmail toolbar delete fails closed when selected thread cannot resolve', async () => {
+  const original = api.getThread; const originalDelete = api.bulkDelete; let deleted = 0;
+  api.getThread = async () => { throw new Error('Thread unavailable'); };
+  api.bulkDelete = async () => { deleted++; return { deleted: [] }; };
+  try {
+    await selectToolbarRows([THREAD], true);
+    await toolbarClick('Delete');
+    assert.equal(deleted, 0);
+    assert.equal(useStore.getState().messages[0].id, THREAD.id);
+    assert.ok(toolbarButton('Delete'), 'selection is retained for retry');
+    assert.match(useStore.getState().notifications.at(-1).body, /Thread unavailable/);
+  } finally { api.getThread = original; api.bulkDelete = originalDelete; }
+});
+
+test('Gmail toolbar move uses exact selected thread members, restores failed native move and counts', async () => {
+  const originals = { getThread: api.getThread, bulkMove: api.bulkMove, getFolders: api.getFolders };
+  const member = { ...MESSAGE, id: 'member', thread_id: THREAD.thread_id };
+  const calls = [];
+  api.getThread = async () => ({ messages: [THREAD, member] });
+  api.getFolders = async () => [{ path: 'Archive', name: 'Archive' }];
+  api.bulkMove = async (...args) => { calls.push(args); throw new Error('Move failed'); };
+  try {
+    await selectToolbarRows([THREAD], true);
+    await toolbarClick('Move to'); await menuClick('Archive');
+    assert.equal(useStore.getState().messages.length, 0);
+    const { flushUndoables } = await import('../utils/undoableAction.js');
+    await React.act(async () => { flushUndoables(); await new Promise(resolve => setTimeout(resolve, 0)); });
+    assert.deepEqual(calls, [[['msg-2', 'member'], 'Archive']]);
+    assert.equal(useStore.getState().messages[0].id, 'msg-2');
+    assert.ok(useStore.getState().notifications.some(n => n.title === 'messageList.bulkMoved.failTitle'));
+  } finally { Object.assign(api, originals); }
+});
+
+test('Gmail toolbar snooze cancel has no effects, failed snooze leaves row selected', async () => {
+  const original = api.snoozeMessage; const calls = [];
+  api.snoozeMessage = async (...args) => { calls.push(args); throw new Error('offline'); };
+  try {
+    await selectToolbarRows([MESSAGE]);
+    await toolbarClick('Snooze'); await menuClick('Pick date & time'); await menuClick('Cancel');
+    assert.equal(calls.length, 0); assert.ok(toolbarButton('Snooze'));
+    await toolbarClick('Snooze');
+    const tomorrow = [...document.querySelectorAll('.gmail-toolbar-menu button')].find(button => button.textContent.startsWith('Tomorrow'));
+    await React.act(async () => tomorrow.click());
+    assert.equal(calls[0][0], MESSAGE.id); assert.ok(Date.parse(calls[0][1]) > Date.now());
+    assert.equal(useStore.getState().messages[0].id, MESSAGE.id);
+    assert.ok(useStore.getState().notifications.some(n => n.body.includes('could not be updated')));
+  } finally { api.snoozeMessage = original; }
+});
+
+test('Gmail toolbar unsupported capabilities explain boundaries without sending writes', async () => {
+  await selectToolbarRows([MESSAGE]);
+  CALLS = [];
+  await toolbarClick('Labels'); assert.match(document.querySelector('.gmail-toolbar-menu').textContent, /not supported/);
+  await toolbarClick('Add to Tasks'); assert.match(document.querySelector('.gmail-toolbar-menu').textContent, /Google Tasks is not connected/);
+  assert.equal(CALLS.filter(call => call.method !== 'GET').length, 0);
+  await React.act(async () => window.dispatchEvent(new window.Event('scroll')));
+  assert.equal(document.querySelector('.gmail-toolbar-menu'), null);
+});
+
+test('Gmail toolbar folder lookup dismissed while pending cannot reopen or move mail', async () => {
+  const original = api.getFolders; let resolveFolders;
+  api.getFolders = () => new Promise(resolve => { resolveFolders = resolve; });
+  try {
+    await selectToolbarRows([MESSAGE]);
+    await toolbarClick('Move to');
+    assert.match(document.querySelector('.gmail-toolbar-menu').textContent, /Loading folders/);
+    await React.act(async () => document.body.dispatchEvent(new window.Event('pointerdown', { bubbles: true })));
+    assert.equal(document.querySelector('.gmail-toolbar-menu'), null);
+    await React.act(async () => resolveFolders([{ path: 'stale', name: 'stale' }]));
+    assert.equal(document.querySelector('.gmail-toolbar-menu'), null);
+    assert.equal(useStore.getState().messages[0].id, MESSAGE.id);
+  } finally { api.getFolders = original; }
+});
+
+test('Gmail toolbar newer/older and newest/oldest send native offsets and preserve page on failure', async () => {
+  const original = api.getMessages; const calls = []; let fail = false;
+  api.getMessages = async params => { calls.push(params); if (fail) throw new Error('offline'); return { messages: [MESSAGE], total: 125 }; };
+  try {
+    useStore.setState({ layout: 'gmail', scrollMode: 'paginated', pageSize: 50, notifications: [] });
+    await mount({ rows: [MESSAGE], threadedView: false });
+    assert.equal(toolbarButton('Newer').disabled, true);
+    await toolbarClick('Older');
+    assert.equal(calls.at(-1).offset, 50);
+    assert.match(container.querySelector('.gmail-toolbar-range').textContent, /51–51 of 125/);
+    await React.act(async () => container.querySelector('.gmail-toolbar-range').click());
+    await menuClick('Oldest'); assert.equal(calls.at(-1).offset, 100);
+    assert.equal(toolbarButton('Older').disabled, true);
+    fail = true;
+    await toolbarClick('Newer');
+    assert.match(container.querySelector('.gmail-toolbar-range').textContent, /101–101 of 125/);
+    assert.ok(useStore.getState().notifications.some(n => n.title === 'Could not load this page'));
+    fail = false;
+    await React.act(async () => container.querySelector('.gmail-toolbar-range').click());
+    await menuClick('Newest'); assert.equal(calls.at(-1).offset, 0);
+  } finally { api.getMessages = original; }
+});
+
+test('Gmail toolbar validates snooze future and native 30-day boundary', async () => {
+  const { validSnooze, snoozePresets } = await import('./GmailToolbar.jsx');
+  const now = new Date('2026-11-10T10:00:00Z');
+  assert.equal(validSnooze('bad', now), false);
+  assert.equal(validSnooze(now.toISOString(), now), false);
+  assert.equal(validSnooze('2026-12-11T10:00:00Z', now), false);
+  assert.equal(validSnooze('2026-12-10T10:00:00Z', now), true);
+  assert.equal(snoozePresets(now).length, 4);
+  assert.ok(snoozePresets(now).every(([, date]) => validSnooze(date, now)));
+});
+
+test('Gmail toolbar Trash deletion requires a separate explicit confirmation and cancel keeps mail', async () => {
+  await selectToolbarRows([{ ...MESSAGE, folder: 'Trash' }]);
+  await React.act(async () => useStore.setState({ folders: { [ACCOUNT.id]: [{ path: 'Trash', special_use: '\\Trash' }] } }));
+  CALLS = [];
+  await toolbarClick('Delete permanently');
+  assert.match(document.querySelector('.gmail-toolbar-menu').textContent, /cannot be recovered/);
+  await menuClick('Cancel');
+  assert.equal(useStore.getState().messages[0].id, MESSAGE.id);
+  assert.equal(CALLS.filter(call => call.method !== 'GET').length, 0);
+});
+
+test('Gmail toolbar native read failure restores flags and reports an actionable error', async () => {
+  const original = api.bulkRead;
+  const { clearReadGuard } = await import('../utils/pendingReads.js'); clearReadGuard(MESSAGE.id);
+  api.bulkRead = async () => { throw new Error('offline'); };
+  try {
+    await selectToolbarRows([MESSAGE]); await toolbarClick('Mark as read');
+    assert.equal(useStore.getState().messages[0].is_read, false);
+    assert.ok(useStore.getState().notifications.some(n => n.title === 'Could not complete the selected action'));
+    assert.ok(toolbarButton('Mark as read'));
+  } finally { api.bulkRead = original; }
+});
+
+test('Gmail toolbar filter uses clicked sender account and opens an editable native filter without writes', async () => {
+  useStore.setState({ user: { id: 'user-toolbar' } });
+  await selectToolbarRows([{ ...MESSAGE, from_email: 'sender@example.com' }]);
+  CALLS = [];
+  await toolbarClick('More'); await menuClick('Filter messages like this');
+  const dialog = document.querySelector('[aria-label="Advanced search"]');
+  assert.ok(dialog);
+  assert.equal([...dialog.querySelectorAll('label')].find(label => label.querySelector('span')?.textContent === 'From').querySelector('input').value, 'sender@example.com');
+  assert.equal(CALLS.filter(call => call.method !== 'GET').length, 0);
+});
+
+test('Gmail toolbar spam excludes own sent replies and Undo restores only the visible thread row', async () => {
+  const originals = { getThread: api.getThread, markSpam: api.markSpam };
+  const own = { ...MESSAGE, id: 'own-reply', from_email: ACCOUNT.email_address, folder: 'Sent', is_read: true };
+  const incoming = { ...THREAD, from_email: 'sender@example.com' };
+  const child = { ...MESSAGE, id: 'incoming-child', message_id: '<incoming-child@example.com>', from_email: 'sender@example.com' };
+  const calls = [];
+  api.getThread = async () => ({ messages: [incoming, child, own] });
+  api.markSpam = async id => { calls.push(id); };
+  try {
+    await selectToolbarRows([incoming], true); await toolbarClick('Report spam');
+    assert.equal(useStore.getState().messages.length, 0);
+    await React.act(async () => useStore.getState().notifications.find(n => n.onUndo).onUndo());
+    assert.deepEqual(useStore.getState().messages.map(m => m.id), [incoming.id]);
+    assert.deepEqual(calls, []);
+    await React.act(async () => container.querySelector('[data-gmail-select-all]').click());
+    await toolbarClick('Report spam');
+    const { flushUndoables } = await import('../utils/undoableAction.js');
+    await React.act(async () => { flushUndoables(); await new Promise(resolve => setTimeout(resolve, 0)); });
+    assert.deepEqual(calls.sort(), ['incoming-child', 'msg-2']);
+  } finally { Object.assign(api, originals); }
+});
+
+test('Gmail mobile retains native paginated footer navigation', async () => {
+  const width = window.innerWidth, original = api.getMessages; const calls = [];
+  window.innerWidth = 375;
+  api.getMessages = async params => { calls.push(params); return { messages: [MESSAGE], total: 125 }; };
+  try {
+    useStore.setState({ layout: 'gmail', scrollMode: 'paginated', pageSize: 50 });
+    await mount({ rows: [MESSAGE], threadedView: false });
+    assert.equal(container.querySelector('.gmail-toolbar'), null);
+    const next = [...container.querySelectorAll('button')].find(button => button.textContent.includes('messageList.nextPage'));
+    assert.ok(next);
+    await React.act(async () => next.click());
+    assert.equal(calls.at(-1).offset, 50);
+  } finally { window.innerWidth = width; api.getMessages = original; }
+});
+
+test('Gmail retains and exposes native unread filter across layout switches', async () => {
+  await selectToolbarRows([MESSAGE]);
+  await toolbarClick('Unread only');
+  assert.equal(toolbarButton('Unread only').getAttribute('aria-pressed'), 'true');
+  await switchLayout('comfortable'); await switchLayout('gmail');
+  assert.equal(toolbarButton('Unread only').getAttribute('aria-pressed'), 'true');
+  await toolbarClick('Unread only');
+  assert.equal(toolbarButton('Unread only').getAttribute('aria-pressed'), 'false');
+});
+
+test('Gmail move menu never offers native no_select containers', async () => {
+  const original = api.getFolders;
+  api.getFolders = async () => [{ path: 'Container', name: 'Container', no_select: true }, { path: 'Destination', name: 'Destination' }];
+  try {
+    await selectToolbarRows([MESSAGE]); await toolbarClick('Move to');
+    const labels = [...document.querySelectorAll('.gmail-toolbar-menu [role="menuitem"]')].map(button => button.textContent);
+    assert.deepEqual(labels, ['Destination']);
+  } finally { api.getFolders = original; }
+});
+
+test('Gmail pagination labels follow ascending dates and nonchronological native sorts', async () => {
+  const original = api.getMessages; const calls = [];
+  api.getMessages = async params => { calls.push(params); return { messages: [MESSAGE], total: 125 }; };
+  try {
+    useStore.setState({ layout: 'gmail', scrollMode: 'paginated', pageSize: 50, listSort: { 'acct-1:INBOX': { sort: 'date', dir: 'asc' } } });
+    await mount({ rows: [MESSAGE], threadedView: false });
+    assert.equal(toolbarButton('Older').disabled, true);
+    await toolbarClick('Newer'); assert.equal(calls.at(-1).offset, 50);
+    await React.act(async () => container.querySelector('.gmail-toolbar-range').click());
+    await menuClick('Newest'); assert.equal(calls.at(-1).offset, 100);
+    await React.act(async () => useStore.setState({ listSort: { 'acct-1:INBOX': { sort: 'subject', dir: 'asc' } } }));
+    assert.ok(toolbarButton('Previous page')); assert.ok(toolbarButton('Next page'));
+    await React.act(async () => container.querySelector('.gmail-toolbar-range').click());
+    assert.match(document.querySelector('.gmail-toolbar-menu').textContent, /First pageLast page/);
+  } finally { api.getMessages = original; await React.act(async () => useStore.setState({ listSort: {} })); }
 });

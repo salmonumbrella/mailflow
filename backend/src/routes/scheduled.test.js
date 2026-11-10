@@ -24,6 +24,8 @@ import routes from './scheduled.js';
 import { query, withTransaction } from '../services/db.js';
 import { findOwnedAccount, findOwnedScheduledMessage } from '../services/ownership.js';
 import { consume } from '../services/rateLimiter.js';
+import { resolveIdentity } from '../services/outgoingMail.js';
+import { openJson, aad } from '../services/scheduledSend.js';
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
 const ID = '22222222-2222-4222-8222-222222222222';
@@ -67,6 +69,22 @@ describe('POST /scheduled checks before storing anything', () => {
     const r = await call('POST', '', createBody(extra));
     expect(r).toMatchObject({ status, body: { error } });
     expect(withTransaction).not.toHaveBeenCalled();
+  });
+
+  it('persists the resolved message mode and signature format in the encrypted compose payload', async () => {
+    vi.stubEnv('ENCRYPTION_KEY', '7a'.repeat(32));
+    const signature = 'Me <me@example.com>\nA & B';
+    resolveIdentity.mockResolvedValueOnce({ fromEmail: 'me@example.com', plaintextEmail: true,
+      signature, signatureIsPlainText: true });
+    const client = { query: vi.fn(async (sql, values) => ({ rows: sql.includes('COUNT(*)')
+      ? [{ pending: 0, bytes: 0 }] : sql.includes('INSERT INTO scheduled_messages') ? [{ id: values[0] }] : [] })) };
+    withTransaction.mockImplementationOnce(fn => fn(client));
+    const result = await call('POST', '', createBody({ plaintextEmail: true, bodyIsHtml: false, editedSignature: signature }));
+    expect(result.status).toBe(201);
+    expect(resolveIdentity).toHaveBeenCalledWith('u1', expect.objectContaining({ plaintextEmail: true, editedSignature: signature }));
+    const insert = client.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO scheduled_messages'))[1];
+    const payload = openJson(insert[7], aad.payload({ id: insert[0], user_id: 'u1', version: 1 }));
+    expect(payload).toMatchObject({ plaintextEmail: true, bodyIsHtml: false, signatureIsPlainText: true, signature });
   });
 
   it('takes 60 s ahead at the earliest and 366 days at the latest, by the server clock', async () => {

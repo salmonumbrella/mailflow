@@ -161,6 +161,7 @@ async function buildSpec(userId, body, { messageId } = {}) {
     quotedBody: input.quotedBody ?? null,
     quotedBodyHtml: input.quotedBodyHtml ?? null,
     signature: identity.signature ?? null,
+    ...(identity.signatureIsPlainText ? { signatureIsPlainText: true } : {}),
     plaintextEmail: identity.plaintextEmail === true,
     inReplyTo: input.inReplyTo ?? null,
     references: input.references ?? null,

@@ -143,7 +143,10 @@ export const useStore = create((set, get) => ({
       // device's cache, under their message id, for whoever signs in next.
       aiRuns.abortAll();
       // The message remembered for the lock screen is the leaving user's too.
-      if (get().user) localStorage.removeItem('mailflow_locked_message');
+      if (get().user) {
+        localStorage.removeItem('mailflow_locked_message');
+        localStorage.removeItem('mailflow_compose_default_fullscreen');
+      }
     }
     set(state => ({
       user,
@@ -175,7 +178,7 @@ export const useStore = create((set, get) => ({
         enabledPlugins: [], autoLockMinutes: 0, blockRemoteImages: true,
         imageWhitelist: { addresses: [], domains: [] }, shortcuts: {}, aiActions: null,
         hiddenFolders: {}, categorizationEnabled: false, gtdPetSlug: null,
-        autoOpenReplyDrafts: false, afterRemove: 'next', darkEmailBodies: true,
+        autoOpenReplyDrafts: false, composeDefaultFullscreen: false, afterRemove: 'next', darkEmailBodies: true,
         // Folder shortcuts name the previous user's accounts and folders. Left in place, the
         // next user's first favorite saved them into that user's own preferences.
         favoriteFolders: [], recentFolders: [], defaultSender: '', listSort: {},
@@ -596,6 +599,14 @@ export const useStore = create((set, get) => ({
     localStorage.setItem('mailflow_auto_open_reply_drafts', String(Boolean(value)));
     set({ autoOpenReplyDrafts: Boolean(value) });
     schedulePrefSave({ autoOpenReplyDrafts: Boolean(value) });
+  },
+  composeDefaultFullscreen: localStorage.getItem('mailflow_compose_default_fullscreen') === 'true',
+  composeDefaultFullscreenEpoch: 0,
+  setComposeDefaultFullscreen: (value) => {
+    if (typeof value !== 'boolean') return;
+    localStorage.setItem('mailflow_compose_default_fullscreen', String(value));
+    set(state => ({ composeDefaultFullscreen: value, composeDefaultFullscreenEpoch: state.composeDefaultFullscreenEpoch + 1 }));
+    schedulePrefSave({ composeDefaultFullscreen: value });
   },
   composing: false,
   composeData: null,
@@ -1306,6 +1317,7 @@ export const useStore = create((set, get) => ({
   loadPreferences: async () => {
     const userId = get().user?.id;
     const faviconEpoch = get().senderFaviconsEpoch;
+    const fullscreenEpoch = get().composeDefaultFullscreenEpoch;
     try {
       const prefs = await api.getPreferences();
       if (get().user?.id !== userId) return;
@@ -1340,6 +1352,11 @@ export const useStore = create((set, get) => ({
           ? undefined
           : (Number(localStorage.getItem('mailflow_list_width')) || undefined);
         applyLayout(clean, savedListWidth);
+      }
+      // A local toggle made while this GET was in flight owns the newer choice.
+      if (typeof prefs.composeDefaultFullscreen === 'boolean' && get().composeDefaultFullscreenEpoch === fullscreenEpoch) {
+        localStorage.setItem('mailflow_compose_default_fullscreen', String(prefs.composeDefaultFullscreen));
+        set({ composeDefaultFullscreen: prefs.composeDefaultFullscreen });
       }
       if (typeof prefs.autoOpenReplyDrafts === 'boolean') {
         localStorage.setItem('mailflow_auto_open_reply_drafts', String(prefs.autoOpenReplyDrafts));

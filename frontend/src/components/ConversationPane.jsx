@@ -17,6 +17,7 @@ import { useSwipeBack } from '../hooks/useSwipeBack.js';
 import SwipePager from './SwipePager.jsx';
 import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/printMessage.js';
 import GmailReplyTarget from './GmailReplyTarget.jsx';
+import { deleteReaderMessage } from '../utils/deleteReaderMessage.js';
 import ConversationMessageCard from './ConversationMessageCard.jsx';
 import { aiReplyAvailable } from '../utils/aiReply.js';
 import ContextMenu from './ContextMenu.jsx';
@@ -83,6 +84,9 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   // The conversation the cards on screen belong to, set when its fetch lands (the stack's key).
   const [loadedConversation, setLoadedConversation] = useState(null);
   const [aiStatus, setAiStatus] = useState(null);
+  const conversationIdentity = `${accountId || ''}\n${threadId}`;
+  const conversationIdentityRef = useRef(conversationIdentity);
+  conversationIdentityRef.current = conversationIdentity;
 
   useEffect(() => {
     api.ai.status().then(setAiStatus).catch(() => {});
@@ -246,6 +250,35 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   const updateConversationMessage = (id, patch) => {
     setMessages(prev => prev.map(message => (message.id === id ? { ...message, ...patch } : message)));
     updateMessage(id, patch);
+  };
+
+  const deleteConversationMessage = (message) => {
+    const identity = loadedConversation;
+    // Old cards can still be visible while the newly selected conversation is loading.
+    if (identity !== conversationIdentityRef.current) return;
+    const remaining = messages.filter(item => item.id !== message.id);
+    deleteReaderMessage(message, {
+      t, addNotification,
+      beforeRemove: () => {
+        const state = useStore.getState();
+        // Keep a selected conversation open on a surviving actual message identity,
+        // including a card that is not itself the list's representative row.
+        state.setThreadMessages(threadId, remaining);
+        if (state.selectedMessageId === message.id && remaining.length) {
+          state.setSelectedMessage(newestConversationMessage(inAccount(remaining, accountId))?.id || remaining.at(-1).id);
+        } else if (state.selectedMessageId === message.id) state.setSelectedMessage(null);
+      },
+      onRemove: () => {
+        if (conversationIdentityRef.current === identity) setMessages(current => current.filter(item => item.id !== message.id));
+      },
+      onRestore: () => {
+        if (conversationIdentityRef.current !== identity) return;
+        setMessages(current => normalizeConversation([...current.filter(item => item.id !== message.id), message]));
+        const state = useStore.getState();
+        const cached = state.threadMessages[threadId] || [];
+        state.setThreadMessages(threadId, normalizeConversation([...cached.filter(item => item.id !== message.id), message]));
+      },
+    });
   };
 
   // The window opens on the click, before any await, or the browser blocks it. Bodies are loaded
@@ -438,6 +471,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
             selected={message.id === focusedId}
             onToggle={toggle}
             onUpdate={updateConversationMessage}
+            onDelete={deleteConversationMessage}
             aiEnabled={aiEnabled}
             aiReplyEnabled={aiReplyEnabled}
           />

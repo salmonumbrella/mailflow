@@ -7,6 +7,7 @@ import './index.css';
 import './gmail-layout.css';
 import './gmail-surfaces.css';
 import './gmail-search.css';
+import './components/GmailToolbar.css';
 import { i18nReady } from './i18n.js';
 import './plugins/index.js'; // register bundled plugins' UI slots before first paint
 

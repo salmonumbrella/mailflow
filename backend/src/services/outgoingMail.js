@@ -172,9 +172,12 @@ export function missingSendFields(body) {
 // subject made a safe header value, priority one of high/normal/low. Throws SendError (400).
 // Nothing here reads the database or the mail server, so it is cheap to run before anything else.
 export function validateSendInput(body) {
-  const { accountId, aliasId, to, cc = [], bcc = [], subject, body: text, bodyIsHtml = false, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, editedSignature, forwardedAttachments, forwardedMessages, priority } = body || {};
+  const { accountId, aliasId, to, cc = [], bcc = [], subject, body: text, bodyIsHtml = false, plaintextEmail, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, editedSignature, forwardedAttachments, forwardedMessages, priority } = body || {};
   const missing = missingSendFields(body);
   if (missing) throw new SendError(400, missing);
+  if (plaintextEmail !== undefined && typeof plaintextEmail !== 'boolean') {
+    throw new SendError(400, 'plaintextEmail must be a boolean');
+  }
 
   if (attachments !== undefined) {
     if (!Array.isArray(attachments)) throw new SendError(400, 'attachments must be an array');
@@ -214,6 +217,7 @@ export function validateSendInput(body) {
     subject: sanitizeHeaderValue(subject || ''),
     body: text,
     bodyIsHtml,
+    ...(plaintextEmail !== undefined ? { plaintextEmail } : {}),
     quotedBody,
     quotedBodyHtml,
     inReplyTo,
@@ -236,7 +240,7 @@ export async function resolveIdentity(userId, input) {
     query('SELECT preferences FROM users WHERE id = $1', [userId]),
   ]);
   if (!owned) throw new SendError(404, 'Account not found');
-  const plaintextEmail = prefResult.rows[0]?.preferences?.plaintextEmail === true;
+  const plaintextEmail = input.plaintextEmail ?? (prefResult.rows[0]?.preferences?.plaintextEmail === true);
 
   // Resolve the From identity: account by default, alias if requested
   let fromName = owned.sender_name || owned.name;
@@ -261,11 +265,15 @@ export async function resolveIdentity(userId, input) {
 
   // Allow the client to override the signature per-send (editedSignature === undefined means use DB value).
   // Sanitize client-supplied HTML to prevent injecting scripts or tracking pixels into sent mail.
+  // Explicit plain composers send a literal signature; legacy clients and stored identities
+  // still provide HTML. Keep its format so '<name@example.com>' never becomes a tag.
+  const signatureIsPlainText = input.plaintextEmail === true && !input.bodyIsHtml && editedSignature !== undefined;
   const signature = editedSignature !== undefined
-    ? (editedSignature ? sanitizeSignature(editedSignature) : null)
+    ? (editedSignature ? (signatureIsPlainText ? editedSignature : sanitizeSignature(editedSignature)) : null)
     : fromSignature;  // fromSignature from DB is already sanitized on write
 
-  return { account: owned, plaintextEmail, fromName, fromEmail, replyTo, signature };
+  return { account: owned, plaintextEmail, fromName, fromEmail, replyTo, signature,
+    ...(signatureIsPlainText ? { signatureIsPlainText: true } : {}) };
 }
 
 // Fetches the forwarded attachments and the messages forwarded whole from IMAP, and checks the
@@ -394,7 +402,9 @@ function asSendError(err, fallback) {
 // every attempt), and `options.date` the current time.
 export function buildMailOptions(input, identity, forwarded = { attachments: [], messages: [] }, options = {}) {
   const { body, bodyIsHtml, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, priority } = input;
-  const { fromName, fromEmail, replyTo, signature, plaintextEmail } = identity;
+  const { fromName, fromEmail, replyTo, signature, signatureIsPlainText } = identity;
+  const plaintextEmail = input.plaintextEmail ?? identity.plaintextEmail;
+  const quotedText = quotedBody || (quotedBodyHtml ? '\n' + composeHtmlToText(quotedBodyHtml) : '');
 
   // Use a stable Message-ID so the SMTP copy and any IMAP APPEND reference the same message.
   const domain = fromEmail.split('@')[1] || 'mailflow.local';
@@ -415,15 +425,15 @@ export function buildMailOptions(input, identity, forwarded = { attachments: [],
     subject: input.subject,
     ...(priority !== 'normal' ? { priority } : {}),
     text: signature
-      ? bodyToPlain(body, bodyIsHtml) + '\n\n-- \n' + sigToPlainText(signature) + (quotedBody || '')
-      : bodyToPlain(body, bodyIsHtml) + (quotedBody || ''),
+      ? bodyToPlain(body, bodyIsHtml) + '\n\n-- \n' + (signatureIsPlainText ? signature : sigToPlainText(signature)) + quotedText
+      : bodyToPlain(body, bodyIsHtml) + quotedText,
   };
 
   let inlineImageAttachments = [];
   if (!plaintextEmail) {
     const rawHtml = bodyToHtml(body, bodyIsHtml) +
       (signature
-        ? '<div style="margin-top:16px;color:#555;font-size:13px">' + signature + '</div>'
+        ? '<div style="margin-top:16px;color:#555;font-size:13px">' + (signatureIsPlainText ? textToHtml(signature) : signature) + '</div>'
         : '') +
       (quotedBodyHtml || (quotedBody ? textToHtml(quotedBody) : ''));
     const embedded = embedInlineDataImages(rawHtml);

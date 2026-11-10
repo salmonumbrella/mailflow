@@ -267,11 +267,13 @@ export function composeDataFromScheduled(detail) {
     bcc: spec.bcc || [],
     subject: spec.subject || '',
     body: spec.body || '',
+    bodyIsHtml: spec.bodyIsHtml !== false,
+    ...(typeof spec.plaintextEmail === 'boolean' ? { plaintextEmail: spec.plaintextEmail } : {}),
     ...(spec.quotedBody ? { quotedBody: spec.quotedBody } : {}),
     ...(spec.quotedBodyHtml ? { quotedBodyHtml: spec.quotedBodyHtml } : {}),
     // What it was to be sent with: an empty one is the signature turned off. The composer reads
     // it as HTML, so a plain-text one is escaped, as buildRestoreData does for undo send.
-    signature: spec.plaintextEmail === true ? escapePlain(spec.signature ?? '') : (spec.signature ?? ''),
+    signature: spec.signatureIsPlainText === true ? escapePlain(spec.signature ?? '') : (spec.signature ?? ''),
     ...(spec.priority && spec.priority !== 'normal' ? { priority: spec.priority } : {}),
     ...(spec.inReplyTo ? { inReplyTo: spec.inReplyTo } : {}),
     ...(spec.references ? { references: spec.references } : {}),

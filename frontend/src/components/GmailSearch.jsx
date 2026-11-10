@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { GMAIL_SENDER_FILTER_EVENT, gmailSenderFilterDetails } from '../utils/gmailSenderFilter.js';
 import { quoteSearch, refineSearchQuery, hasSearchRefinement, rememberSearch, searchFieldsToQuery, searchQueryToFields, searchQueryToRule } from '../utils/gmailSearch.js';
 
 function SearchAddressInput({ value, onChange, inputRef, ...props }) {
@@ -39,6 +40,7 @@ export default function GmailSearch({ query, onChange, inputRef }) {
   const [fields, setFields] = useState(() => searchQueryToFields(query));
   const [contacts, setContacts] = useState([]);
   const [notice, setNotice] = useState('');
+  const [senderScope, setSenderScope] = useState(null);
   const [filterQuery, setFilterQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [applyExisting, setApplyExisting] = useState(false);
@@ -104,9 +106,24 @@ export default function GmailSearch({ query, onChange, inputRef }) {
   }, [query, open]);
 
   const saveHistory = next => { setHistory(next); try { localStorage.setItem(historyKey, JSON.stringify(next)); } catch { /* Search still works without storage. */ } };
-  const close = () => { setOpen(null); input.current?.focus(); };
+  const close = () => { setSenderScope(null); setOpen(null); input.current?.focus(); };
   const submit = value => { onChange(value); saveHistory(rememberSearch(history, value)); setOpen(null); input.current?.focus(); };
-  const advanced = () => { setFields(searchQueryToFields(query)); setNotice(''); setOpen('advanced'); };
+  const advanced = () => { setSenderScope(null); setFields(searchQueryToFields(query)); setNotice(''); setOpen('advanced'); };
+  useEffect(() => {
+    const openSenderFilter = event => {
+      if (busy || event.defaultPrevented) return;
+      const detail = event.detail;
+      const state = useStore.getState();
+      const verified = gmailSenderFilterDetails({ account_id: detail?.accountId, from_email: detail?.sender }, state);
+      if (!verified || detail.userId !== verified.userId) return;
+      setSenderScope({ accountId: verified.accountId, userId: verified.userId });
+      setFields({ ...searchQueryToFields(''), from: verified.sender });
+      setNotice(''); setOpen('advanced');
+      event.preventDefault();
+    };
+    window.addEventListener(GMAIL_SENDER_FILTER_EVENT, openSenderFilter);
+    return () => window.removeEventListener(GMAIL_SENDER_FILTER_EVENT, openSenderFilter);
+  }, [busy]);
   const setField = (key, value) => setFields(current => ({ ...current, [key]: value }));
   const builtQuery = () => { try { return searchFieldsToQuery(fields); } catch (error) { setNotice(error.message); return null; } };
   const createFilter = () => {
@@ -114,9 +131,11 @@ export default function GmailSearch({ query, onChange, inputRef }) {
     if (!value) return;
     try {
       searchQueryToRule(value);
-      const displayed = accounts.filter(account => account.enabled !== false && (accountId ? account.id === accountId : account.include_in_unified_inbox !== false));
-      setFilterScope({ accounts: displayed, scopeAccountId: accountId || null });
-      setFilterAccountId(accountId || (displayed.length === 1 ? displayed[0].id : ''));
+      const scopeAccountId = senderScope?.accountId || accountId || null;
+      const displayed = accounts.filter(account => account.enabled !== false && (scopeAccountId ? account.id === scopeAccountId : account.include_in_unified_inbox !== false));
+      if ((senderScope && senderScope.userId !== userId) || (scopeAccountId && !displayed.length)) throw new Error('The filter account is no longer available in this scope.');
+      setFilterScope({ accounts: displayed, scopeAccountId, userId });
+      setFilterAccountId(scopeAccountId || (displayed.length === 1 ? displayed[0].id : ''));
       runAttempt.current = null;
       setFilterQuery(value); setName(value); setApplyExisting(false); setSavedRuleId(null); setActions({ archive: false, mark_read: false, star: false, delete: false, category: '', move: '' }); setNotice(''); setOpen('filter'); }
     catch (error) { setNotice(error.message); }
@@ -129,6 +148,15 @@ export default function GmailSearch({ query, onChange, inputRef }) {
     if (actions.move && filterAccountId) selected.push({ type: 'move', value: actions.move });
     selected.sort((a, b) => Number(['archive', 'delete', 'move'].includes(a.type)) - Number(['archive', 'delete', 'move'].includes(b.type)));
     if (!filterAccountId) { setNotice('Choose an account from this search for the filter.'); return; }
+    // Recheck the captured scope at submission: account removal/disablement while this dialog
+    // is open must not turn a message-specific filter into a unified or different-account rule.
+    const current = useStore.getState();
+    const liveAccount = current.accounts.find(account => account.id === filterAccountId && account.enabled !== false);
+    if (current.user?.id !== filterScope.userId || !liveAccount
+      || !filterScope.accounts.some(account => account.id === filterAccountId)
+      || (filterScope.scopeAccountId ? filterScope.scopeAccountId !== filterAccountId : liveAccount.include_in_unified_inbox === false)) {
+      setNotice('The filter account is no longer available in this scope.'); return;
+    }
     if (!selected.length) { setNotice('Select at least one filter action.'); return; }
     setBusy(true); setNotice('');
     try {

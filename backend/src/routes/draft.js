@@ -270,7 +270,7 @@ function textToHtml(text) {
     .join('');
 }
 
-async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature, inReplyTo, references, attachments = [] }) {
+async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, plaintextEmail, quotedBody, quotedBodyHtml, editedSignature, inReplyTo, references, attachments = [] }) {
   const replyToId = replyHeader(inReplyTo, true);
   const referenceIds = replyHeader(references) || replyToId;
   const acctResult = await query(
@@ -298,9 +298,9 @@ async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, b
   }
 
   const rawSignature = editedSignature !== undefined ? (editedSignature || null) : fromSignature;
-  const effectiveSignature = rawSignature ? sanitizeSignature(rawSignature) : null;
-
-  const sigText = effectiveSignature ? composeHtmlToText(effectiveSignature) : null;
+  const signatureIsPlainText = plaintextEmail === true && !bodyIsHtml && editedSignature !== undefined;
+  const effectiveSignature = rawSignature ? (signatureIsPlainText ? textToHtml(rawSignature) : sanitizeSignature(rawSignature)) : null;
+  const sigText = signatureIsPlainText ? rawSignature : (effectiveSignature ? composeHtmlToText(effectiveSignature) : null);
 
   const bodyText = bodyIsHtml ? composeHtmlToText(body || '') : (body || '');
 
@@ -319,12 +319,14 @@ async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, b
     (effectiveSignature ? `<div data-mailflow-signature="1" style="${SIGNATURE_BLOCK_STYLE}">${effectiveSignature}</div>`
       : editedSignature !== undefined ? `<div data-mailflow-signature="1" style="${SIGNATURE_BLOCK_STYLE}"></div>` : '') +
     (quotedBodyHtml || (quotedBody ? textToHtml(quotedBody) : ''));
-  const { html: draftHtml, attachments: inlineImageAttachments } = embedInlineDataImages(rawHtml);
+  const { html: draftHtml, attachments: inlineImageAttachments } = plaintextEmail === true
+    ? { html: null, attachments: [] } : embedInlineDataImages(rawHtml);
 
   // Stable Message-ID so the appended MIME and the local DB row reference the same
   // message (and a later sync reconciles cleanly).
   const messageId = `<${randomBytes(16).toString('hex')}@${(fromEmail.split('@')[1] || 'mailflow.local')}>`;
-  const textBody = sigText ? `${bodyText}\n\n-- \n${sigText}${quotedBody || ''}` : `${bodyText}${quotedBody || ''}`;
+  const quotedText = quotedBody || (quotedBodyHtml ? '\n' + composeHtmlToText(quotedBodyHtml) : '');
+  const textBody = sigText ? `${bodyText}\n\n-- \n${sigText}${quotedText}` : `${bodyText}${quotedText}`;
 
   const mailOptions = {
     messageId,
@@ -336,7 +338,7 @@ async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, b
     ...(replyToId ? { inReplyTo: replyToId } : {}),
     ...(referenceIds ? { references: referenceIds } : {}),
     text: textBody,
-    html: draftHtml,
+    ...(plaintextEmail === true ? {} : { html: draftHtml }),
     ...((inlineImageAttachments.length || attachments.length) ? { attachments: [...inlineImageAttachments, ...attachments] } : {}),
   };
 
@@ -355,13 +357,16 @@ async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, b
   return {
     rawMessage: Buffer.concat(chunks),
     account,
-    meta: { messageId, fromName, fromEmail, bodyHtml: rawHtml, bodyText: textBody, snippet, inReplyTo: replyToId, references: referenceIds },
+    meta: { messageId, fromName, fromEmail, bodyHtml: plaintextEmail === true ? null : rawHtml, bodyText: textBody, snippet, inReplyTo: replyToId, references: referenceIds },
   };
 }
 
 router.post('/draft', async (req, res) => {
-  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, existingUid, existingFolder, existingAccountId, inReplyTo, references, attachments: rawAttachments } = req.body;
+  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, plaintextEmail, quotedBody, quotedBodyHtml, editedSignature, existingUid, existingFolder, existingAccountId, inReplyTo, references, attachments: rawAttachments } = req.body;
   if (!accountId) return res.status(400).json({ error: 'accountId required' });
+  if (plaintextEmail !== undefined && typeof plaintextEmail !== 'boolean') {
+    return res.status(400).json({ error: 'plaintextEmail must be a boolean' });
+  }
 
   if (!(await findOwnedAccount(req.session.userId, accountId, { columns: 'id' }))) return res.status(404).json({ error: 'Account not found' });
 
@@ -369,7 +374,7 @@ router.post('/draft', async (req, res) => {
   try { attachments = normalizeDraftAttachments(rawAttachments); } catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
 
   try {
-    const { rawMessage, account, meta } = await buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature, inReplyTo, references, attachments });
+    const { rawMessage, account, meta } = await buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, plaintextEmail, quotedBody, quotedBodyHtml, editedSignature, inReplyTo, references, attachments });
 
     const draftsFolder = await resolveDraftsFolder(account);
     if (!draftsFolder) return res.status(422).json({ error: 'No Drafts folder found for this account' });

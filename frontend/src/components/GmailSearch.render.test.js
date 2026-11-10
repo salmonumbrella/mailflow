@@ -213,3 +213,130 @@ test('an uncertain historical start is checked, never automatically resubmitted,
   assert.match(container().querySelector('[role="status"]').textContent, /Completed actions were not undone/);
   assert.equal(starts, 1);
 });
+
+// The reader's sender action must carry the clicked copy's account, never the toolbar scope.
+const senderMessage = { id: 'copy-b', account_id: 'acct-b', from_email: 'sender@example.test', from_name: 'Sender' };
+async function senderFilter(message = senderMessage) {
+  const { openGmailSenderFilter } = await import('../utils/gmailSenderFilter.js');
+  let accepted;
+  await React.act(async () => { accepted = openGmailSenderFilter(message); });
+  return accepted;
+}
+async function senderSetup() {
+  await mount('subject:existing-search');
+  await React.act(async () => useStore.setState({ layout: 'gmail', accounts: [
+    { id: 'acct-a', enabled: true },
+    { id: 'acct-b', enabled: true, include_in_unified_inbox: false },
+    { id: 'disabled', enabled: false },
+  ] }));
+}
+
+test('sender filter opens editable criteria for the clicked account without changing the current search or saving', async () => {
+  await senderSetup();
+  assert.equal(await senderFilter(), true);
+  const dialog = container().querySelector('[aria-label="Advanced search"]');
+  assert.ok(dialog);
+  assert.equal(dialog.querySelector('input').value, 'sender@example.test');
+  assert.equal(query, 'subject:existing-search');
+  assert.equal(useStore.getState().selectedAccountId, 'acct-a');
+  assert.equal(payloads.length, 0);
+  await input(dialog.querySelector('input'), 'edited@example.test');
+  await click(button('Create filter'));
+  const selector = container().querySelector('[aria-label="Filter account"]');
+  assert.equal(selector.value, 'acct-b');
+  assert.deepEqual([...selector.options].map(option => option.value), ['', 'acct-b']);
+  await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
+  await click(button('Create filter'));
+  assert.deepEqual(payloads[0].searchScope, { accountIds: ['acct-b'], scopeAccountId: 'acct-b' });
+  assert.deepEqual(payloads[0].conditions, [{ field: 'from', operator: 'contains', value: 'edited@example.test' }]);
+});
+
+test('sender filter cannot fall back to unified for absent, disabled, unowned accounts or missing sender', async () => {
+  await senderSetup();
+  for (const message of [
+    { ...senderMessage, account_id: undefined }, { ...senderMessage, account_id: 'disabled' },
+    { ...senderMessage, account_id: 'not-owned' }, { ...senderMessage, from_email: '' },
+  ]) {
+    assert.equal(await senderFilter(message), false);
+    assert.equal(container().querySelector('[role="dialog"]'), null);
+  }
+  assert.equal(payloads.length, 0);
+});
+
+test('sender filter cancellation discards its scope before ordinary search filter creation', async () => {
+  await senderSetup(); await senderFilter();
+  await click(button('Create filter')); await click(button('Cancel'));
+  assert.equal(payloads.length, 0);
+  assert.equal(query, 'subject:existing-search');
+  await click(button('Advanced search options')); await click(button('Create filter'));
+  assert.equal(container().querySelector('[aria-label="Filter account"]').value, 'acct-a');
+});
+
+test('sender filter rejects an account disabled or removed after opening and cannot widen its scope', async () => {
+  for (const stale of ['disabled', 'removed']) {
+    await senderSetup(); await senderFilter(); await click(button('Create filter'));
+    await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
+    await React.act(async () => useStore.setState({ accounts: stale === 'removed' ? [{ id: 'acct-a', enabled: true }] : [{ id: 'acct-a', enabled: true }, { id: 'acct-b', enabled: false }] }));
+    await click(button('Create filter'));
+    assert.equal(payloads.length, 0);
+    assert.match(container().querySelector('[role="alert"]').textContent, /account.*(available|scope)/i);
+    await React.act(async () => root.unmount()); root = null;
+  }
+});
+
+test('sender filter preserves its exact account for historical runs and does nothing in other layouts', async () => {
+  await senderSetup();
+  for (const layout of ['comfortable', 'compact', 'outlook']) {
+    await React.act(async () => useStore.setState({ layout }));
+    assert.equal(await senderFilter(), false);
+    assert.equal(container().querySelector('[role="dialog"]'), null);
+  }
+  await React.act(async () => useStore.setState({ layout: 'gmail', selectedAccountId: null }));
+  await senderFilter(); await click(button('Create filter'));
+  const starts = [];
+  api.runRule = async (id, scope) => { starts.push({ id, scope }); return { ruleId: id, runId: scope.runId, status: 'completed' }; };
+  await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
+  await click([...container().querySelectorAll('label')].find(l => l.textContent.includes('Also apply only this filter')).querySelector('input'));
+  await click(button('Create filter'));
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].scope.scopeAccountId, 'acct-b');
+  assert.deepEqual(starts[0].scope.accountIds, ['acct-b']);
+});
+
+test('sender criteria retain the clicked account across Back and reject staleness before creating a filter', async () => {
+  await senderSetup(); await senderFilter(); await click(button('Create filter'));
+  await click(button('‹ Back to search options'));
+  await input(container().querySelector('[aria-label="Advanced search"] input'), 'new@example.test');
+  await click(button('Create filter'));
+  assert.equal(container().querySelector('[aria-label="Filter account"]').value, 'acct-b');
+  await click(button('‹ Back to search options'));
+  await React.act(async () => useStore.setState({ accounts: [{ id: 'acct-a', enabled: true }] }));
+  await click(button('Create filter'));
+  assert.ok(container().querySelector('[aria-label="Advanced search"]'));
+  assert.match(container().querySelector('[role="alert"]').textContent, /account.*available/i);
+  assert.equal(payloads.length, 0);
+});
+
+test('an identity change cannot save a sender filter for the previous user', async () => {
+  await senderSetup(); await senderFilter(); await click(button('Create filter'));
+  await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
+  await React.act(async () => useStore.setState({ user: { id: 'user-b' } }));
+  await click(button('Create filter'));
+  assert.equal(payloads.length, 0);
+  assert.match(container().querySelector('[role="alert"]').textContent, /account.*scope/i);
+});
+
+test('a sender action cannot replace an in-flight save, and reopening starts with empty actions', async () => {
+  await senderSetup(); await senderFilter(); await click(button('Create filter'));
+  await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
+  let finish;
+  api.createRule = value => { payloads.push(value); return new Promise(resolve => { finish = resolve; }); };
+  await click(button('Create filter'));
+  assert.equal(await senderFilter({ ...senderMessage, account_id: 'acct-a' }), false);
+  assert.equal(container().querySelector('[aria-label="Filter account"]').value, 'acct-b');
+  await React.act(async () => finish({ id: 'saved-rule' }));
+  await senderFilter(); await click(button('Create filter'));
+  assert.equal([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input').checked, false);
+  await click(button('Cancel'));
+  assert.equal(payloads.length, 1);
+});
