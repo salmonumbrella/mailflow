@@ -137,6 +137,33 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('invitation ledger on d
       expect((await readInvitationResponse(key)).phase).toBe('prepare');
     } finally { await other.query('ROLLBACK'); other.release(); }
   });
+  it.each([6, 9])('atomically fences an occurrence behind master rank %s committing concurrently', async rank => {
+    const series = 'invitation_sequence:occurrence', master = 'invitation_sequence:master';
+    await observeInvitationSequence(series, 2);
+    await ledger.checkInvitationMasterSequence(master, 2, scope);
+    const { state } = await reserveInvitationResponse(key, request());
+    const other = await boundary.pool.connect();
+    try {
+      await other.query('BEGIN');
+      await other.query('UPDATE invitation_response_state SET value = $2 WHERE key = $1', [master, String(rank)]);
+      const claim = ledger.claimInvitationDelivery(key, state.attemptId, series, 2, scope, master);
+      const result = expect(claim).rejects.toThrow('meeting series');
+      await new Promise(resolve => setTimeout(resolve, 30));
+      await other.query('COMMIT');
+      await result;
+      expect((await readInvitationResponse(key)).phase).toBe('prepare');
+    } finally { await other.query('ROLLBACK'); other.release(); }
+  });
+  it.each([-1, 4, 5, 6])('allows a newer or equal occurrence when master rank %s does not supersede it', async rank => {
+    const series = 'invitation_sequence:occurrence', master = 'invitation_sequence:master';
+    await observeInvitationSequence(series, 3);
+    await ledger.checkInvitationMasterSequence(master, 3, scope);
+    await boundary.pool.query('UPDATE invitation_response_state SET value = $2 WHERE key = $1', [master, String(rank)]);
+    await ledger.checkInvitationMasterSequence(master, 3, scope);
+    const { state } = await reserveInvitationResponse(key, request());
+    expect(await ledger.claimInvitationDelivery(key, state.attemptId, series, 3, scope, master)).toMatchObject({ phase: 'smtp' });
+    expect((await boundary.pool.query('SELECT value FROM invitation_response_state WHERE key = $1', [master])).rows[0].value).toBe(String(rank));
+  });
   it('one atomic send claim wins across racing callers', async () => {
     const series = 'invitation_sequence:claim';
     await observeInvitationSequence(series, 3);

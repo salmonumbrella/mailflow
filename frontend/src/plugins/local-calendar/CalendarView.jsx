@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next';
 import { htmlLang } from '../../utils/browserLanguage.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../../store/index.js';
+import { topOpenMessageWindow } from '../../utils/messageHotkeys.js';
 import { api } from '../../utils/api.js';
 import { addDays, dateLabel, wallTime, timeLabel, toInstant, visibleDays, navigateDate, eventOnDay, timedSegments } from './dates.js';
 import './calendar.css';
@@ -119,6 +120,8 @@ export default function CalendarView({ onBack }) {
   const openEvent = event => { setError(''); setEditor({ ...event, start: event.allDay ? event.start : wallTime(event.start, event.timezone), end: event.allDay ? event.end : wallTime(event.end, event.timezone) }); };
   useEffect(() => {
     const handler = e => {
+      const state = useStore.getState();
+      if (state.composing || state.showAdmin || topOpenMessageWindow(state)) return;
       if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || editor || settings || document.querySelector('[role="dialog"], [role="menu"]')) return;
       if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
       if ((e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'a') {

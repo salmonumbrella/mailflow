@@ -108,7 +108,7 @@ function MailCommandIcon({ action }) {
   return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[action]} /></svg>;
 }
 
-export default function CommandPalette({ open, onClose, labelPickerMessage = null }) {
+export default function CommandPalette({ open, onClose, labelPickerMessage = null, mailVisible = true, onMailNavigate }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
   const state = useStore();
@@ -118,12 +118,47 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
   const [listScrolled, setListScrolled] = useState(false);
   const inputRef = useRef(null);
   const listRef = useRef(null);
+  const retryRef = useRef(null);
   const busyRef = useRef(false);
   const sessionRef = useRef({ value: 0 });
+  const [folderError, setFolderError] = useState('');
+  const [folderRetry, setFolderRetry] = useState(0);
   const listId = useId();
   const superhuman = layout === 'superhuman';
 
   const pickerAccount = accounts.find(account => account.id === labelPickerMessage?.account_id);
+  const pickerAccountId = labelPickerMessage?.account_id;
+  const pickerFolders = folders[pickerAccountId];
+  const owner = state.user?.id;
+  const pickerFoldersUnknown = Boolean(labelPickerMessage && pickerAccount?.enabled && !Array.isArray(pickerFolders));
+
+  useEffect(() => {
+    setFolderError('');
+    if (!open || !pickerFoldersUnknown || state.isLocked) return;
+    let cancelled = false;
+    const session = sessionRef.current.value;
+    const unsubscribe = useStore.subscribe(live => {
+      if (live.user?.id !== owner || live.isLocked || !live.accounts.some(account => account.id === pickerAccountId && account.enabled)) cancelled = true;
+    });
+    const current = () => {
+      const live = useStore.getState();
+      return !cancelled && sessionRef.current.value === session && live.user?.id === owner && !live.isLocked
+        && live.accounts.some(account => account.id === pickerAccountId && account.enabled);
+    };
+    void (async () => {
+      try {
+        const result = await api.getFolders(pickerAccountId);
+        if (!current()) return;
+        if (!Array.isArray(result)) throw new Error(t('commandPalette.labelPicker.error', { defaultValue: 'Could not label message' }));
+        if (Array.isArray(useStore.getState().folders[pickerAccountId])) return;
+        useStore.getState().setFolders(pickerAccountId, result);
+      } catch (error) {
+        if (current()) setFolderError(error.message || t('commandPalette.labelPicker.error', { defaultValue: 'Could not label message' }));
+      }
+    })();
+    return () => { cancelled = true; unsubscribe(); };
+  }, [open, pickerFoldersUnknown, pickerAccountId, labelPickerMessage?.id, owner, state.isLocked, folderRetry, t]);
+
   const actions = labelPickerMessage
     ? labelPickerOptions(folders[labelPickerMessage.account_id], pickerAccount, labelPickerMessage.folder)
       .map(choice => ({
@@ -136,6 +171,7 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
     : [
       ...mailCommandDefinitions(state, t).filter(command => !isMobile || command.action !== 'showHelp').map(command => ({
         ...command,
+        disabled: command.disabled || (!mailVisible && !['focusSearch', 'showHelp'].includes(command.action)),
         icon: <MailCommandIcon action={command.action} />,
         closeBeforeRun: true,
         run: () => shortcutBus.emit(command.action),
@@ -186,6 +222,7 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
       if (action.closeBeforeRun) flushSync(() => {
         if (action.targetId != null) shortcutBus.emit('clearBulkSelection');
         onClose();
+        if (action.id === 'inbox' || action.id.startsWith('account:') || action.action === 'focusSearch') onMailNavigate?.();
       });
       if (action.targetId != null && selectedMessage(useStore.getState())?.id !== action.targetId) return;
       await action.run();
@@ -199,7 +236,7 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
     } finally {
       busyRef.current = false;
     }
-  }, [onClose, addNotification, t, labelPickerMessage]);
+  }, [onClose, onMailNavigate, addNotification, t, labelPickerMessage]);
 
   const handleKeyDown = (event) => {
     if (event.defaultPrevented || event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229) return;
@@ -212,6 +249,7 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
       do { next += direction; } while (next >= 0 && next < filtered.length && filtered[next].disabled);
       if (next >= 0 && next < filtered.length) setActiveIdx(next);
     } else if (event.key === 'Enter') {
+      if (event.target === retryRef.current) return;
       event.preventDefault();
       event.stopPropagation();
       void runAction(filtered[activeIndex]);
@@ -222,7 +260,8 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
     } else if (event.key === 'Tab') {
       event.preventDefault();
       event.stopPropagation();
-      inputRef.current?.focus();
+      if (retryRef.current && event.target !== retryRef.current) retryRef.current.focus();
+      else inputRef.current?.focus();
     }
   };
 
@@ -276,7 +315,11 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
           onScroll={event => setListScrolled(event.currentTarget.scrollTop > 4)}
           style={{ maxHeight: 390, overflowY: 'auto', padding: '6px 0', boxShadow: listScrolled ? 'inset 0 8px 8px -8px rgba(0,0,0,0.25)' : 'none', transition: 'box-shadow 0.2s ease' }}
         >
-          {filtered.length === 0 ? (
+          {pickerFoldersUnknown ? (
+            folderError ? <div role="alert" style={{ padding: '20px 16px', fontSize: 13 }}>
+              {folderError} <button ref={retryRef} type="button" onClick={() => { inputRef.current?.focus(); setFolderError(''); setFolderRetry(value => value + 1); }}>{t('common.retry')}</button>
+            </div> : <div role="status" style={{ padding: '20px 16px', fontSize: 13 }}>{t('common.loading')}</div>
+          ) : filtered.length === 0 ? (
             <div role="status" style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 13, textAlign: 'center' }}>{t('commandPalette.noResults')}</div>
           ) : filtered.map((action, index) => (
             <div

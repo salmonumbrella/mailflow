@@ -33,6 +33,10 @@ async function fakeQuery(sql, params = []) {
   if (sql.startsWith('INSERT INTO invitation_response_state') && sql.includes('GREATEST')) {
     const value = String(Math.max(Number(ledger.get(params[0]) || 0), params[1])); ledger.set(params[0], value); return { rows: [{ value }], rowCount: 1 };
   }
+  if (sql.startsWith('INSERT INTO invitation_response_state') && sql.includes("VALUES ($1, '-1'")) {
+    if (!ledger.has(params[0])) ledger.set(params[0], '-1');
+    return { rows: [{ value: ledger.get(params[0]) }], rowCount: 1 };
+  }
   if (sql.startsWith('INSERT INTO invitation_response_state')) {
     if (ledger.has(params[0])) return { rows: [], rowCount: 0 };
     ledger.set(params[0], params[1]); return { rows: [], rowCount: 1 };
@@ -40,6 +44,7 @@ async function fakeQuery(sql, params = []) {
   if (sql.startsWith('UPDATE invitation_response_state')) {
     if (failLedgerAfterAcceptance && JSON.parse(params[2]).status === 'sent') throw new Error('database unavailable');
     if (ledger.get(params[0]) !== params[1]) return { rows: [], rowCount: 0 };
+    if (sql.includes('cardinality($4::text[])') && params[3].some(key => !ledger.has(key) || Number(ledger.get(key)) > params[4])) return { rows: [], rowCount: 0 };
     ledger.set(params[0], params[2]); return { rows: [], rowCount: 1 };
   }
   return { rows: [{ id: 'contacts', address_book_id: 'contacts' }], rowCount: 1 };
@@ -104,4 +109,60 @@ describe('independent invitation regression review', () => {
     expect(result.status).toBe(409);
     expect(sent).not.toHaveBeenCalled();
   });
+});
+
+it('does not send an occurrence response after the recurring series was cancelled', async () => {
+  const occurrence = fixture.replace('SEQUENCE:3', 'SEQUENCE:3\r\nRECURRENCE-ID:20261112T140000Z');
+  engine.fetchRawMessage.mockResolvedValue(source(occurrence));
+  const input = await proposal();
+  const cancellation = fixture.replace('METHOD:REQUEST', 'METHOD:CANCEL').replace('SEQUENCE:3', 'SEQUENCE:4');
+  engine.fetchRawMessage.mockResolvedValue(Buffer.from(source(cancellation).toString().replace('method=REQUEST', 'method=CANCEL')));
+  expect((await call()).data.code).toBe('cancelled_invitation');
+  engine.fetchRawMessage.mockResolvedValue(source(occurrence));
+  const result = await call('POST', input);
+  expect(sent.mock.calls).toHaveLength(0);
+  expect(result.status).toBe(409);
+});
+
+
+it.each([null, 2, 3])('allows an occurrence when master sequence %s does not supersede it', async masterSequence => {
+  if (masterSequence !== null) {
+    engine.fetchRawMessage.mockResolvedValue(source(fixture.replace('SEQUENCE:3', `SEQUENCE:${masterSequence}`)));
+    expect((await call()).status).toBe(200);
+  }
+  engine.fetchRawMessage.mockResolvedValue(source(fixture.replace('SEQUENCE:3', 'SEQUENCE:3\r\nRECURRENCE-ID:20261112T140000Z')));
+  const result = await call('POST', await proposal());
+  expect(result.data.response.status).toBe('sent');
+  expect(sent).toHaveBeenCalledTimes(1);
+});
+
+it('blocks a master cancellation that arrives while an occurrence response is preparing', async () => {
+  const occurrence = fixture.replace('SEQUENCE:3', 'SEQUENCE:3\r\nRECURRENCE-ID:20261112T140000Z');
+  engine.fetchRawMessage.mockResolvedValue(source(occurrence));
+  const input = await proposal();
+  let release, started;
+  const preparing = new Promise(resolve => { started = resolve; });
+  createAccountSmtpTransport.mockImplementationOnce(() => new Promise(resolve => {
+    release = () => resolve({ account, transport: { sendMail: sent, close: vi.fn() } });
+    started();
+  }));
+  const pending = call('POST', input);
+  await preparing;
+  const cancellation = fixture.replace('METHOD:REQUEST', 'METHOD:CANCEL');
+  engine.fetchRawMessage.mockResolvedValue(Buffer.from(source(cancellation).toString().replace('method=REQUEST', 'method=CANCEL')));
+  expect((await call()).data.code).toBe('cancelled_invitation');
+  release();
+  const result = await pending;
+  expect(sent.mock.calls).toHaveLength(0);
+  expect(result.data.response).toMatchObject({ status: 'failed', code: 'outdated_invitation' });
+});
+
+it('keeps another occurrence cancellation isolated from this occurrence', async () => {
+  const other = fixture.replace('METHOD:REQUEST', 'METHOD:CANCEL').replace('SEQUENCE:3', 'SEQUENCE:4\r\nRECURRENCE-ID:20261119T140000Z');
+  engine.fetchRawMessage.mockResolvedValue(Buffer.from(source(other).toString().replace('method=REQUEST', 'method=CANCEL')));
+  expect((await call()).data.code).toBe('cancelled_invitation');
+  engine.fetchRawMessage.mockResolvedValue(source(fixture.replace('SEQUENCE:3', 'SEQUENCE:3\r\nRECURRENCE-ID:20261112T140000Z')));
+  const result = await call('POST', await proposal());
+  expect(result.data.response.status).toBe('sent');
+  expect(sent).toHaveBeenCalledTimes(1);
 });

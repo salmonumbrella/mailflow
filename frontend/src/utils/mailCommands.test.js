@@ -35,6 +35,8 @@ test('folders and undo reflect real availability rather than placeholder actions
   const withoutFolders = { ...selected, folders: { a: [{ path: 'INBOX' }, { path: 'Hidden', no_select: true }] } };
   assert.equal(canRunMailCommand('moveMessage', withoutFolders), false);
   assert.equal(canRunMailCommand('openLabelPicker', withoutFolders), false);
+  assert.equal(canRunMailCommand('openLabelPicker', { ...selected, folders: {} }), true);
+  assert.equal(canRunMailCommand('openLabelPicker', { ...selected, folders: { a: [] } }), false);
   assert.equal(canRunMailCommand('undoAction', { notifications: [] }), false);
   assert.equal(canRunMailCommand('undoAction', { notifications: [{ onUndo() {} }] }), true);
   assert.equal(commandShortcutLabel(null), '');

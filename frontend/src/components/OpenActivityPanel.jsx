@@ -3,6 +3,7 @@ import { htmlLang } from '../utils/browserLanguage.js';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../utils/api.js';
 import { useStore } from '../store/index.js';
+import { topOpenMessageWindow } from '../utils/messageHotkeys.js';
 import { OPEN_ACTIVITY_NOTICE, openActivityStatus } from '../utils/openActivity.js';
 
 const button = { padding: '7px 11px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-secondary)', color: 'var(--text-primary)', cursor: 'pointer' };
@@ -63,6 +64,9 @@ function OwnedActivity({ owner, accountId, onBack }) {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps -- keyed by owner and account
   useEffect(() => {
     const key = event => {
+      const state = useStore.getState();
+      if (state.composing || state.showAdmin || topOpenMessageWindow(state)) return;
+      if (document.querySelector('[role="dialog"], [role="menu"]')) return;
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing
         || event.target?.closest?.('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
       event.preventDefault(); onBack?.();

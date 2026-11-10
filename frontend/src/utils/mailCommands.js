@@ -19,7 +19,8 @@ export function canRunMailCommand(action, state) {
   // These handlers operate on the list selection, not a standalone pop-out.
   if (['archive', 'delete', 'snooze', 'moveMessage', 'toggleRead'].includes(action) && !state.selectedMessageId && !focusedListMessage(state)) return false;
   if (action === 'openLabelPicker') {
-    return labelPickerOptions(state.folders?.[account.id], account, message.folder).length > 0;
+    const folders = state.folders?.[account.id];
+    return !Array.isArray(folders) || labelPickerOptions(folders, account, message.folder).length > 0;
   }
   if (action === 'moveMessage') {
     return state.folders?.[account.id]?.some(folder => folder.path && !folder.no_select && folder.path !== message.folder) ?? false;

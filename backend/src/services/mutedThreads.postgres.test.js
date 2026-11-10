@@ -85,6 +85,31 @@ describe.skipIf(!URL)('native muted threads with disposable PostgreSQL', () => {
     expect(await mutedAlertIds(account,[incoming.id])).toEqual(new Set([incoming.id]));
     expect((await listMutedThreads(user)).messages[0].id).toBe(incoming.id);
   });
+  it('uses surviving References anchors consistently after cached ancestors disappear', async () => {
+    await mute();
+    await h.pool.query('DELETE FROM messages WHERE id=ANY($1::uuid[])', [[first.id, reply.id]]);
+    const incoming = await message(account, '<survivor@sample.example>', '<earlier-root@sample.example>', {
+      inReplyTo: '<uncached-parent@sample.example>',
+      references: '<earlier-root@sample.example> <root@sample.example> <uncached-parent@sample.example>',
+    });
+    expect((await getMutedThread(user, incoming.id)).muted).toBe(true);
+    expect.soft(await mutedAlertIds(account, [incoming.id, unrelated.id])).toEqual(new Set([incoming.id]));
+    expect.soft((await listMutedThreads(user)).messages.map(row => row.id)).toEqual([incoming.id]);
+  });
+  it('matches References tokens exactly, preserving case, account boundaries and parsing bounds', async () => {
+    await mute();
+    await h.pool.query('DELETE FROM messages WHERE id=ANY($1::uuid[])', [[first.id, reply.id]]);
+    const rows = [];
+    for (const [i, references] of [
+      '<prefix-root@sample.example>', '<root@sample.example.suffix>', '<ROOT@sample.example>',
+      'root@sample.example', '<root @sample.example>', 'x'.repeat(16385) + ' <root@sample.example>',
+    ].entries()) rows.push(await message(account, `<negative-${i}@sample.example>`, undefined, { references }));
+    const foreignCopy = await message(second, '<other-account@sample.example>', undefined, { references: '<root@sample.example>' });
+    const valid = await message(account, '<valid-reference@sample.example>', undefined, { references: '<unknown@sample.example>\r\n\t<root@sample.example>' });
+    expect(await mutedAlertIds(account, [...rows, foreignCopy, valid].map(row => row.id))).toEqual(new Set([valid.id]));
+    expect(await mutedAlertIds(second, [foreignCopy.id])).toEqual(new Set());
+    expect((await listMutedThreads(user)).messages.map(row => row.id)).toEqual([valid.id]);
+  });
   it('rejects deleted, disabled, malformed and oversized targets without widening scope', async () => {
     await expect(setMutedThread(user,'bad',{muted:true,revision:null})).rejects.toMatchObject({status:404});
     await expect(setMutedThread(user,first.id,{muted:true})).rejects.toMatchObject({status:400});

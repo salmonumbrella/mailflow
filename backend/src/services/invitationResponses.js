@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { findOwnedAccount, findOwnedMessage } from './ownership.js';
 import { buildCalendarReply, InvitationError, invitationKey, invitationSeriesKey, MAX_INVITATION_SOURCE_BYTES, trustedInvitation } from './calendarInvitation.js';
-import { claimInvitationDelivery, observeInvitationSequence, readInvitationResponse, reserveInvitationResponse, updateInvitationResponse, publicInvitationResponse } from './invitationLedger.js';
+import { checkInvitationMasterSequence, claimInvitationDelivery, observeInvitationSequence, readInvitationResponse, reserveInvitationResponse, updateInvitationResponse, publicInvitationResponse } from './invitationLedger.js';
 import { validateSendInput, resolveIdentity, prepareDelivery, deliverAndRecord } from './outgoingMail.js';
 import { classifySendError } from './scheduledSendRules.js';
 
@@ -22,7 +22,9 @@ export async function loadInvitation(userId, messageId, engine) {
   }
   const invitation = trustedInvitation(source, message, account);
   await observeInvitationSequence(invitationSeriesKey(userId, account.id, invitation), invitation.sequence, invitation.cancelled, { userId, accountId: account.id });
-  return { invitation, message, account, key: invitationKey(userId, account.id, invitation) };
+  const masterSeriesKey = invitation.recurrenceIdentity ? invitationSeriesKey(userId, account.id, { ...invitation, recurrenceIdentity: null }) : null;
+  if (masterSeriesKey) await checkInvitationMasterSequence(masterSeriesKey, invitation.sequence, { userId, accountId: account.id });
+  return { invitation, message, account, key: invitationKey(userId, account.id, invitation), masterSeriesKey };
 }
 
 function publicInvitation(invitation) {
@@ -36,7 +38,7 @@ export async function getInvitation(userId, messageId, engine) {
 }
 
 export async function respondToInvitation(userId, messageId, body, engine) {
-  const { invitation, message, account, key } = await loadInvitation(userId, messageId, engine);
+  const { invitation, message, account, key, masterSeriesKey } = await loadInvitation(userId, messageId, engine);
   if (body.revision !== invitation.revision) throw new InvitationError(409, 'The invitation changed. Reload it before responding.', 'invitation_changed');
   const content = buildCalendarReply(invitation, body.response);
   const scope = { userId, accountId: account.id };
@@ -61,7 +63,7 @@ export async function respondToInvitation(userId, messageId, body, engine) {
     // meanwhile must supersede this one before it is handed to SMTP.
     await observeInvitationSequence(invitationSeriesKey(userId, account.id, invitation), invitation.sequence, invitation.cancelled, { userId, accountId: account.id });
     // A stale preparation that lost its reservation must never reach SMTP.
-    const ready = await claimInvitationDelivery(key, attemptId, invitationSeriesKey(userId, account.id, invitation), invitation.sequence, scope);
+    const ready = await claimInvitationDelivery(key, attemptId, invitationSeriesKey(userId, account.id, invitation), invitation.sequence, scope, masterSeriesKey);
     if (!ready) return { invitation: publicInvitation(invitation), response: publicInvitationResponse(await readInvitationResponse(key, Date.now(), scope)) };
     phase = 'send';
     const result = await deliverAndRecord({ userId, input, identity, delivery }, {

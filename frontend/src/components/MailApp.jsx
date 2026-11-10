@@ -1137,7 +1137,7 @@ export default function MailApp() {
       <NotificationToasts />
       <BusinessNotice hidden={composing || showAdmin || (isMobile && mobileSidebarOpen)} />
       <PluginRuntime /><ThreadMuteRuntime />
-      <CommandPalette open={paletteOpen} labelPickerMessage={labelPickerMessage}
+      <CommandPalette open={paletteOpen} labelPickerMessage={labelPickerMessage} mailVisible={isMobile || !auxiliaryContent} onMailNavigate={closeAuxiliary}
         onClose={() => { setPaletteOpen(false); setLabelPickerMessage(null); }} />
 
       {/* Keyboard shortcut help overlay — toggled by the '?' key */}
@@ -1201,6 +1201,7 @@ function ShortcutHelpOverlay({ shortcuts, layout, onClose }) {
       }}
     >
       <div
+        role="dialog" aria-modal="true" aria-label={t('shortcuts.title')}
         onClick={e => e.stopPropagation()}
         style={{
           background: 'var(--bg-secondary)',

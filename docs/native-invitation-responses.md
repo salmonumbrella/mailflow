@@ -14,7 +14,7 @@ Replies use the existing `prepareDelivery` / `deliverAndRecord` SMTP pipeline wi
 
 Migration `0078_invitation_response_state.sql` adds owner/account-cascaded state. Keys hash the owner, account, organizer and event identity. Values contain revision ranks, statuses, choices, opaque attempt identifiers and timestamps, not raw calendar data or recipient addresses. SQL operations are owner/account scoped. No state row expires.
 
-Atomic compare-and-swap reservations prevent duplicate clicks and stale-tab response changes. The final SMTP claim locks the latest observed invitation sequence in the same statement. An opened newer request or cancellation blocks older responses, including one still preparing its SMTP transport. This does not discover newer calendar payloads that have not yet been opened.
+Atomic compare-and-swap reservations prevent duplicate clicks and stale-tab response changes. The final SMTP claim locks the latest observed invitation sequence in the same statement. For an occurrence reply, it also locks and checks the master-series revision. An opened newer request or cancellation blocks older responses, including one still preparing its SMTP transport; a series cancellation therefore also blocks an older occurrence reply. Equal unchanged master requests and independently newer occurrences remain eligible. This does not discover newer calendar payloads that have not yet been opened.
 
 SMTP acceptance is persisted before Sent-folder and metadata work. Known failures permit an explicit versioned retry. Lost/ambiguous SMTP outcomes become `uncertain` and cannot be automatically or manually resent through this panel. A stale preparation that never entered SMTP becomes a known failure; its obsolete claim cannot later enter SMTP.
 

@@ -35,6 +35,10 @@ async function fakeQuery(sql, params = []) {
   if (sql.startsWith('INSERT INTO invitation_response_state') && sql.includes('GREATEST')) {
     const value = String(Math.max(Number(ledger.get(params[0]) || 0), params[1])); ledger.set(params[0], value); return { rows: [{ value }], rowCount: 1 };
   }
+  if (sql.startsWith('INSERT INTO invitation_response_state') && sql.includes("VALUES ($1, '-1'")) {
+    if (!ledger.has(params[0])) ledger.set(params[0], '-1');
+    return { rows: [{ value: ledger.get(params[0]) }], rowCount: 1 };
+  }
   if (sql.startsWith('INSERT INTO invitation_response_state')) {
     if (ledger.has(params[0])) return { rows: [], rowCount: 0 };
     ledger.set(params[0], params[1]); return { rows: [], rowCount: 1 };
@@ -42,6 +46,7 @@ async function fakeQuery(sql, params = []) {
   if (sql.startsWith('UPDATE invitation_response_state')) {
     if (failLedgerAfterAcceptance && JSON.parse(params[2]).status === 'sent') throw new Error('database unavailable');
     if (ledger.get(params[0]) !== params[1]) return { rows: [], rowCount: 0 };
+    if (sql.includes('cardinality($4::text[])') && params[3].some(key => !ledger.has(key) || Number(ledger.get(key)) > params[4])) return { rows: [], rowCount: 0 };
     ledger.set(params[0], params[2]); return { rows: [], rowCount: 1 };
   }
   return { rows: [{ id: 'contacts', address_book_id: 'contacts' }], rowCount: 1 };

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
+import { topOpenMessageWindow } from '../utils/messageHotkeys.js';
 import { api } from '../utils/api.js';
 import MessageMuteAction from './MessageMuteAction.jsx';
 
@@ -58,6 +59,9 @@ function OwnedMutedThreads({ owner, accountId, onBack }) {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps -- keyed to owner/account
   useEffect(() => {
     const back = event => {
+      const state = useStore.getState();
+      if (state.composing || state.showAdmin || topOpenMessageWindow(state)) return;
+      if (document.querySelector('[role="dialog"], [role="menu"]')) return;
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229
         || event.target?.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="dialog"]')) return;
       event.preventDefault(); onBack?.();

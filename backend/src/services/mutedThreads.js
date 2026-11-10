@@ -85,7 +85,10 @@ export async function listMutedThreads(userId, { accountId = null, offset = 0 } 
     SELECT DISTINCT ON (m.account_id, m.thread_key) m.* FROM muted_threads t
     JOIN email_accounts a ON a.id=t.account_id AND a.user_id=t.user_id AND a.enabled=true
     JOIN LATERAL (SELECT m.id,m.account_id,m.folder,m.thread_key,m.message_id,m.from_email,m.from_name,m.subject,m.snippet,m.date,m.is_read,m.is_starred,m.has_attachments FROM messages m WHERE m.account_id=t.account_id AND m.is_deleted=false
-      AND (m.message_id=ANY(t.identifiers) OR m.thread_id=ANY(t.identifiers) OR m.in_reply_to=ANY(t.identifiers))
+      AND (m.message_id=ANY(t.identifiers) OR m.thread_id=ANY(t.identifiers) OR m.in_reply_to=ANY(t.identifiers) OR EXISTS (
+        SELECT 1 FROM regexp_matches(CASE WHEN length(m.thread_references) <= 16384 THEN m.thread_references ELSE '' END,
+          '<[^<>[:space:]]+>', 'g') AS refs(token)
+        WHERE length(refs.token[1]) <= 1000 AND refs.token[1]=ANY(t.identifiers)))
       ORDER BY m.date DESC, m.id LIMIT 1) m ON true
     WHERE t.user_id=$1 AND t.muted=true AND ($2::uuid IS NULL OR t.account_id=$2)
     ORDER BY m.account_id,m.thread_key,m.date DESC,m.id
@@ -108,7 +111,10 @@ export async function mutedAlertIds(accountId, messageIds) {
       JOIN email_accounts a ON a.id=target.account_id
       JOIN messages member ON member.account_id=target.account_id AND member.thread_key=target.thread_key
       JOIN muted_threads t ON t.account_id=a.id AND t.user_id=a.user_id AND t.muted=true
-        AND (member.message_id=ANY(t.identifiers) OR member.thread_id=ANY(t.identifiers) OR member.in_reply_to=ANY(t.identifiers))
+        AND (member.message_id=ANY(t.identifiers) OR member.thread_id=ANY(t.identifiers) OR member.in_reply_to=ANY(t.identifiers) OR EXISTS (
+        SELECT 1 FROM regexp_matches(CASE WHEN length(member.thread_references) <= 16384 THEN member.thread_references ELSE '' END,
+          '<[^<>[:space:]]+>', 'g') AS refs(token)
+        WHERE length(refs.token[1]) <= 1000 AND refs.token[1]=ANY(t.identifiers)))
       WHERE target.account_id=$1 AND target.id=ANY($2::uuid[]) AND target.is_deleted=false`, [accountId, ids]);
     for (const row of rows) muted.add(row.id);
   }
