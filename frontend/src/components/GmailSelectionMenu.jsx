@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 const PRESETS = ['All', 'None', 'Read', 'Unread', 'Starred', 'Unstarred'];
 
-export default function GmailSelectionMenu({ messages, selectedIds, onSelect }) {
+export default function GmailSelectionMenu({ messages, selectedIds, hasOtherSelection = false, onSelect }) {
   const { t } = useTranslation();
   const root = useRef(null);
   const trigger = useRef(null);
@@ -12,7 +12,7 @@ export default function GmailSelectionMenu({ messages, selectedIds, onSelect }) 
   const [open, setOpen] = useState(false);
   const selected = messages.filter(message => selectedIds.has(message.id)).length;
   const all = messages.length > 0 && selected === messages.length;
-  const mixed = selected > 0 && !all;
+  const mixed = (selected > 0 || hasOtherSelection) && !all;
   useEffect(() => { if (checkbox.current) checkbox.current.indeterminate = mixed; }, [mixed]);
   useEffect(() => {
     if (!open) return;

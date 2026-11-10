@@ -910,6 +910,18 @@
       "gtd": "GTD"
     },
     "actions": {
+      "backToList": {
+        "label": "Wróć do listy wiadomości",
+        "description": "Zamknij okienko odczytu i wróć do listy wiadomości"
+      },
+      "markRead": {
+        "label": "Oznacz jako przeczytane",
+        "description": "Oznacz wybrane wiadomości jako przeczytane"
+      },
+      "markSpam": {
+        "label": "Zgłoś spam",
+        "description": "Przenieś wybrane wiadomości do folderu Spam"
+      },
       "toggleLeftSidebar": {
         "label": "Przełącz lewy pasek boczny",
         "description": "Pokaż lub ukryj lewy pasek boczny"
@@ -2452,6 +2464,11 @@
     "createAppPassword": "Utwórz hasło aplikacji"
   },
   "gmail": {
+    "rows": {
+      "selected": "Zaznaczono",
+      "unread": "Nieprzeczytane",
+      "messages": "Wiadomości"
+    },
     "nativeLabels": {
       "invalidResponse": "Nie udało się zweryfikować listy etykiet. Spróbuj ją wczytać ponownie.",
       "loadFailed": "Nie udało się wczytać etykiet. Spróbuj ponownie.",

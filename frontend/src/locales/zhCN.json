@@ -894,6 +894,18 @@
       "gtd": "GTD"
     },
     "actions": {
+      "backToList": {
+        "label": "返回邮件列表",
+        "description": "关闭阅读窗格并返回邮件列表"
+      },
+      "markRead": {
+        "label": "标记为已读",
+        "description": "将选中的邮件标记为已读"
+      },
+      "markSpam": {
+        "label": "举报垃圾邮件",
+        "description": "将选中的邮件移至垃圾邮件文件夹"
+      },
       "toggleLeftSidebar": {
         "label": "切换左侧边栏",
         "description": "显示或隐藏左侧边栏"
@@ -2433,6 +2445,11 @@
     "createAppPassword": "创建应用专用密码"
   },
   "gmail": {
+    "rows": {
+      "selected": "已选中",
+      "unread": "未读",
+      "messages": "邮件"
+    },
     "nativeLabels": {
       "invalidResponse": "无法验证标签列表。请重新加载。",
       "loadFailed": "无法加载标签。请重试。",

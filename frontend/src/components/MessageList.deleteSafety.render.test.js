@@ -304,7 +304,8 @@ test('single context delete never substitutes a different checked row while conf
   assert.match(document.querySelector('[role="alertdialog"]').textContent, /Selected messages: 1/);
   await dialogClick('Delete permanently'); await flushDeletes();
   assert.deepEqual(writes, [[clicked.id]]);
-  assert.equal(container.querySelectorAll('.mailflow-message-row[data-checked="true"]').length, 1);
+  assert.equal(container.querySelectorAll('.mailflow-message-row[data-checked="true"]').length, 0,
+    'context-click replaced the prior selection with the clicked source, which has now been removed');
   assert.equal(useStore.getState().messages[0].id, selected.id);
 }));
 

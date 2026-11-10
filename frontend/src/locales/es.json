@@ -894,6 +894,18 @@
       "gtd": "GTD"
     },
     "actions": {
+      "backToList": {
+        "label": "Volver a la lista de mensajes",
+        "description": "Cerrar el panel de lectura y volver a la lista de mensajes"
+      },
+      "markRead": {
+        "label": "Marcar como leído",
+        "description": "Marcar los mensajes seleccionados como leídos"
+      },
+      "markSpam": {
+        "label": "Denunciar spam",
+        "description": "Mover los mensajes seleccionados a Spam"
+      },
       "toggleLeftSidebar": {
         "label": "Mostrar u ocultar barra lateral izquierda",
         "description": "Mostrar u ocultar la barra lateral izquierda"
@@ -2433,6 +2445,11 @@
     "createAppPassword": "Crear una contraseña de aplicación"
   },
   "gmail": {
+    "rows": {
+      "selected": "Seleccionado",
+      "unread": "No leído",
+      "messages": "Mensajes"
+    },
     "nativeLabels": {
       "invalidResponse": "No se pudo verificar la lista de etiquetas. Intenta cargarla de nuevo.",
       "loadFailed": "No se pudieron cargar las etiquetas. Inténtalo de nuevo.",

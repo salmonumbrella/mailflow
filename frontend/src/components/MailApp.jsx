@@ -17,6 +17,7 @@ import { dispatchHoveredGtdShortcut } from '../utils/gtdHoveredRow.js';
 import { runMailboxShortcut, canRunMailboxShortcut, browserShortcutFallback } from '../utils/visibleMailboxes.js';
 import { canRunSelectedAction, canRunGlobalAction } from '../utils/shortcutApplicability.js';
 import { selectedPickerMessage } from '../utils/labelPicker.js';
+import { shortcutContextKey, shortcutEventBlocked } from '../utils/shortcutContext.js';
 import { applyMarkRead } from '../utils/markRead.js';
 import { buildKeyMap, resolveShortcutAction, shortcutActionText, getEffectiveShortcuts, getGroupedActions, parseModKey, modLabel, SPECIAL_KEYS, SPECIAL_KEY_LABELS } from '../utils/defaultShortcuts.js';
 import Sidebar from './Sidebar.jsx';
@@ -196,7 +197,7 @@ export default function MailApp() {
 
   // Shortcut hint (e.g. "⌘/") for the collapse/expand tooltips, derived from the
   // live shortcut map via the existing helpers — no new plumbing. '' when unbound.
-  const rightSidebarToggleParsed = parseModKey(getEffectiveShortcuts(shortcuts).toggleRightSidebar);
+  const rightSidebarToggleParsed = parseModKey(getEffectiveShortcuts(shortcuts, layout).toggleRightSidebar);
   const rightSidebarToggleHint = rightSidebarToggleParsed ? `${modLabel(rightSidebarToggleParsed.mod)}${rightSidebarToggleParsed.bare}` : '';
   // The right sidebar renders when a plugin supplies content for the 'right-sidebar' slot. Core is
   // plugin-agnostic here — it places the seam; a plugin (currently GTD) fills it. The layout/shortcut
@@ -309,11 +310,9 @@ export default function MailApp() {
   useEffect(() => {
     if (!listFirst) return undefined;
     const onKey = (e) => {
-      if (e.key !== 'Escape' || e.defaultPrevented || !selectedMessageIdRef.current) return;
-      if (composingRef.current || showAdminRef.current || paletteOpenRef.current) return;
-      if (document.querySelector('[role="menu"], [role="dialog"], [role="listbox"]')) return;
-      const tag = e.target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
+      if (e.key !== 'Escape' || e.repeat || e.defaultPrevented || !selectedMessageIdRef.current) return;
+      if (composingRef.current || showAdminRef.current || paletteOpenRef.current || shortcutEventBlocked(e)) return;
+      if (document.querySelector('[role="dialog"]')) return;
       closeOpenMessage();
     };
     document.addEventListener('keydown', onKey);
@@ -565,9 +564,8 @@ export default function MailApp() {
   }, [unreadCounts, selectedAccountId, showAppBadge, showFaviconBadge]);
 
   // ── Global keyboard shortcut listener ──────────────────────────────────────
-  // Uses refs for composing/showAdmin so the listener doesn't need to
-  // re-register every time those values change — only re-registers when the
-  // user's custom shortcut map changes.
+  // Refs keep local overlays current; the store subscription below invalidates
+  // prefixes synchronously when navigation, identity or bindings change.
   const composingRef  = useRef(composing);
   const showAdminRef  = useRef(showAdmin);
   useEffect(() => { composingRef.current  = composing;  }, [composing]);
@@ -622,12 +620,26 @@ export default function MailApp() {
 
   useEffect(() => {
     if (isMobile) return;
-    const keyMap    = buildKeyMap(shortcuts);
-    // Keys that are prefixes of two-key sequences (e.g. 'g' for 'gi').
-    // Special keys like 'Delete' have length > 1 but are single keypresses — exclude them.
-    const prefixKeys = new Set(
-      [...Object.keys(keyMap).filter(k => k.length > 1 && !SPECIAL_KEYS.has(k)).map(k => k[0]), 'g']
-    );
+    let keyMap, effective, prefixKeys;
+    let bindingsContext;
+    const refreshBindings = (overrides, activeLayout) => {
+      bindingsContext = JSON.stringify([overrides, activeLayout]);
+      keyMap = buildKeyMap(overrides, activeLayout);
+      effective = getEffectiveShortcuts(overrides, activeLayout);
+      // Special keys are single presses, not prefixes. Browser mailbox aliases
+      // only exist while their corresponding action is enabled.
+      const hasBrowserAliases = Object.entries(effective).some(([action, key]) => key
+        && (action === 'openLabelPicker' || /^goVisibleMailbox[1-9]$/.test(action)));
+      prefixKeys = new Set([
+        ...Object.keys(keyMap).filter(key => key.length > 1 && !SPECIAL_KEYS.has(key)).map(key => key[0]),
+        ...(hasBrowserAliases ? ['g'] : []),
+      ]);
+    };
+    refreshBindings(shortcuts, layout);
+    const browserAlias = sequence => {
+      const action = browserShortcutFallback(sequence);
+      return action && effective[action] ? action : null;
+    };
 
     let pendingKey   = null;
     let pendingTimer = null;
@@ -639,7 +651,10 @@ export default function MailApp() {
 
     const canRun = (action) => {
       if (!canRunGlobalAction(action, { rightSidebarApplicable })) return false;
-      if (!canRunSelectedAction(action, useStore.getState())) return false;
+      const state = useStore.getState();
+      const focusedRow = Boolean(document.activeElement?.closest?.('[data-mailflow-keyboard-row]'));
+      if (action === 'backToList' && (!state.selectedMessageId || state.showContacts)) return false;
+      if (!canRunSelectedAction(action, state, { focusedRow })) return false;
       if (action === 'toggleLeftSidebar' || /^goVisibleMailbox[1-9]$/.test(action)) {
         return canRunMailboxShortcut(action, document.querySelector('[data-mailbox-sidebar]'));
       }
@@ -651,14 +666,27 @@ export default function MailApp() {
     };
 
     const handler = (e) => {
-      // Never intercept when the compose modal or admin panel is open, or an input is focused
-      if (e.defaultPrevented || composingRef.current || showAdminRef.current || paletteOpenRef.current) return;
-      if (document.querySelector('[aria-modal="true"]') || e.target.closest?.('[role="menu"], [role="dialog"]')) return;
-      const tag = e.target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
+      const state = useStore.getState();
+      if (e.defaultPrevented || !state.user || state.isLocked || state.composing || state.showAdmin || state.showContacts
+          || composingRef.current || showAdminRef.current || paletteOpenRef.current || shortcutEventBlocked(e)) {
+        clearPending();
+        return;
+      }
+      // Held action keys must not repeatedly move/delete mail or toggle selection.
+      // Only row/reader navigation intentionally repeats.
+      if (e.repeat) {
+        clearPending();
+        const action = resolveShortcutAction(e, state.shortcuts, state.layout);
+        if (['nextMessage', 'prevMessage'].includes(action) && canRun(action)) {
+          e.preventDefault();
+          dispatchAction(action);
+        }
+        return;
+      }
       // The registry resolves the exact modifier set, including shifted punctuation.
       if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) {
-        const action = resolveShortcutAction(e, shortcuts);
+        clearPending();
+        const action = resolveShortcutAction(e, state.shortcuts, state.layout);
         if (action && canRun(action)) { e.preventDefault(); dispatchAction(action); }
         return;
       }
@@ -681,7 +709,7 @@ export default function MailApp() {
       // Check the keymap first — bound actions take priority, including special
       // keys like Delete that would otherwise be skipped below.
       const action = resolved.length > 1 && !SPECIAL_KEYS.has(resolved)
-        ? keyMap[resolved] || browserShortcutFallback(resolved) : resolveShortcutAction(e, shortcuts);
+        ? keyMap[resolved] || browserAlias(resolved) : resolveShortcutAction(e, state.shortcuts, state.layout);
       if (action && canRun(action)) {
         e.preventDefault();
         dispatchAction(action);
@@ -709,25 +737,53 @@ export default function MailApp() {
       if (pendingKey !== null) clearPending();
     };
 
+    let context = shortcutContextKey(useStore.getState());
+    const unsubscribe = useStore.subscribe(state => {
+      const next = shortcutContextKey(state);
+      if (next === context) return;
+      context = next;
+      clearPending();
+      if (bindingsContext !== JSON.stringify([state.shortcuts, state.layout])) refreshBindings(state.shortcuts, state.layout);
+    });
+    // Local menus own their keyboard events and may stop propagation. Focus and
+    // pointer transitions cancel prefixes independently of the global listener.
     document.addEventListener('keydown', handler);
+    document.addEventListener('focusin', clearPending);
+    document.addEventListener('pointerdown', clearPending, true);
+    document.addEventListener('compositionstart', clearPending, true);
+    document.addEventListener('visibilitychange', clearPending);
+    window.addEventListener('blur', clearPending);
+    window.addEventListener('popstate', clearPending);
+    window.addEventListener('mailflow:will-lock', clearPending);
     return () => {
+      unsubscribe();
       document.removeEventListener('keydown', handler);
+      document.removeEventListener('focusin', clearPending);
+      document.removeEventListener('pointerdown', clearPending, true);
+      document.removeEventListener('compositionstart', clearPending, true);
+      document.removeEventListener('visibilitychange', clearPending);
+      window.removeEventListener('blur', clearPending);
+      window.removeEventListener('popstate', clearPending);
+      window.removeEventListener('mailflow:will-lock', clearPending);
       clearPending();
     };
-  }, [shortcuts, isMobile, rightSidebarApplicable]);
+  }, [shortcuts, layout, isMobile, rightSidebarApplicable, showShortcutHelp, paletteOpen]);
 
   // Subscribe to global actions that MailApp owns
   useEffect(() => {
     const onCompose   = () => openCompose({});
     const onGoInbox   = () => setSelectedAccount(null, 'INBOX');
+    const onBackToList = () => { if (useStore.getState().selectedMessageId) closeOpenMessage(); };
     const onShowHelp  = () => { if (!isMobile) setShowShortcutHelp(v => !v); };
 
     shortcutBus.on('compose',   onCompose);
     shortcutBus.on('goInbox',   onGoInbox);
+    shortcutBus.on('backToList', onBackToList);
     shortcutBus.on('showHelp',  onShowHelp);
     return () => {
       shortcutBus.off('compose',   onCompose);
       shortcutBus.off('goInbox',   onGoInbox);
+      shortcutBus.off('backToList', onBackToList);
       shortcutBus.off('showHelp',  onShowHelp);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -772,11 +828,10 @@ export default function MailApp() {
   // Cmd+K / Ctrl+K opens command palette
   useEffect(() => {
     const handler = (e) => {
-      if (e.defaultPrevented || composingRef.current || showAdminRef.current || labelPickerRef.current) return;
-      if (!paletteOpenRef.current && (document.querySelector('[aria-modal="true"]') || e.target.closest?.('[role="menu"], [role="dialog"]'))) return;
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target?.tagName) || e.target?.isContentEditable) return;
+      if (e.defaultPrevented || e.repeat || !useStore.getState().user || useStore.getState().isLocked || composingRef.current || showAdminRef.current || labelPickerRef.current) return;
+      if (shortcutEventBlocked(e)) return;
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k'
-          && !resolveShortcutAction(e, useStore.getState().shortcuts)) {
+          && !resolveShortcutAction(e, useStore.getState().shortcuts, useStore.getState().layout)) {
         e.preventDefault();
         setPaletteOpen(v => !v);
       }
@@ -1052,6 +1107,7 @@ export default function MailApp() {
       {showShortcutHelp && (
         <ShortcutHelpOverlay
           shortcuts={shortcuts}
+          layout={layout}
           onClose={() => setShowShortcutHelp(false)}
         />
       )}
@@ -1060,10 +1116,10 @@ export default function MailApp() {
   );
 }
 
-function ShortcutHelpOverlay({ shortcuts, onClose }) {
+function ShortcutHelpOverlay({ shortcuts, layout, onClose }) {
   const { t } = useTranslation();
-  const effective = getEffectiveShortcuts(shortcuts);
-  const groups    = getGroupedActions();
+  const effective = getEffectiveShortcuts(shortcuts, layout);
+  const groups    = getGroupedActions(layout);
   const panel = useRef(null);
   useEffect(() => {
     const previous = document.activeElement;

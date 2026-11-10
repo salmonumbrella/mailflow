@@ -894,6 +894,18 @@
       "gtd": "GTD"
     },
     "actions": {
+      "backToList": {
+        "label": "Back to message list",
+        "description": "Close the reader and return to the message list"
+      },
+      "markRead": {
+        "label": "Mark read",
+        "description": "Mark selected messages read"
+      },
+      "markSpam": {
+        "label": "Report spam",
+        "description": "Move selected messages to Spam"
+      },
       "toggleLeftSidebar": {
         "label": "Toggle left sidebar",
         "description": "Hide or show the left sidebar"
@@ -2433,6 +2445,11 @@
     "createAppPassword": "Create an app password"
   },
   "gmail": {
+    "rows": {
+      "selected": "Selected",
+      "unread": "Unread",
+      "messages": "Messages"
+    },
     "nativeLabels": {
       "invalidResponse": "The label list could not be verified. Retry loading it.",
       "loadFailed": "Labels could not be loaded. Retry.",

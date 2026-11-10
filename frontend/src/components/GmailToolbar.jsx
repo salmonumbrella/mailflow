@@ -49,12 +49,12 @@ function SnoozeCalendar({ value, onChange }) {
 
 // Only native MailFlow capabilities are actionable. The reference's Google-only simulations
 // stay explanatory rather than inventing persisted state or silently doing something else.
-export default function GmailToolbar({ messages, selectedIds, onSelect, onAction, onRefresh, busy = false, syncing = false,
+export default function GmailToolbar({ messages, actionMessages = messages, selectedIds, selectedTopLevelIds = selectedIds, selectionSourceKey, onSelect, onAction, onRefresh, busy = false, syncing = false,
   folders = [], loadFolders, canMove = false, count, page = 1, pageSize, paginated = false, totalKnown = true, onPage, contextKey, snoozed = false, permanentDelete = false, confirmDeleteInParent = false, order = { sort: 'date', dir: 'desc' }, sortControl }) {
   const { t } = useTranslation();
   const scale = useUiScale();
-  const selected = messages.filter(message => selectedIds.has(message.id));
-  const selectionKey = selected.map(message => message.id).join('|');
+  const selected = actionMessages.filter(message => selectedIds.has(message.id));
+  const selectionKey = selectionSourceKey ?? selected.map(message => message.id).join('|');
   const [menu, setMenu] = useState(null);
   const [query, setQuery] = useState('');
   const [destinations, setDestinations] = useState(folders);
@@ -123,7 +123,7 @@ export default function GmailToolbar({ messages, selectedIds, onSelect, onAction
   const end = messages.length ? start + messages.length - 1 : 0;
   return <div className="gmail-toolbar" role="toolbar" aria-label={t("gmailToolbar.mailboxToolbar", "Mailbox toolbar")} aria-busy={busy}>
     <div className="gmail-toolbar-actions">
-      <GmailSelectionMenu messages={messages} selectedIds={selectedIds} onSelect={rows => { if (!busy) onSelect(rows); }} />
+      <GmailSelectionMenu messages={messages} selectedIds={selectedTopLevelIds} hasOtherSelection={selectedIds.size > selectedTopLevelIds.size} onSelect={rows => { if (!busy) onSelect(rows); }} />
       {selected.length > 0 ? <>
         {trigger('archive', t("gmailToolbar.archive", "Archive"), null, 'archive')}{trigger('spam', t("gmailToolbar.reportSpam", "Report spam"), null, 'spam')}{trigger('delete', permanentDelete ? t("gmailToolbar.deletePermanently", "Delete permanently") : t("gmailToolbar.delete", "Delete"), permanentDelete && !confirmDeleteInParent ? 'delete' : null, 'delete')}
         <span className="gmail-toolbar-divider" />

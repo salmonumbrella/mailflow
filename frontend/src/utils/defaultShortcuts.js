@@ -29,6 +29,7 @@ export const ACTION_DEFS = {
   nextMessage:   { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.nextMessage.label',   descriptionKey: 'shortcuts.actions.nextMessage.description',   defaultKey: 'j'  },
   prevMessage:   { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.prevMessage.label',   descriptionKey: 'shortcuts.actions.prevMessage.description',   defaultKey: 'k'  },
   openMessage:   { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.openMessage.label',   descriptionKey: 'shortcuts.actions.openMessage.description',   defaultKey: 'o'  },
+  backToList:    { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.backToList.label', descriptionKey: 'shortcuts.actions.backToList.description', defaultKey: '', layouts: ['gmail'] },
   goInbox:       { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.goInbox.label',       descriptionKey: 'shortcuts.actions.goInbox.description',       defaultKey: 'gi' },
   toggleLeftSidebar: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.toggleLeftSidebar.label', descriptionKey: 'shortcuts.actions.toggleLeftSidebar.description', defaultKey: 'ctrl+\\' },
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => {
@@ -44,6 +45,8 @@ export const ACTION_DEFS = {
   replyAll:      { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.replyAll.label',      descriptionKey: 'shortcuts.actions.replyAll.description',      defaultKey: 'a'  },
   forward:       { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.forward.label',       descriptionKey: 'shortcuts.actions.forward.description',       defaultKey: 'f'  },
   replyAllFromSelection: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.replyAllFromSelection.label', descriptionKey: 'shortcuts.actions.replyAllFromSelection.description', defaultKey: 'ctrl+Enter' },
+  markRead: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.markRead.label', descriptionKey: 'shortcuts.actions.markRead.description', defaultKey: '', layouts: ['gmail'] },
+  markSpam: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.markSpam.label', descriptionKey: 'shortcuts.actions.markSpam.description', defaultKey: '', layouts: ['gmail'] },
   markUnread: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.markUnread.label', descriptionKey: 'shortcuts.actions.markUnread.description', defaultKey: 'u' },
   unsubscribe: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.unsubscribe.label', descriptionKey: 'shortcuts.actions.unsubscribe.description', defaultKey: 'ctrl+shift+u' },
   loadRemoteImages: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.loadRemoteImages.label', descriptionKey: 'shortcuts.actions.loadRemoteImages.description', defaultKey: 'i' },
@@ -69,11 +72,28 @@ export const ACTION_DEFS = {
   gtdDone: { groupKey: 'shortcuts.groups.gtd', labelKey: 'gtd.done', descriptionKey: 'shortcuts.actions.gtdDone.description', defaultKey: 'shift+e' },
 };
 
-// Returns the effective shortcut map: action → key, with user overrides applied.
-export function getEffectiveShortcuts(userOverrides = {}) {
+// Layout defaults are resolved at use-time, never persisted over a user's keymap.
+const GMAIL_DEFAULTS = { backToList: 'u', markRead: 'shift+i', markUnread: 'shift+u', markSpam: '!' };
+
+// Existing explicit bindings retain their meaning even when they equal a former
+// default. A newly introduced layout default must not take that key away.
+export function getEffectiveShortcuts(userOverrides = {}, layout) {
   const out = {};
+  const layoutDefaults = layout === 'gmail' ? GMAIL_DEFAULTS : {};
+  // Older saves of the settings-wide Off choice predate these unbound actions.
+  // Do not silently enable new Gmail keys for those users after an upgrade.
+  const shortcutsOff = Object.entries(ACTION_DEFS).filter(([, def]) => def.defaultKey)
+    .every(([action]) => Object.hasOwn(userOverrides, action) && !userOverrides[action]);
+  const explicitKeys = new Set(Object.entries(userOverrides)
+    .filter(([action]) => Object.hasOwn(ACTION_DEFS, action))
+    .map(([, key]) => canonicalShortcutBinding(key)).filter(Boolean));
   for (const [action, def] of Object.entries(ACTION_DEFS)) {
-    out[action] = action in userOverrides ? userOverrides[action] : def.defaultKey;
+    if (def.layouts && !def.layouts.includes(layout)) out[action] = '';
+    else if (Object.hasOwn(userOverrides, action)) out[action] = userOverrides[action];
+    else if (Object.hasOwn(layoutDefaults, action)) {
+      const key = layoutDefaults[action];
+      out[action] = shortcutsOff || explicitKeys.has(canonicalShortcutBinding(key)) ? '' : key;
+    } else out[action] = def.defaultKey;
   }
   return out;
 }
@@ -106,14 +126,15 @@ function canonicalShortcutBinding(binding) {
   const parts = binding.toLowerCase().split('+');
   const bare = parts.pop();
   if (!bare || parts.some(part => !['ctrl', 'shift', 'alt'].includes(part))) return null;
-  return [...['ctrl', 'shift', 'alt'].filter(part => parts.includes(part)), bare].join('+');
+  return [...['ctrl', 'shift', 'alt'].filter(part => parts.includes(part)
+    && !(part === 'shift' && ['?', '#', '!'].includes(bare))), bare].join('+');
 }
 
 // The last action in ACTION_DEFS wins at dispatch. Return every displaced action
 // so settings can show conflicts before the binding is pressed.
-export function getShortcutConflicts(userOverrides = {}) {
+export function getShortcutConflicts(userOverrides = {}, layout) {
   const groups = new Map();
-  for (const [action, binding] of Object.entries(getEffectiveShortcuts(userOverrides))) {
+  for (const [action, binding] of Object.entries(getEffectiveShortcuts(userOverrides, layout))) {
     const key = canonicalShortcutBinding(binding);
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
@@ -129,7 +150,7 @@ export function shortcutBindingFromEvent(event) {
   const key = event.key.toLowerCase();
   const modifiers = [
     (event.ctrlKey || event.metaKey) && 'ctrl',
-    event.shiftKey && key !== '?' && key !== '#' && 'shift',
+    event.shiftKey && key !== '?' && key !== '#' && key !== '!' && 'shift',
     event.altKey && 'alt',
   ].filter(Boolean);
   return modifiers.length ? `${modifiers.join('+')}+${key}` : event.key;
@@ -137,14 +158,14 @@ export function shortcutBindingFromEvent(event) {
 
 // Returns the reverse lookup map: key → action, for fast dispatch (plain keys only).
 // Collisions keep last-writer-wins behavior but are logged at registration.
-export function buildKeyMap(userOverrides = {}) {
-  const effective = getEffectiveShortcuts(userOverrides);
+export function buildKeyMap(userOverrides = {}, layout) {
+  const effective = getEffectiveShortcuts(userOverrides, layout);
   const map = {};
   for (const [action, key] of Object.entries(effective)) {
     if (!key || parseModKey(key)) continue;
     map[key] = action;
   }
-  for (const { key, loser, winner } of getShortcutConflicts(userOverrides)) {
+  for (const { key, loser, winner } of getShortcutConflicts(userOverrides, layout)) {
     console.warn(`[shortcuts] key "${key}" is bound to both "${loser}" and "${winner}"; "${winner}" wins`);
   }
   return map;
@@ -154,8 +175,8 @@ export function buildKeyMap(userOverrides = {}) {
 // e.g. { p: 'printMessage' } when printMessage is bound to 'ctrl+p'.
 // Collisions are checked against the full binding, so Ctrl+P and Ctrl+Shift+P
 // do not trigger a false warning.
-export function buildModKeyMap(userOverrides = {}) {
-  const effective = getEffectiveShortcuts(userOverrides);
+export function buildModKeyMap(userOverrides = {}, layout) {
+  const effective = getEffectiveShortcuts(userOverrides, layout);
   const map = {};
   for (const [action, key] of Object.entries(effective)) {
     const parsed = parseModKey(key);
@@ -163,7 +184,7 @@ export function buildModKeyMap(userOverrides = {}) {
     const bare = parsed.bare.toLowerCase();
     map[bare] = action;
   }
-  for (const { key, loser, winner } of getShortcutConflicts(userOverrides)) {
+  for (const { key, loser, winner } of getShortcutConflicts(userOverrides, layout)) {
     if (parseModKey(key)) console.warn(`[shortcuts] key "${key}" is bound to both "${loser}" and "${winner}"; "${winner}" wins`);
   }
   return map;
@@ -171,13 +192,13 @@ export function buildModKeyMap(userOverrides = {}) {
 
 // Match the full modifier set. A shifted punctuation character already carries
 // Shift in event.key on common keyboard layouts.
-export function resolveShortcutAction(event, userOverrides = {}) {
+export function resolveShortcutAction(event, userOverrides = {}, layout) {
   if (!event?.key) return null;
   const key = event.key.toLowerCase();
   const isCommand = isMac ? !!event.metaKey && !event.ctrlKey : !!event.ctrlKey && !event.metaKey;
   if ((event.ctrlKey || event.metaKey) && !isCommand) return null;
   let found = null;
-  for (const [action, binding] of Object.entries(getEffectiveShortcuts(userOverrides))) {
+  for (const [action, binding] of Object.entries(getEffectiveShortcuts(userOverrides, layout))) {
     if (!binding) continue;
     const pieces = binding.toLowerCase().split('+');
     const bare = pieces.pop();
@@ -186,7 +207,7 @@ export function resolveShortcutAction(event, userOverrides = {}) {
     const alt = pieces.includes('alt');
     if (pieces.some(piece => piece !== 'ctrl' && piece !== 'shift' && piece !== 'alt')) continue;
     if (command !== isCommand || alt !== !!event.altKey || bare !== key) continue;
-    if (shift !== !!event.shiftKey && key !== '?' && key !== '#') continue;
+    if (shift !== !!event.shiftKey && key !== '?' && key !== '#' && key !== '!') continue;
     if (shift && !event.shiftKey) continue;
     // Keep the last registered action, matching getShortcutConflicts().
     found = action;
@@ -195,6 +216,9 @@ export function resolveShortcutAction(event, userOverrides = {}) {
 }
 
 const GENERAL_ACTION_TEXT = {
+  backToList: ['Back to message list', 'Close the reader and return to the message list'],
+  markRead: ['Mark read', 'Mark selected messages read'],
+  markSpam: ['Report spam', 'Move selected messages to Spam'],
   toggleLeftSidebar: ['Toggle left sidebar', 'Hide or show the left sidebar'],
   openLabelPicker: ['Open label picker', 'Copy the selected message to a folder'],
   replyAllFromSelection: ['Reply all from selection', 'Reply all to the selected message'],
@@ -220,9 +244,10 @@ export function shortcutActionText(t, action, kind = 'description') {
 }
 
 // Returns actions grouped for display in the help overlay / settings tab.
-export function getGroupedActions() {
+export function getGroupedActions(layout) {
   const groups = {};
   for (const [action, def] of Object.entries(ACTION_DEFS)) {
+    if (def.layouts && !def.layouts.includes(layout)) continue;
     if (!groups[def.groupKey]) groups[def.groupKey] = [];
     groups[def.groupKey].push({ action, ...def });
   }

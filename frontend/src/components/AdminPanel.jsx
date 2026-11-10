@@ -7318,12 +7318,12 @@ const TABS = [
 // ─── Shortcuts Tab ───────────────────────────────────────────────────────────
 function ShortcutsTab() {
   const { t } = useTranslation();
-  const { shortcuts, setShortcuts } = useStore();
+  const { shortcuts, setShortcuts, layout } = useStore();
   const [recording, setRecording] = useState(null); // action name currently being recorded
 
-  const effective = getEffectiveShortcuts(shortcuts);
-  const conflicts = getShortcutConflicts(shortcuts);
-  const groups = getGroupedActions();
+  const effective = getEffectiveShortcuts(shortcuts, layout);
+  const conflicts = getShortcutConflicts(shortcuts, layout);
+  const groups = getGroupedActions(layout);
 
   // Listen for key presses while recording
   useEffect(() => {

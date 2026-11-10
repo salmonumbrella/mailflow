@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { useStore } from '../store/index.js';
@@ -12,6 +12,8 @@ import MessageHeaderModal from './MessageHeaderModal.jsx';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import { buildMovePickerSections, movePickerSectionHeading, movePickerFoldersEmpty, runMovePickerAction } from '../utils/folderDisplay.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
+import { createListActionCommitGuard, listMessageIdentity, listActionSourceKey } from '../utils/listActionScope.js';
+import { nativeLabelActionsBlocked } from '../utils/nativeLabelNavigation.js';
 import { useMobile } from '../hooks/useMobile.js';
 
 // Module-level regex — spam-name heuristic shared with MessagePane.jsx so
@@ -22,10 +24,11 @@ const SPAM_NAME_RE = /(spam|junk|bulk|indesiderata|spamverdacht|courrier\s*ind|p
 // ─── Context Menu ─────────────────────────────────────────────────────────────
 const CATEGORIES = ['primary', 'newsletter', 'promotion', 'automated', 'social'];
 
-export default function ContextMenu({ x, y, message, onClose, onAction, defaultMoveView = false, defaultSnoozeView = false, variant = 'inbox', selectedText = '' }) {
+export default function ContextMenu({ x, y, message, onClose: closeMenu, onAction: dispatchAction, openerElement, defaultMoveView = false, defaultSnoozeView = false, variant = 'inbox', selectedText = '' }) {
   const { t } = useTranslation();
   const uiScale = useUiScale();
   const isMobile = useMobile();
+  const gmailKeyboard = useStore(s => s.layout === 'gmail');
   // Variants share one menu; the policy removes actions that depend on the center
   // list or conflict with GTD's Done contract while preserving ordinary mail actions.
   const menuPolicy = getContextMenuPolicy(variant);
@@ -42,6 +45,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   // A plugin submenu (render fn) takes over the menu content area, like categorizeView/moveView.
   // Set via the openSubmenu capability handed to context-menu-item contributions; null = item list.
   const [pluginSubmenu, setPluginSubmenu] = useState(null);
+  const [pluginMenuCommands, setPluginMenuCommands] = useState(false);
   const [moveView, setMoveView] = useState(defaultMoveView);
   const [moveFolders, setMoveFolders] = useState(null);
   const [moveFoldersLoading, setMoveFoldersLoading] = useState(defaultMoveView);
@@ -58,6 +62,124 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   const hasUnread = Number.isFinite(unreadCount) ? unreadCount > 0 : !message.is_read;
   const isMessagePane = variant === 'messagePane';
   const hasSelectedText = Boolean(String(selectedText || '').trim());
+
+  // Freeze the opening identity. Never re-arm this menu when a removed account,
+  // generation, lock, user, navigation or source row later returns to its old value.
+  const [opening] = useState(() => {
+    const state = useStore.getState();
+    const opener = openerElement || document.activeElement;
+    return {
+      current: createListActionCommitGuard([message], state),
+      navigation: menuNavigationKey(state), identity: listMessageIdentity(message), message: { ...message },
+      source: variant === 'inbox' ? listActionSourceKey([message], state) : null,
+      opener, openerRow: opener?.closest?.('[data-gmail-row-id]'),
+      openerRowId: opener?.closest?.('[data-gmail-row-id]')?.dataset.gmailRowId,
+      openerOwnRowId: opener?.dataset?.gmailRowId,
+    };
+  });
+  const alive = useRef(true);
+  const folderRequest = useRef(0);
+  const messageIdentity = listMessageIdentity(message);
+  const currentContext = useCallback(() => {
+    const state = useStore.getState();
+    return !state.isLocked && !nativeLabelActionsBlocked(state)
+      && opening.current(state) && opening.navigation === menuNavigationKey(state)
+      && opening.identity === messageIdentity
+      && (!opening.source || opening.source === listActionSourceKey([opening.message], state));
+  }, [opening, messageIdentity]);
+  const onClose = useCallback((restore = true) => {
+    if (!alive.current) return;
+    alive.current = false;
+    folderRequest.current++;
+    const focused = document.activeElement;
+    if (gmailKeyboard && restore && currentContext()
+      && (menuRef.current?.contains(focused) || focused === document.body || focused === opening.opener)
+      && visibleMenuOpener(opening)) opening.opener.focus({ preventScroll: true });
+    closeMenu();
+  }, [closeMenu, gmailKeyboard, currentContext, opening]);
+  const onAction = (...args) => {
+    if (alive.current && currentContext()) dispatchAction(...args);
+  };
+  useEffect(() => {
+    alive.current = true;
+    const requests = folderRequest;
+    return () => { alive.current = false; requests.current++; };
+  }, []);
+  useEffect(() => {
+    const validate = () => { if (!currentContext()) onClose(false); };
+    validate();
+    const unsubscribe = useStore.subscribe(validate);
+    return unsubscribe;
+  }, [currentContext, onClose]);
+
+  const activeView = headerMessage ? 'headers' : pluginSubmenu ? 'plugin' : categorizeView
+    ? `category-${categorizeView}` : snoozeView ? (customSnoozeView ? 'custom-snooze' : 'snooze')
+    : moveView ? 'move' : 'main';
+  const commandView = !headerMessage && (!pluginSubmenu || pluginMenuCommands) && !moveView && !customSnoozeView;
+  const rememberedFocus = useRef(new Map());
+  const itemProps = (disabled = false, role = 'menuitem', hasSubmenu = false) => gmailKeyboard ? {
+    role, tabIndex: role === 'button' && !disabled ? 0 : -1,
+    'data-context-command': '', 'aria-disabled': disabled || undefined,
+    'aria-haspopup': hasSubmenu ? (typeof hasSubmenu === 'string' ? hasSubmenu : 'menu') : undefined,
+    'aria-expanded': hasSubmenu ? false : undefined,
+  } : {};
+  const goBack = () => {
+    if (headerMessage) setHeaderMessage(null);
+    else if (pluginSubmenu) setPluginSubmenu(null);
+    else if (categorizeView) setCategorizeView(categorizeView === 'message' ? false : 'message');
+    else if (customSnoozeView) setCustomSnoozeView(false);
+    else if (snoozeView && !defaultSnoozeView) setSnoozeView(false);
+    else if (moveView && !defaultMoveView) setMoveView(false);
+    else onClose();
+  };
+  useLayoutEffect(() => {
+    if (!gmailKeyboard || !alive.current) return;
+    const menu = menuRef.current;
+    const remembered = rememberedFocus.current.get(activeView);
+    const commands = [...menu.querySelectorAll('[data-context-command]:not([aria-disabled="true"])')];
+    const previous = commands.find(item => item.textContent === remembered);
+    const focusable = menu.querySelector('input:not(:disabled)')
+      || menu.querySelector('button:not(:disabled), [tabindex="0"]');
+    (previous || (commandView ? commands[0] : focusable) || menu).focus({ preventScroll: true });
+  }, [activeView, commandView, gmailKeyboard]);
+
+  const handleMenuKey = event => {
+    if (!gmailKeyboard) return;
+    event.stopPropagation();
+    if (!alive.current || !currentContext()) { event.preventDefault(); return; }
+    if (event.defaultPrevented || event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229) return;
+    const nestedDialog = event.target.closest('[role="dialog"], [aria-modal="true"]');
+    if (nestedDialog && nestedDialog !== menuRef.current) return;
+    if (event.key === 'Tab') {
+      // A true command menu exits on Tab. Forms keep ordinary native tab order;
+      // their blur handler dismisses only once focus leaves the whole popup.
+      if (commandView) onClose();
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const editable = event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
+    const searchArrow = moveView && editable?.dataset.contextFolderSearch !== undefined
+      && ['ArrowDown', 'ArrowUp'].includes(event.key);
+    if (editable && !searchArrow) return;
+    if (event.key === 'ArrowLeft' && activeView !== 'main') {
+      event.preventDefault(); goBack(); return;
+    }
+    const commands = [...menuRef.current.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])')];
+    const target = event.target.closest('[data-context-command]');
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) && (commands.length || commandView)) {
+      event.preventDefault();
+      const index = commands.indexOf(target);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? commands.length - 1
+        : index < 0 ? (event.key === 'ArrowUp' ? commands.length - 1 : 0)
+        : (index + (event.key === 'ArrowUp' ? -1 : 1) + commands.length) % commands.length;
+      commands[next]?.focus({ preventScroll: true });
+      commands[next]?.scrollIntoView?.({ block: 'nearest' });
+    } else if (target && target.getAttribute('aria-disabled') !== 'true'
+      && (['Enter', ' '].includes(event.key) || event.key === 'ArrowRight' && target.hasAttribute('aria-haspopup'))) {
+      event.preventDefault();
+      if (!event.repeat) target.click();
+    }
+  };
 
   // A folder is "spam-like" when either the user mapped it as spam or the IMAP
   // server tagged it with \Junk special-use. Falls back to a multilingual name
@@ -87,56 +209,76 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
       const rect = menu.getBoundingClientRect();
       const vw = window.innerWidth;
       const vh = window.innerHeight;
-      const nx = Math.max(0, x + rect.width  > vw ? x - rect.width  : x);
-      const ny = Math.max(0, y + rect.height > vh ? y - rect.height : y);
+      const nx = Math.max(0, Math.min(vw - rect.width, x + rect.width > vw ? x - rect.width : x));
+      const ny = Math.max(0, Math.min(vh - rect.height, y + rect.height > vh ? y - rect.height : y));
       setPos(prev => (prev.x === nx && prev.y === ny ? prev : { x: nx, y: ny }));
     };
     clamp();
     const observer = new ResizeObserver(clamp);
     observer.observe(menu);
-    return () => observer.disconnect();
+    window.addEventListener('resize', clamp);
+    return () => { observer.disconnect(); window.removeEventListener('resize', clamp); };
   }, [x, y, isMobile]);
 
-  // Auto-load folders when opened directly in move mode (e.g. from row folder icon)
-  useEffect(() => {
-    if (!defaultMoveView) return;
-    api.getFolders(message.account_id)
-      .then(data => setMoveFolders(Array.isArray(data) ? data : (data.folders || [])))
-      .catch(() => setMoveFolders([]))
-      .finally(() => setMoveFoldersLoading(false));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleMoveClick = async () => {
-    setMoveView(true);
-    if (moveFolders) return; // already loaded
+  const loadMoveFolders = useCallback(async () => {
+    if (!alive.current || !currentContext()) return;
+    const request = ++folderRequest.current;
+    const current = () => alive.current && request === folderRequest.current && currentContext();
     setMoveFoldersLoading(true);
     try {
       const data = await api.getFolders(message.account_id);
-      setMoveFolders(Array.isArray(data) ? data : (data.folders || []));
+      if (current()) setMoveFolders(Array.isArray(data) ? data : (data.folders || []));
     } catch {
-      setMoveFolders([]);
+      if (current()) setMoveFolders([]);
     } finally {
-      setMoveFoldersLoading(false);
+      if (current()) setMoveFoldersLoading(false);
     }
+  }, [message.account_id, currentContext]);
+
+  useEffect(() => {
+    if (defaultMoveView) void loadMoveFolders();
+  }, [defaultMoveView, loadMoveFolders]);
+
+  const handleMoveClick = () => {
+    if (!alive.current || !currentContext()) return;
+    setMoveView(true);
+    if (!moveFolders) void loadMoveFolders();
   };
 
-  // Close on Escape. Outside-click/tap dismissal is handled by the transparent full-screen
-  // scrim rendered behind the menu (see the return below), which is strictly more robust than
-  // a document click listener: it catches taps inside the email <iframe> (pointer/click events
-  // never cross the frame boundary to reach `document`) and it can't be defeated by a row
-  // calling stopPropagation() on its click.
+  // Capture Escape before the reader/compose/global shortcut listeners. Only the
+  // active layer is dismissed. The scrim still catches outside iframe clicks.
   useEffect(() => {
-    const handleKey = e => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', handleKey);
-    return () => document.removeEventListener('keydown', handleKey);
-  }, [onClose]);
+    const handleKey = event => {
+      if (event.key !== 'Escape' || !alive.current || event.isComposing || event.keyCode === 229) return;
+      if (gmailKeyboard) {
+        const dialog = event.target.closest?.('[role="dialog"], [aria-modal="true"]');
+        if (dialog && dialog !== menuRef.current && !headerMessage) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (!event.repeat) goBack();
+      } else onClose();
+    };
+    document.addEventListener('keydown', handleKey, gmailKeyboard);
+    const handleScroll = event => {
+      if (!menuRef.current?.contains(event.target)) onClose();
+    };
+    if (gmailKeyboard) document.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('keydown', handleKey, gmailKeyboard);
+      document.removeEventListener('scroll', handleScroll, true);
+    };
+  });
 
   // Plugin-contributed action items (currently GTD's submenu + sidebar "Done"), spliced into the
   // Actions group at the seam below. Core stays plugin-agnostic; openSubmenu lets an item take over
   // the content area with its own submenu render.
   const pluginActionItems = usePluginCollected('context-menu-actions', {
     message, account, variant, onAction, onClose,
-    openSubmenu: (render) => setPluginSubmenu(() => render),
+    openSubmenu: (render, options) => {
+      if (!alive.current || !currentContext()) return;
+      setPluginMenuCommands(options?.type === 'menu');
+      setPluginSubmenu(() => render);
+    },
+    getMenuItemProps: itemProps,
     t,
   });
 
@@ -244,6 +386,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           label: t('contextMenu.moveToFolder'),
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>,
           action: handleMoveClick,
+          submenuRole: 'dialog',
           keepOpen: true,
           hasSubmenu: true,
         },
@@ -280,7 +423,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
         }] : []),
         // Plugin-contributed items (GTD's submenu + sidebar "Done") slot in here, exactly where the
         // GTD entries used to sit — after "Categorize", before "Create rule".
-        ...pluginActionItems,
+        ...pluginActionItems.map(item => ({ submenuRole: 'dialog', ...item })),
         ...(!menuPolicy.rules ? [] : [{
           label: t('contextMenu.createRule'),
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>,
@@ -342,7 +485,8 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>,
           action: async () => {
             try {
-              setHeaderMessage(await resolveContextMenuMessage(message, variant, api.resolveMessage));
+              const resolved = await resolveContextMenuMessage(message, variant, api.resolveMessage);
+              if (alive.current && currentContext()) setHeaderMessage(resolved);
             } catch (err) {
               console.error('Message header resolution failed:', err.message);
             }
@@ -357,7 +501,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           action: async () => {
             try {
               const resolved = await resolveContextMenuMessage(message, variant, api.resolveMessage);
-              downloadEml(resolved?.id);
+              if (currentContext()) downloadEml(resolved?.id);
             } catch (err) {
               console.error('Message resolution for .eml download failed:', err.message);
             }
@@ -380,9 +524,24 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
 
   return (
     <>
-      <div onClick={onClose} aria-hidden style={{ position: 'fixed', inset: 0, zIndex: 3999 }} />
+      <div onClick={() => onClose()} aria-hidden style={{ position: 'fixed', inset: 0, zIndex: 3999 }} />
       <div
         ref={menuRef}
+        data-mailflow-context-menu={gmailKeyboard ? '' : undefined}
+        role={gmailKeyboard ? (commandView ? 'menu' : 'dialog') : undefined}
+        aria-label={gmailKeyboard ? t(headerMessage ? 'contextMenu.headers.title' : moveView ? 'contextMenu.moveToFolder' : snoozeView ? 'contextMenu.snooze.label' : 'message.more') : undefined}
+        tabIndex={gmailKeyboard ? -1 : undefined}
+        onKeyDown={handleMenuKey}
+        onFocusCapture={gmailKeyboard ? event => {
+          const command = event.target.closest('[data-context-command]');
+          if (command) rememberedFocus.current.set(activeView, command.textContent);
+        } : undefined}
+        onBlur={gmailKeyboard ? event => {
+          if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) onClose(false);
+        } : undefined}
+        onClickCapture={event => {
+          if (!alive.current || !currentContext()) { event.preventDefault(); event.stopPropagation(); onClose(false); }
+        }}
         onClick={e => e.stopPropagation()}
         style={{
           background: 'var(--bg-elevated)',
@@ -406,12 +565,16 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
             animation: 'contextMenuSlideIn 0.18s ease',
           } : {
             position: 'fixed', left: descale(pos.x, uiScale), top: descale(pos.y, uiScale),
-            width: 320, maxHeight: 'calc(100vh - 8px)',
+            width: 320, maxWidth: 'calc(100vw - 8px)', maxHeight: 'calc(100vh - 8px)',
             animation: 'contextMenuIn 0.12s ease',
           }),
         }}
       >
         <style>{`
+          [data-mailflow-context-menu] [data-context-command]:focus-visible {
+            outline: 2px solid var(--accent); outline-offset: -2px;
+            background: var(--bg-hover) !important;
+          }
           @keyframes contextMenuIn {
             from { opacity: 0; transform: scale(0.95) translateY(-4px); }
             to   { opacity: 1; transform: scale(1) translateY(0); }
@@ -444,7 +607,9 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           </div>
         )}
 
-        {pluginSubmenu ? (
+        {headerMessage && gmailKeyboard ? (
+          <MessageHeaderModal messageId={headerMessage.id} subject={headerMessage.subject} onClose={() => setHeaderMessage(null)} />
+        ) : pluginSubmenu ? (
           // A plugin item opened its own submenu (e.g. GTD's classify/remove list). It renders its
           // own back row; onBack returns to the item list.
           pluginSubmenu(() => setPluginSubmenu(null))
@@ -456,6 +621,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           const scoped = categorizeView === 'sender' || categorizeView === 'domain';
           const backRow = (label, onClick) => (
             <div
+              {...itemProps()}
               onClick={onClick}
               style={{
                 display: 'flex', alignItems: 'center', gap: 8,
@@ -476,6 +642,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           const row = (key, label, onClick, { current = false, submenu = false } = {}) => (
             <div
               key={key}
+              {...itemProps(current, 'menuitem', submenu)}
               onClick={current ? undefined : onClick}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
@@ -532,6 +699,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
             /* Custom date/time picker */
             <>
               <div
+                {...itemProps(false, 'button')}
                 onClick={() => setCustomSnoozeView(false)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
@@ -551,6 +719,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                 <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
                   <input
                     type="date"
+                    aria-label={t('compose.scheduleSend.dateLabel')}
                     value={customDate}
                     min={snoozeMinDate()}
                     onChange={e => setCustomDate(e.target.value)}
@@ -562,6 +731,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                   />
                   <input
                     type="time"
+                    aria-label={t('compose.scheduleSend.timeLabel')}
                     value={customTime}
                     onChange={e => setCustomTime(e.target.value)}
                     style={{
@@ -594,6 +764,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
             /* Snooze preset picker */
             <>
               <div
+                {...itemProps()}
                 onClick={() => setSnoozeView(false)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
@@ -625,6 +796,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
               ].map(({ label, getDate }) => (
                 <div
                   key={label}
+                  {...itemProps()}
                   onClick={() => { onAction(snoozeAction, getDate().toISOString()); onClose(); }}
                   style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)' }}
                   onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
@@ -635,6 +807,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                 </div>
               ))}
               <div
+                {...itemProps(false, 'menuitem', 'dialog')}
                 onClick={() => {
                   setCustomDate(snoozeDefaultDate());
                   setCustomTime(SNOOZE_DEFAULT_TIME);
@@ -665,6 +838,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
               </div>
             ) : (
               <div
+                {...itemProps(false, 'button')}
                 onClick={() => setMoveView(false)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
@@ -683,7 +857,9 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
             )}
             <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-subtle)' }}>
               <input
-                autoFocus={!isMobile}
+                autoFocus={!gmailKeyboard && !isMobile}
+                data-context-folder-search={gmailKeyboard ? '' : undefined}
+                aria-label={t('contextMenu.folders.search')}
                 value={folderSearch}
                 onChange={e => setFolderSearch(e.target.value)}
                 placeholder={t('contextMenu.folders.search')}
@@ -696,7 +872,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                 }}
               />
             </div>
-            <div style={{ maxHeight: 240, overflow: 'auto' }}>
+            <div role={gmailKeyboard ? 'menu' : undefined} aria-label={gmailKeyboard ? t('contextMenu.moveToFolder') : undefined} style={{ maxHeight: 240, overflow: 'auto' }}>
               {moveFoldersLoading ? (
                 <div style={{ padding: '12px 14px', color: 'var(--text-tertiary)', fontSize: 12 }}>
                   {t('contextMenu.folders.loading')}
@@ -719,6 +895,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                       )}
                       {section.rows.map(row => row.kind === 'action' ? (
                         <FolderMenuItem
+                          keyboardProps={itemProps()}
                           key={`action-${row.item.key}`}
                           icon={row.item.renderIcon(13)}
                           label={row.item.label}
@@ -726,6 +903,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                         />
                       ) : (
                         <FolderMenuItem
+                          keyboardProps={itemProps()}
                           key={row.folder.path}
                           folder={row.folder}
                           onClick={() => { onAction('moveTo', row.folder.path); onClose(); }}
@@ -756,6 +934,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                 {gi > 0 && <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />}
                 {group.actions.map((item, ai) => (
                   <MenuItem
+                    keyboardProps={itemProps(item.disabled, 'menuitem', item.hasSubmenu && (item.submenuRole || 'menu'))}
                     key={ai}
                     icon={item.icon}
                     label={item.label}
@@ -763,7 +942,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                     disabled={item.disabled}
                     hasSubmenu={item.hasSubmenu}
                     onClick={() => {
-                      if (item.disabled) return;
+                      if (item.disabled || !alive.current || !currentContext()) return;
                       item.action();
                       if (!item.keepOpen) onClose();
                     }}
@@ -776,7 +955,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
         )}
       </div>
 
-      {headerMessage && (
+      {headerMessage && !gmailKeyboard && (
         <MessageHeaderModal
           messageId={headerMessage.id}
           subject={headerMessage.subject}
@@ -787,10 +966,11 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   );
 }
 
-function MenuItem({ icon, label, onClick, danger, hasSubmenu, disabled }) {
+function MenuItem({ icon, label, onClick, danger, hasSubmenu, disabled, keyboardProps }) {
   const [hov, setHov] = useState(false);
   return (
     <div
+      {...keyboardProps}
       onClick={onClick}
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
@@ -817,7 +997,7 @@ function MenuItem({ icon, label, onClick, danger, hasSubmenu, disabled }) {
   );
 }
 
-function FolderMenuItem({ folder, icon: iconOverride, label, onClick }) {
+function FolderMenuItem({ folder, icon: iconOverride, label, onClick, keyboardProps }) {
   const [hov, setHov] = useState(false);
   const su = (folder?.special_use || '').toLowerCase();
   const icon = iconOverride ? iconOverride
@@ -833,6 +1013,7 @@ function FolderMenuItem({ folder, icon: iconOverride, label, onClick }) {
 
   return (
     <div
+      {...keyboardProps}
       onClick={onClick}
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
@@ -849,4 +1030,21 @@ function FolderMenuItem({ folder, icon: iconOverride, label, onClick }) {
       {folder ? <FolderPathLabel folder={folder} label={folder.favoriteLabel} /> : <FolderPathLabel label={label} />}
     </div>
   );
+}
+
+function menuNavigationKey(state) {
+  return JSON.stringify([state.layout, state.selectedAccountId, state.selectedFolder, state.searchQuery,
+    state.activeLabel, state.nativeLabelFeed?.key, state.nativeLabelFeed?.status, state.selectedMessageId]);
+}
+
+function visibleMenuOpener(opening) {
+  const { opener, openerRow, openerRowId, openerOwnRowId } = opening;
+  if (!opener?.isConnected || !opener.focus || opener.disabled
+    || opener.dataset?.gmailRowId !== openerOwnRowId || openerRow?.dataset.gmailRowId !== openerRowId
+    || opener.closest('[hidden], [inert], [aria-hidden="true"]') || !opener.getClientRects().length) return false;
+  for (let element = opener; element; element = element.parentElement) {
+    const style = window.getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+  }
+  return true;
 }

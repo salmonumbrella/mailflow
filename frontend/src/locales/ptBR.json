@@ -894,6 +894,18 @@
       "gtd": "GTD"
     },
     "actions": {
+      "backToList": {
+        "label": "Voltar à lista de mensagens",
+        "description": "Fechar o painel de leitura e voltar à lista de mensagens"
+      },
+      "markRead": {
+        "label": "Marcar como lida",
+        "description": "Marcar as mensagens selecionadas como lidas"
+      },
+      "markSpam": {
+        "label": "Denunciar spam",
+        "description": "Mover as mensagens selecionadas para Spam"
+      },
       "toggleLeftSidebar": {
         "label": "Alternar barra lateral esquerda",
         "description": "Mostrar ou ocultar a barra lateral esquerda"
@@ -2433,6 +2445,11 @@
     "createAppPassword": "Criar uma senha de app"
   },
   "gmail": {
+    "rows": {
+      "selected": "Selecionada",
+      "unread": "Não lida",
+      "messages": "Mensagens"
+    },
     "nativeLabels": {
       "invalidResponse": "Não foi possível verificar a lista de marcadores. Tente carregá-la novamente.",
       "loadFailed": "Não foi possível carregar os marcadores. Tente novamente.",

@@ -894,6 +894,18 @@
       "gtd": "GTD"
     },
     "actions": {
+      "backToList": {
+        "label": "Torna all'elenco dei messaggi",
+        "description": "Chiudi il riquadro di lettura e torna all'elenco dei messaggi"
+      },
+      "markRead": {
+        "label": "Segna come letto",
+        "description": "Segna i messaggi selezionati come letti"
+      },
+      "markSpam": {
+        "label": "Segnala come spam",
+        "description": "Sposta i messaggi selezionati in Spam"
+      },
       "toggleLeftSidebar": {
         "label": "Mostra o nascondi barra laterale sinistra",
         "description": "Mostra o nascondi la barra laterale sinistra"
@@ -2433,6 +2445,11 @@
     "createAppPassword": "Crea una password per le app"
   },
   "gmail": {
+    "rows": {
+      "selected": "Selezionato",
+      "unread": "Non letto",
+      "messages": "Messaggi"
+    },
     "nativeLabels": {
       "invalidResponse": "Impossibile verificare l’elenco delle etichette. Prova a caricarlo di nuovo.",
       "loadFailed": "Impossibile caricare le etichette. Riprova.",

@@ -115,6 +115,8 @@ const dir = dirname(fileURLToPath(import.meta.url));
 // Two locales sharing a value is only allowed if both appear in the same group.
 // Any unlisted pair will still fail.
 const SAME_VALUE_ALLOWED = {
+  'shortcuts.actions.markSpam.label': [['es', 'ptBR']], // Denunciar spam means Report spam in both languages.
+  'gmail.rows.messages': [['en', 'fr']], // Messages is spelled identically in English and French.
   // Quick settings reuse established mail-interface vocabulary in these exact languages.
   'gmail.quick_settings.density_compact': [['en', 'fr'], ['es', 'ptBR']], // Compact / Compacto.
   'gmail.quick_settings.field_from': [['cs', 'pl'], ['es', 'fr', 'ptBR']], // Od / De mean From.
@@ -1002,6 +1004,43 @@ describe('i18n locale files', () => {
       for (const lang of langs) {
         assert.equal(typeof locales[lang][key], 'string', `${lang} translation missing: ${key}`);
         assert.ok(locales[lang][key].trim(), `${lang} translation empty: ${key}`);
+      }
+    }
+  });
+
+  it('every shortcut source key has a nonempty translation with matching interpolation in every locale', () => {
+    const sourceKeys = [...new Set([
+      ...loadLiteralSourceTranslationKeys(['shortcuts.']),
+      ...[...DYNAMIC_KEYS].filter(key => key.startsWith('shortcuts.')),
+    ])];
+    for (const action of ['backToList', 'markRead', 'markSpam']) {
+      for (const kind of ['label', 'description']) {
+        assert.ok(sourceKeys.includes(`shortcuts.actions.${action}.${kind}`), `${action} ${kind} must be covered`);
+      }
+    }
+    const placeholders = text => [...new Set([...text.matchAll(/{{\s*([\w]+)\s*}}/g)].map(match => match[1]))].sort();
+    for (const key of sourceKeys) {
+      assert.equal(typeof locales.en[key], 'string', `English translation missing: ${key}`);
+      for (const lang of langs) {
+        assert.equal(typeof locales[lang][key], 'string', `${lang} translation missing: ${key}`);
+        assert.ok(locales[lang][key].trim(), `${lang} translation empty: ${key}`);
+        assert.deepEqual(placeholders(locales[lang][key]), placeholders(locales.en[key]), `${lang} interpolation differs: ${key}`);
+      }
+    }
+  });
+
+  it('every Gmail row accessibility source key has a nonempty translation with matching interpolation in every locale', () => {
+    const sourceKeys = loadLiteralSourceTranslationKeys(['gmail.rows.']);
+    for (const key of ['selected', 'unread', 'messages']) {
+      assert.ok(sourceKeys.includes(`gmail.rows.${key}`), `Gmail row ${key} must be covered`);
+    }
+    const placeholders = text => [...new Set([...text.matchAll(/{{\s*([\w]+)\s*}}/g)].map(match => match[1]))].sort();
+    for (const key of sourceKeys) {
+      assert.equal(typeof locales.en[key], 'string', `English translation missing: ${key}`);
+      for (const lang of langs) {
+        assert.equal(typeof locales[lang][key], 'string', `${lang} translation missing: ${key}`);
+        assert.ok(locales[lang][key].trim(), `${lang} translation empty: ${key}`);
+        assert.deepEqual(placeholders(locales[lang][key]), placeholders(locales.en[key]), `${lang} interpolation differs: ${key}`);
       }
     }
   });

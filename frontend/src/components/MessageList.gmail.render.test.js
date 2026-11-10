@@ -250,7 +250,10 @@ for (const threadedView of [false, true]) {
     await React.act(async () => controls('last').querySelector('input').dispatchEvent(new window.MouseEvent('click', { bubbles: true, shiftKey: true })));
     assert.equal(container.querySelectorAll('.mailflow-gmail-row-controls input:checked').length, 3);
     assert.equal(useStore.getState().selectedMessageId, null, 'checkboxes do not open a reader');
-    await React.act(async () => controls('middle').querySelector('button').dispatchEvent(new window.MouseEvent('click', { bubbles: true })));
+    const originalThread = api.getThread;
+    if (threadedView) api.getThread = async () => ({ messages: [rows[1]] });
+    try { await React.act(async () => controls('middle').querySelector('button').dispatchEvent(new window.MouseEvent('click', { bubbles: true }))); }
+    finally { api.getThread = originalThread; }
     assert.equal(useStore.getState().messages.find(message => message.id === 'middle').is_starred, true);
     assert.equal(useStore.getState().selectedMessageId, null, 'starring does not open a reader');
     assert.equal(controls('middle').querySelector('button').getAttribute('aria-pressed'), 'true');
@@ -258,7 +261,9 @@ for (const threadedView of [false, true]) {
     assert.equal(container.querySelector('.mailflow-gmail-row-controls'), null, 'native layouts keep their original row controls');
     await switchLayout('gmail');
     assert.ok(controls('middle'), 'Gmail restores the native row controls after a layout switch');
-    await React.act(async () => controls('middle').querySelector('button').dispatchEvent(new window.MouseEvent('click', { bubbles: true })));
+    if (threadedView) api.getThread = async () => ({ messages: [rows[1]] });
+    try { await React.act(async () => controls('middle').querySelector('button').dispatchEvent(new window.MouseEvent('click', { bubbles: true }))); }
+    finally { api.getThread = originalThread; }
     assert.equal(useStore.getState().messages.find(message => message.id === 'middle').is_starred, false);
     assert.equal(useStore.getState().selectedMessageId, null);
   });

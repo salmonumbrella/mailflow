@@ -19,8 +19,13 @@ export function canRunGlobalAction(action, { rightSidebarApplicable }) {
   return action !== 'toggleRightSidebar' || Boolean(rightSidebarApplicable);
 }
 
-export function canRunSelectedAction(action, state) {
-  if (nativeLabelActionsBlocked(state) && (SELECTED_ACTIONS.has(action) || ['archive', 'delete', 'openLabelPicker', 'gtdTodo', 'gtdWatch', 'gtdDelegated', 'gtdReference', 'gtdSomeday', 'gtdDone'].includes(action))) return false;
+export function canRunSelectedAction(action, state, { focusedRow = false } = {}) {
+  if (nativeLabelActionsBlocked(state) && (SELECTED_ACTIONS.has(action) || ['archive', 'delete', 'markRead', 'markSpam', 'openLabelPicker', 'gtdTodo', 'gtdWatch', 'gtdDelegated', 'gtdReference', 'gtdSomeday', 'gtdDone'].includes(action))) return false;
+  // Gmail's checked rows live in MessageList. Its subscribers validate the exact
+  // selected set before applying read/spam; a focused row alone is not a target.
+  if (state?.layout === 'gmail' && ['markRead', 'markUnread', 'markSpam'].includes(action)) return true;
+  if (state?.layout === 'gmail' && action === 'selectMessage') return focusedRow && !state.selectedMessageId;
+  if (state?.layout === 'gmail' && focusedRow && action === 'toggleStar') return true;
   if (canDispatchHoveredGtdShortcut(action, state)) return true;
   if (['gtdTodo', 'gtdWatch', 'gtdDelegated', 'gtdReference', 'gtdSomeday', 'gtdDone'].includes(action)) {
     return Boolean(resolveGtdHotkeyTarget(state));

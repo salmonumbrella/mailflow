@@ -985,6 +985,18 @@
       "gtd": "GTD"
     },
     "actions": {
+      "backToList": {
+        "label": "Zpět na seznam zpráv",
+        "description": "Zavřít podokno čtení a vrátit se na seznam zpráv"
+      },
+      "markRead": {
+        "label": "Označit jako přečtené",
+        "description": "Označit vybrané zprávy jako přečtené"
+      },
+      "markSpam": {
+        "label": "Nahlásit spam",
+        "description": "Přesunout vybrané zprávy do složky Spam"
+      },
       "toggleLeftSidebar": {
         "label": "Přepnout levý postranní panel",
         "description": "Zobrazit nebo skrýt levý postranní panel"
@@ -2452,6 +2464,11 @@
     "createAppPassword": "Vytvořit heslo aplikace"
   },
   "gmail": {
+    "rows": {
+      "selected": "Vybráno",
+      "unread": "Nepřečtené",
+      "messages": "Zprávy"
+    },
     "nativeLabels": {
       "invalidResponse": "Seznam štítků se nepodařilo ověřit. Zkuste jej načíst znovu.",
       "loadFailed": "Štítky se nepodařilo načíst. Zkuste to znovu.",

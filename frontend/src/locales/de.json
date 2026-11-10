@@ -894,6 +894,18 @@
       "gtd": "GTD"
     },
     "actions": {
+      "backToList": {
+        "label": "Zurück zur Nachrichtenliste",
+        "description": "Lesebereich schließen und zur Nachrichtenliste zurückkehren"
+      },
+      "markRead": {
+        "label": "Als gelesen markieren",
+        "description": "Ausgewählte Nachrichten als gelesen markieren"
+      },
+      "markSpam": {
+        "label": "Spam melden",
+        "description": "Ausgewählte Nachrichten in den Spam-Ordner verschieben"
+      },
       "toggleLeftSidebar": {
         "label": "Linke Seitenleiste umschalten",
         "description": "Linke Seitenleiste ein- oder ausblenden"
@@ -2433,6 +2445,11 @@
     "createAppPassword": "App-Passwort erstellen"
   },
   "gmail": {
+    "rows": {
+      "selected": "Ausgewählt",
+      "unread": "Ungelesen",
+      "messages": "Nachrichten"
+    },
     "nativeLabels": {
       "invalidResponse": "Die Labelliste konnte nicht überprüft werden. Lade sie erneut.",
       "loadFailed": "Labels konnten nicht geladen werden. Versuche es erneut.",

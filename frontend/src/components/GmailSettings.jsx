@@ -79,7 +79,7 @@ export default function GmailSettings({ onClose, initialAccountId, initialTab = 
   const account = state.accounts.find(a => a.id === accountId);
   const folders = state.folders[accountId] || [];
   const signature = signatures[accountId];
-  const shortcutsOn = Object.values(getEffectiveShortcuts(prefs.shortcuts)).some(Boolean);
+  const shortcutsOn = Object.values(getEffectiveShortcuts(prefs.shortcuts, 'gmail')).some(Boolean);
 
   useEffect(() => {
     const previous = document.activeElement;
@@ -298,7 +298,7 @@ export default function GmailSettings({ onClose, initialAccountId, initialTab = 
             <Row title={t("gmail.settings.stars", "Stars")}><span className="mf-gmail-settings-star" aria-label={t("gmail.settings.yellow_star", "Yellow star")}>★</span><p>{t("gmail.settings.mailflow_uses_one_star_flag_additional_star_colors_and", "MailFlow uses one star flag. Additional star colors and cycling presets are not supported by the mail backend.")}</p><button type="button" disabled>{t("gmail.settings.1_star", "1 star")}</button> <button type="button" disabled>{t("gmail.settings.4_stars", "4 stars")}</button> <button type="button" disabled>{t("gmail.settings.all_stars", "all stars")}</button></Row>
             <Row title={t("gmail.settings.keyboard_shortcuts", "Keyboard shortcuts")}>
               <Choice name="shortcuts" value={false} selected={shortcutsOn} onChange={() => patchPref('shortcuts', Object.fromEntries(Object.keys(ACTION_DEFS).map(key => [key, ''])))}>{t("gmail.settings.keyboard_shortcuts_off", "Keyboard shortcuts off")}</Choice>
-              <Choice name="shortcuts" value={true} selected={shortcutsOn} onChange={() => patchPref('shortcuts', Object.values(getEffectiveShortcuts(savedPrefs.shortcuts)).some(Boolean) ? savedPrefs.shortcuts : {})}>{t("gmail.settings.keyboard_shortcuts_on", "Keyboard shortcuts on")}</Choice>
+              <Choice name="shortcuts" value={true} selected={shortcutsOn} onChange={() => patchPref('shortcuts', Object.values(getEffectiveShortcuts(savedPrefs.shortcuts, 'gmail')).some(Boolean) ? savedPrefs.shortcuts : {})}>{t("gmail.settings.keyboard_shortcuts_on", "Keyboard shortcuts on")}</Choice>
               <small>{t("gmail.settings.reenabling_shortcuts_after_saving_them_off_restores_mailflow_defaults", "Re-enabling shortcuts after saving them off restores MailFlow defaults. Customize individual keys in MailFlow settings.")}</small>
             </Row>
             <Row title={t("gmail.settings.button_labels", "Button labels")}><span>{t("gmail.settings.icons", "Icons")}</span><p>{t("gmail.settings.textonly_button_labels_are_not_supported_by_the_current", "Text-only button labels are not supported by the current layout.")}</p></Row>

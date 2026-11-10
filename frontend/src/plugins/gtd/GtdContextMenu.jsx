@@ -13,7 +13,7 @@ import { classifyWithUndo } from '../../utils/gtdClassification.js';
 // The classify + remove submenu shown when the "GTD" item is opened. Renders its own back row and
 // takes over the menu content area (via core's generic plugin-submenu view). Classify offers every
 // state; "Remove from <state>" is offered only for the states this thread is actually labelled with.
-function GtdContextSubmenu({ message, account, onClose, onBack }) {
+function GtdContextSubmenu({ message, account, onClose, onBack, getMenuItemProps }) {
   const { t } = useTranslation();
   const addNotification = useStore(s => s.addNotification);
   const scheduleGtdSectionsFetch = useStore(s => s.scheduleGtdSectionsFetch);
@@ -34,6 +34,7 @@ function GtdContextSubmenu({ message, account, onClose, onBack }) {
   return (
     <>
       <div
+        {...getMenuItemProps?.()}
         onClick={onBack}
         style={{
           display: 'flex', alignItems: 'center', gap: 8,
@@ -52,6 +53,7 @@ function GtdContextSubmenu({ message, account, onClose, onBack }) {
       {GTD_STATES.map(state => (
         <div
           key={state}
+          {...getMenuItemProps?.()}
           onClick={() => classify(state)}
           style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)' }}
           onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
@@ -67,6 +69,7 @@ function GtdContextSubmenu({ message, account, onClose, onBack }) {
           {removableStates.map(state => (
             <div
               key={`rm-${state}`}
+              {...getMenuItemProps?.()}
               onClick={() => removeFrom(state)}
               style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary)' }}
               onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
@@ -87,7 +90,7 @@ function GtdContextSubmenu({ message, account, onClose, onBack }) {
 // the account (so a non-GTD account contributes nothing). The "Done" entry is sidebar-only, mirroring
 // the old menuPolicy.done gate (variant === 'gtdSidebar').
 export function buildGtdContextItems(ctx) {
-  const { message, account, variant, onAction, onClose, openSubmenu, t } = ctx;
+  const { message, account, variant, onAction, onClose, openSubmenu, getMenuItemProps, t } = ctx;
   const items = [];
   if (account?.gtd_enabled) {
     items.push({
@@ -95,9 +98,10 @@ export function buildGtdContextItems(ctx) {
       icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>,
       keepOpen: true,
       hasSubmenu: true,
+      submenuRole: 'menu',
       action: () => openSubmenu((onBack) => (
-        <GtdContextSubmenu message={message} account={account} onClose={onClose} onBack={onBack} />
-      )),
+        <GtdContextSubmenu message={message} account={account} onClose={onClose} onBack={onBack} getMenuItemProps={getMenuItemProps} />
+      ), { type: 'menu' }),
     });
   }
   // The sidebar's "done" checkmark — section-scoped stripping happens in the caller's onAction.

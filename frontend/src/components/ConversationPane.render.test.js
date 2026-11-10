@@ -881,11 +881,22 @@ describe('a conversation another account also received', () => {
   const served = {};
   const held = {};
   let realFetch;
+  let originalAccounts;
+  let originalAccountsReady;
   before(async () => {
     // 'delete opens the next conversation in the list' leaves its delete inside the undo window.
     // Committed during these tests, it would re-read the thread through the stub below and add its
     // ids to their requests, so whatever is still pending is taken back first.
     await React.act(async () => { useStore.getState().notifications.forEach(n => n.onUndo?.()); });
+    // Fetched conversation copies belong to registered accounts in the running app.
+    // Keep the disabled orphan account explicit so no fallback becomes authorized.
+    originalAccounts = useStore.getState().accounts;
+    originalAccountsReady = useStore.getState().accountsReady;
+    await React.act(async () => useStore.setState({ accountsReady: true, accounts: [
+      { id: 'acct', email_address: 'a@example.test', enabled: true, storage_generation: 'generation-a' },
+      { id: 'acct-b', email_address: 'b@example.test', enabled: true, storage_generation: 'generation-b' },
+      { id: 'acct-c', email_address: 'c@example.test', enabled: false, storage_generation: 'generation-c' },
+    ] }));
     realFetch = globalThis.fetch;
     globalThis.fetch = async (url, opts = {}) => {
       const u = String(url);
@@ -899,7 +910,10 @@ describe('a conversation another account also received', () => {
       return realFetch(url, opts);
     };
   });
-  after(() => { globalThis.fetch = realFetch; });
+  after(async () => {
+    globalThis.fetch = realFetch;
+    await React.act(async () => useStore.setState({ accounts: originalAccounts, accountsReady: originalAccountsReady }));
+  });
 
   const wait = ms => React.act(async () => { await new Promise(r => setTimeout(r, ms)); });
   const click = async el => {

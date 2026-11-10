@@ -894,6 +894,18 @@
       "gtd": "GTD"
     },
     "actions": {
+      "backToList": {
+        "label": "Retour à la liste des messages",
+        "description": "Fermer le volet de lecture et revenir à la liste des messages"
+      },
+      "markRead": {
+        "label": "Marquer comme lu",
+        "description": "Marquer les messages sélectionnés comme lus"
+      },
+      "markSpam": {
+        "label": "Signaler comme spam",
+        "description": "Déplacer les messages sélectionnés vers les Indésirables"
+      },
       "toggleLeftSidebar": {
         "label": "Afficher ou masquer la barre latérale gauche",
         "description": "Afficher ou masquer la barre latérale gauche"
@@ -2433,6 +2445,11 @@
     "createAppPassword": "Créer un mot de passe d'application"
   },
   "gmail": {
+    "rows": {
+      "selected": "Sélectionné",
+      "unread": "Non lu",
+      "messages": "Messages"
+    },
     "nativeLabels": {
       "invalidResponse": "Impossible de vérifier la liste des libellés. Réessayez de la charger.",
       "loadFailed": "Impossible de charger les libellés. Réessayez.",

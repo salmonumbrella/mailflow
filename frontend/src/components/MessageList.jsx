@@ -1,5 +1,7 @@
+import { resolveShortcutAction } from '../utils/defaultShortcuts.js';
+import { createListKeyboardActionGuard } from '../utils/listKeyboardActionGuard.js';
 import ListDeleteConfirmation from './ListDeleteConfirmation.jsx';
-import { listActionScopeKey, listActionRowsCurrent, listActionSourceKey, listActionTargetsCurrent, isPermanentListDelete, sameListActionTarget, createListActionCommitGuard } from '../utils/listActionScope.js';
+import { listMessageIdentity, listActionScopeKey, listActionRowsCurrent, listActionSourceKey as baseListActionSourceKey, listActionTargetsCurrent, isPermanentListDelete, sameListActionTarget, createListActionCommitGuard } from '../utils/listActionScope.js';
 import { createNativeLabelFeed } from '../utils/nativeLabelFeed.js';
 import { labelViewKey, NATIVE_LABELS_CHANGED, nativeLabelActionsBlocked } from '../utils/nativeLabelNavigation.js';
 import NativeLabelChips from './NativeLabelChips.jsx';
@@ -44,7 +46,7 @@ import { formatDate, formatDateTime, formatSnoozeUntil } from '../utils/formatDa
 import { SNOOZED_FOLDER, unsnooze, changeSnooze, refreshCounts } from '../utils/snoozeActions.js';
 import { advanceSelectionAfterRemoval, registerRowOpener } from '../utils/listSelection.js';
 import { pickMessageReplyAlias, resolveReplyRecipients, openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
-import { selectedMessage, markMessageUnread } from '../utils/messageHotkeys.js';
+import { selectedMessage, markMessageUnread, topOpenMessageWindow } from '../utils/messageHotkeys.js';
 import { cancelScheduledMarkRead, cancelScheduledMarkReadFor, scheduleMarkReadTimer } from '../utils/markRead.js';
 import { saveSenderCategory } from '../utils/senderCategory.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
@@ -90,6 +92,31 @@ function FolderIcon({ specialUse, size = 13 }) {
 
 function restoreMessagesIfViewCurrent(viewKey, currentViewKeyRef, messages) {
   if (currentViewKeyRef.current === viewKey) useStore.getState().restoreMessages(messages);
+}
+
+const EXPANDED_ROW_PARENT = Symbol('expandedRowParent');
+function listActionSourceKey(rows, state) {
+  if (rows.some(row => row[EXPANDED_ROW_PARENT] && (state.expandedThreadId !== row[EXPANDED_ROW_PARENT]
+    || !state.threadMessages?.[row[EXPANDED_ROW_PARENT]]?.some(child => listMessageIdentity(child) === listMessageIdentity(row))))) return null;
+  return baseListActionSourceKey(rows, state);
+}
+
+// A focused DOM row is not an authorization to act after the mailbox or session changes.
+function gmailRowContext(state) {
+  return JSON.stringify([state.user?.id, state.isLocked, state.selectedAccountId,
+    state.selectedFolder, state.searchQuery, state.activeLabel, state.activeGtdTab, state.listFilter,
+    state.threadedView, state.accounts.map(account => [account.id, account.storage_generation,
+      account.enabled, account.email_address, account.imap_host, account.imap_username])]);
+}
+
+function visibleKeyboardRow(element) {
+  if (!element?.isConnected) return false;
+  for (let node = element; node instanceof Element; node = node.parentElement) {
+    if (node.hidden || node.inert || node.getAttribute('aria-hidden') === 'true') return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+  }
+  return true;
 }
 
 // After a manual sync, when to reload the list if the socket has not said the sync finished.
@@ -307,6 +334,15 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   // Bulk selection state
   const [selectedIds, setSelectedIds] = useState(new Set());
+  // A conversation and its expanded representative can share an id. Record explicit
+  // child selections separately so switching source never silently widens an action.
+  const selectedChildSourcesRef = useRef(new Map());
+  const selectedSourceRevisionRef = useRef(0);
+  const [focusedRowKey, setFocusedRowKey] = useState(null);
+  const focusedRowRef = useRef(null);
+  const gmailKeyboardRef = useRef(null);
+  const gmailSelectionContextRef = useRef(null);
+  const previousParentSourcesRef = useRef(new Map());
   const gmailActionLock = useRef(false);
   const listActionLock = useRef(false);
   const deleteConfirmationRef = useRef(null);
@@ -317,9 +353,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     setDeleteConfirmation(null);
   }, []);
   const listActionMounted = useRef(true);
+  const preparationGuardsRef = useRef(new Set());
   useEffect(() => {
     listActionMounted.current = true;
-    return () => { listActionMounted.current = false; deleteConfirmationRef.current?.(false); };
+    const preparations = preparationGuardsRef.current;
+    return () => { listActionMounted.current = false; preparations.forEach(guard => guard.dispose()); deleteConfirmationRef.current?.(false); };
   }, []);
   const [gmailActionBusy, setGmailActionBusy] = useState(false);
   const [selectionModeActive, setSelectionModeActive] = useState(false);
@@ -442,6 +480,21 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const tRef = useRef(t);
   useEffect(() => { tRef.current = t; }, [t]);
 
+  const createKeyboardPreparation = useCallback(rows => {
+    const observed = createListKeyboardActionGuard(useStore, rows, {
+      sourceKey: state => listActionSourceKey(rows, state),
+      scopeKey: () => JSON.stringify([useStore.getState().layout, gmailRowContext(useStore.getState()), listActionScopeKey(useStore.getState(), scRef.current.selectedIds,
+        archiveViewKeyRef.current, listGenRef.current), selectedSourceRevisionRef.current, [...selectedChildSourcesRef.current].sort()]),
+    });
+    let disposed = false;
+    const guard = {
+      current: () => !disposed && listActionMounted.current && observed.current(),
+      dispose: () => { disposed = true; observed.dispose(); preparationGuardsRef.current.delete(guard); },
+    };
+    preparationGuardsRef.current.add(guard);
+    return guard;
+  }, []);
+
   // Clear selection whenever the message list resets (nav, folder change, etc.)
   useEffect(() => {
     setSelectedIds(new Set());
@@ -453,7 +506,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // Escape clears selection; click-outside closes folder picker
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !e.repeat && !e.isComposing && e.keyCode !== 229 && !e.defaultPrevented && !e.target?.closest?.('[role=menu], [role=dialog], [aria-modal=true], [data-mailflow-context-menu]')) {
         setShowFolderPicker(false);
         setShowLayoutPicker(false);
         setSelectedIds(new Set());
@@ -990,7 +1043,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   const isThreadListRow = useCallback((message) => {
     const messageCount = Number.parseInt(message.message_count, 10);
-    return threadedView && !searchQuery.trim() && message.thread_id && messageCount > 1;
+    return !message[EXPANDED_ROW_PARENT] && threadedView && !searchQuery.trim() && message.thread_id && messageCount > 1;
   }, [threadedView, searchQuery]);
 
   // Resolves the sub-messages a thread-wide action applies to. Defaults to the server rather
@@ -1046,125 +1099,140 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   const setMessagesReadState = useCallback(async (message, read) => {
     if (nativeLabelActionsBlocked(useStore.getState())) return;
-    // An explicit read or unread wins over a delayed automatic read still pending for the row.
-    cancelScheduledMarkReadFor(message.id);
-    const isThreadRow = isThreadListRow(message);
-    const unreadCount = Number.parseInt(message.unread_count, 10);
-    // Use the row's own unread_count as the immediate estimate.
-    // For thread rows this is the aggregate already present on the row;
-    // for single messages it is always 1 (or 0 if already in the target state).
-    const estimatedDelta = isThreadRow && Number.isFinite(unreadCount) ? unreadCount : 1;
-
-    // Immediate optimistic update — do not wait for thread resolution.
-    // For unexpanded thread rows this avoids a visible delay caused by the
-    // api.getThread call inside resolveMessagesForThreadAction.
-    if (isThreadRow) {
-      updateMessage(message.id, { is_read: read, unread_count: read ? 0 : estimatedDelta });
-      // setCachedThreadRead intentionally deferred until after resolution so
-      // that actionMessages still reflects the pre-update sub-message states,
-      // letting us compute the exact delta for any needed correction.
-    } else {
-      updateMessage(message.id, { is_read: read, unread_count: read ? 0 : 1 });
-    }
-    if (read) {
-      if (estimatedDelta > 0) {
-        decrementUnread(message.account_id, estimatedDelta);
-        adjustCategoryCount(message.category, -estimatedDelta);
-      }
-    } else {
-      if (estimatedDelta > 0) {
-        incrementUnread(message.account_id, estimatedDelta);
-        adjustCategoryCount(message.category, estimatedDelta);
-      }
-    }
-
-    // Resolve the individual sub-messages needed for the bulk API call.
-    // For unexpanded thread rows this fires api.getThread, but the UI has
-    // already updated above so the user sees no delay.
-    let actionMessages;
+    const guard = useStore.getState().layout === 'gmail' ? createKeyboardPreparation([message]) : null;
     try {
-      actionMessages = await resolveMessagesForThreadAction(message);
-    } catch (err) {
-      console.error('Failed to load thread for read state change:', err.message);
-      // Revert the optimistic update
+      if (guard && !guard.current()) return false;
+      // Explicit unread must also cancel automatic read when the row is unread already.
+      cancelScheduledMarkReadFor(message.id);
+      let resolved;
+      if (guard) {
+        if (!guard.current()) return false;
+        try { resolved = await resolveMessagesForThreadAction(message, { requireComplete: true }); }
+        catch { return false; }
+        if (!guard.current() || !listActionTargetsCurrent(resolved, useStore.getState())) return false;
+      }
+      if (guard && !isThreadListRow(message) && message.is_read === read) return true;
+      const isThreadRow = isThreadListRow(message);
+      const unreadCount = Number.parseInt(message.unread_count, 10);
+      // Use the row's own unread_count as the immediate estimate.
+      // For thread rows this is the aggregate already present on the row;
+      // for single messages it is always 1 (or 0 if already in the target state).
+      const estimatedDelta = isThreadRow && Number.isFinite(unreadCount) ? unreadCount : 1;
+
+      // Native layouts retain their immediate estimate. Gmail verifies the source
+      // before applying it, so canceled keyboard work cannot leave optimistic flags.
       if (isThreadRow) {
-        updateMessage(message.id, { is_read: !read, unread_count: !read ? 0 : estimatedDelta });
+        updateMessage(message.id, { is_read: read, unread_count: read ? 0 : estimatedDelta });
+        // setCachedThreadRead intentionally deferred until after resolution so
+        // that actionMessages still reflects the pre-update sub-message states,
+        // letting us compute the exact delta for any needed correction.
       } else {
-        updateMessage(message.id, { is_read: !read, unread_count: !read ? 0 : 1 });
+        updateMessage(message.id, { is_read: read, unread_count: read ? 0 : 1 });
       }
-      if (read && estimatedDelta > 0) { incrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, estimatedDelta); }
-      else if (!read && estimatedDelta > 0) { decrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, -estimatedDelta); }
-      return false;
-    }
-
-    actionMessages.forEach(msg => cancelScheduledMarkReadFor(msg.id));
-
-    // Compute exact delta from sub-message states (before mutating the cache).
-    const actualDelta = read
-      ? actionMessages.filter(msg => !msg.is_read).length
-      : actionMessages.filter(msg => msg.is_read).length;
-    // And its split by account. With conversations on, a thread row can hold another
-    // account's copy of the same email (#476); that copy's unread belongs to THAT account's
-    // badge, while the estimate above had to charge the whole row to the row's own account.
-    const actualByAccount = unreadDeltaByAccount(actionMessages, read, message.account_id);
-
-    // Now update the thread cache and correct the parent row if our estimate was off.
-    if (isThreadRow) {
-      setCachedThreadRead(message, read);
-      if (actualDelta !== estimatedDelta) {
-        updateMessage(message.id, { is_read: read, unread_count: read ? 0 : actionMessages.length });
-      }
-    }
-
-    // Correct the sidebar badges per account: each account's actual change, minus what the
-    // estimate already charged to it (all of it went to the row's own account, none elsewhere).
-    for (const accountId of new Set([message.account_id, ...actualByAccount.keys()])) {
-      const diff = (actualByAccount.get(accountId) || 0) - (accountId === message.account_id ? estimatedDelta : 0);
-      if (diff === 0) continue;
       if (read) {
-        if (diff > 0) decrementUnread(accountId, diff);
-        else incrementUnread(accountId, -diff);
+        if (estimatedDelta > 0) {
+          decrementUnread(message.account_id, estimatedDelta);
+          adjustCategoryCount(message.category, -estimatedDelta);
+        }
       } else {
-        if (diff > 0) incrementUnread(accountId, diff);
-        else decrementUnread(accountId, -diff);
+        if (estimatedDelta > 0) {
+          incrementUnread(message.account_id, estimatedDelta);
+          adjustCategoryCount(message.category, estimatedDelta);
+        }
       }
-    }
-    // Category counts are not per account, so the total delta still applies.
-    if (actualDelta !== estimatedDelta) {
-      const diff = actualDelta - estimatedDelta;
-      adjustCategoryCount(message.category, read ? -diff : diff);
-    }
 
-    let tokens = [];
-    if (read) {
-      tokens = actionMessages.map(msg => setPending(msg.id, msg.account_id));
-    } else {
-      actionMessages.forEach(msg => clearReadGuard(msg.id));
-    }
+      // Resolve the individual sub-messages needed for the bulk API call.
+      // For unexpanded thread rows this fires api.getThread, but the UI has
+      // already updated above so the user sees no delay.
+      let actionMessages;
+      try {
+        actionMessages = resolved || await resolveMessagesForThreadAction(message);
+        if (guard && !guard.current()) return false;
+      } catch (err) {
+        console.error('Failed to load thread for read state change:', err.message);
+        // Revert the optimistic update
+        if (isThreadRow) {
+          updateMessage(message.id, { is_read: !read, unread_count: !read ? 0 : estimatedDelta });
+        } else {
+          updateMessage(message.id, { is_read: !read, unread_count: !read ? 0 : 1 });
+        }
+        if (read && estimatedDelta > 0) { incrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, estimatedDelta); }
+        else if (!read && estimatedDelta > 0) { decrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, -estimatedDelta); }
+        return false;
+      }
 
-    try {
-      await api.bulkRead(actionMessages.map(msg => msg.id), read);
-      if (read) actionMessages.forEach((msg, i) => settleMarkRead(msg.id, msg.account_id, tokens[i]));
-    } catch (err) {
-      console.error('markRead failed:', err);
-      // A read the user has since undone by hand is theirs now: nothing to roll back.
-      if (read && !actionMessages.map((msg, i) => failMarkRead(msg.id, tokens[i])).some(Boolean)) return false;
+      actionMessages.forEach(msg => cancelScheduledMarkReadFor(msg.id));
+
+      // Compute exact delta from sub-message states (before mutating the cache).
+      const actualDelta = read
+        ? actionMessages.filter(msg => !msg.is_read).length
+        : actionMessages.filter(msg => msg.is_read).length;
+      // And its split by account. With conversations on, a thread row can hold another
+      // account's copy of the same email (#476); that copy's unread belongs to THAT account's
+      // badge, while the estimate above had to charge the whole row to the row's own account.
+      const actualByAccount = unreadDeltaByAccount(actionMessages, read, message.account_id);
+
+      // Now update the thread cache and correct the parent row if our estimate was off.
       if (isThreadRow) {
-        updateMessage(message.id, { is_read: !read, unread_count: read ? actualDelta : 0 });
-        setCachedThreadRead(message, !read);
+        setCachedThreadRead(message, read);
+        if (actualDelta !== estimatedDelta) {
+          updateMessage(message.id, { is_read: read, unread_count: read ? 0 : actionMessages.length });
+        }
+      }
+
+      // Correct the sidebar badges per account: each account's actual change, minus what the
+      // estimate already charged to it (all of it went to the row's own account, none elsewhere).
+      for (const accountId of new Set([message.account_id, ...actualByAccount.keys()])) {
+        const diff = (actualByAccount.get(accountId) || 0) - (accountId === message.account_id ? estimatedDelta : 0);
+        if (diff === 0) continue;
+        if (read) {
+          if (diff > 0) decrementUnread(accountId, diff);
+          else incrementUnread(accountId, -diff);
+        } else {
+          if (diff > 0) incrementUnread(accountId, diff);
+          else decrementUnread(accountId, -diff);
+        }
+      }
+      // Category counts are not per account, so the total delta still applies.
+      if (actualDelta !== estimatedDelta) {
+        const diff = actualDelta - estimatedDelta;
+        adjustCategoryCount(message.category, read ? -diff : diff);
+      }
+
+      let tokens = [];
+      if (read) {
+        tokens = actionMessages.map(msg => setPending(msg.id, msg.account_id));
       } else {
-        updateMessage(message.id, { is_read: !read, unread_count: read ? 1 : 0 });
+        actionMessages.forEach(msg => clearReadGuard(msg.id));
       }
-      // Give each account back exactly what it was charged.
-      for (const [accountId, n] of actualByAccount) {
-        if (read) incrementUnread(accountId, n); else decrementUnread(accountId, n);
+
+      try {
+        if (guard && !guard.current()) return false;
+        await api.bulkRead(actionMessages.map(msg => msg.id), read);
+        if (guard && !guard.current()) { actionMessages.forEach((msg, i) => failMarkRead(msg.id, tokens[i])); return false; }
+        if (read) actionMessages.forEach((msg, i) => settleMarkRead(msg.id, msg.account_id, tokens[i]));
+      } catch (err) {
+        if (guard && !guard.current()) { actionMessages.forEach((msg, i) => failMarkRead(msg.id, tokens[i])); return false; }
+        console.error('markRead failed:', err);
+        // A read the user has since undone by hand is theirs now: nothing to roll back.
+        if (read && !actionMessages.map((msg, i) => failMarkRead(msg.id, tokens[i])).some(Boolean)) return false;
+        if (isThreadRow) {
+          updateMessage(message.id, { is_read: !read, unread_count: read ? actualDelta : 0 });
+          setCachedThreadRead(message, !read);
+        } else {
+          updateMessage(message.id, { is_read: !read, unread_count: read ? 1 : 0 });
+        }
+        // Give each account back exactly what it was charged.
+        for (const [accountId, n] of actualByAccount) {
+          if (read) incrementUnread(accountId, n); else decrementUnread(accountId, n);
+        }
+        if (actualDelta > 0) adjustCategoryCount(message.category, read ? actualDelta : -actualDelta);
+        return false;
       }
-      if (actualDelta > 0) adjustCategoryCount(message.category, read ? actualDelta : -actualDelta);
-      return false;
-    }
-    return true;
+      return true;
+    } finally { guard?.dispose(); }
   }, [
-    resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadRead,
+    createKeyboardPreparation, resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadRead,
     decrementUnread, incrementUnread, adjustCategoryCount,
   ]);
 
@@ -1175,28 +1243,35 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   const setMessagesStarredState = useCallback(async (message, starred) => {
     if (nativeLabelActionsBlocked(useStore.getState())) return;
-    let actionMessages;
+    const guard = useStore.getState().layout === 'gmail' ? createKeyboardPreparation([message]) : null;
     try {
-      actionMessages = await resolveMessagesForThreadAction(message);
-    } catch (err) {
-      console.error('Failed to load thread for star state change:', err.message);
-      return false;
-    }
+      if (guard && !guard.current()) return false;
+      let actionMessages;
+      try {
+        actionMessages = await resolveMessagesForThreadAction(message, { requireComplete: Boolean(guard) });
+      } catch (err) {
+        console.error('Failed to load thread for star state change:', err.message);
+        return false;
+      }
 
-    const isThreadRow = isThreadListRow(message);
-    updateMessage(message.id, { is_starred: starred });
-    if (isThreadRow) setCachedThreadStarred(message, starred);
+      if (guard && (!guard.current() || !listActionTargetsCurrent(actionMessages, useStore.getState()))) return false;
+      const isThreadRow = isThreadListRow(message);
+      updateMessage(message.id, { is_starred: starred });
+      if (isThreadRow) setCachedThreadStarred(message, starred);
 
-    try {
-      await Promise.all(actionMessages.map(msg => api.markStarred(msg.id, starred)));
-    } catch (err) {
-      console.error('markStarred failed:', err.message);
-      updateMessage(message.id, { is_starred: message.is_starred });
-      if (isThreadRow) setCachedThreadStarred(message, !starred);
-      return false;
-    }
-    return true;
-  }, [resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadStarred]);
+      try {
+        await Promise.all(actionMessages.map(msg => (!guard || guard.current()) ? api.markStarred(msg.id, starred) : undefined));
+        if (guard && !guard.current()) return false;
+      } catch (err) {
+        if (guard && !guard.current()) return false;
+        console.error('markStarred failed:', err.message);
+        updateMessage(message.id, { is_starred: message.is_starred });
+        if (isThreadRow) setCachedThreadStarred(message, !starred);
+        return false;
+      }
+      return true;
+    } finally { guard?.dispose(); }
+  }, [createKeyboardPreparation, resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadStarred]);
 
   const handleStar = (e, message) => {
     e.stopPropagation();
@@ -1206,13 +1281,14 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // Every list entry point prepares the same immutable targets before removing rows.
   // Confirmation must never reread the selection or expand a conversation a second time.
   const prepareListAction = useCallback(async (action, ids, rows) => {
-    if (listActionLock.current || nativeLabelActionsBlocked(useStore.getState())) return null;
+    if (listActionLock.current || useStore.getState().isLocked || nativeLabelActionsBlocked(useStore.getState())) return null;
     listActionLock.current = true;
     const originView = archiveViewKeyRef.current;
-    const scopeKey = () => listActionScopeKey(useStore.getState(), scRef.current.selectedIds, archiveViewKeyRef.current, listGenRef.current);
+    const scopeKey = () => JSON.stringify([gmailRowContext(useStore.getState()), listActionScopeKey(useStore.getState(), scRef.current.selectedIds, archiveViewKeyRef.current, listGenRef.current), [...selectedChildSourcesRef.current].sort()]);
     const originScope = scopeKey();
+    const preparation = createKeyboardPreparation(rows);
     const originSource = listActionSourceKey(rows, useStore.getState());
-    const current = () => listActionMounted.current && scopeKey() === originScope
+    const current = () => listActionMounted.current && preparation.current() && scopeKey() === originScope
       && listActionSourceKey(rows, useStore.getState()) === originSource
       && !nativeLabelActionsBlocked(useStore.getState()) && listActionRowsCurrent(rows, useStore.getState());
     try {
@@ -1252,8 +1328,8 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       if (!listActionMounted.current) return null;
       addNotification({ type: 'error', title: t('gmailToolbar.couldNotCompleteTheSelectedAction', 'Could not complete the selected action'), body: error.message });
       return null;
-    } finally { listActionLock.current = false; }
-  }, [resolveMessagesForThreadAction, addNotification, t]);
+    } finally { preparation.dispose(); listActionLock.current = false; }
+  }, [resolveMessagesForThreadAction, createKeyboardPreparation, addNotification, t]);
 
   // Undo-able delete: optimistically remove, delay the API call by 4.5s so user can undo
   const scheduleDelete = useCallback(async (message) => {
@@ -1359,6 +1435,10 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   const performSpamLabel = useCallback(async (messages, label, originView = null, visibleRows = messages) => {
     if (!messages.length) return;
+    messages = messages.map(message => ({ ...message }));
+    visibleRows = visibleRows.map(message => ({ ...message }));
+    const guard = useStore.getState().layout === 'gmail' ? createListKeyboardActionGuard(useStore, messages) : null;
+    if (guard && !guard.current()) { guard.dispose(); return; }
     const ids = messages.map(m => m.id);
     const isBulk = ids.length > 1;
 
@@ -1386,20 +1466,26 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       settled = true;
       timers.forEach(timer => releaseUndoable(timer));
       timers.clear();
+      const canRestore = !guard || guard.current();
+      guard?.dispose();
+      if (!canRestore) return;
       // Restore the messages in their original position (re-sort by date).
       if (originView === null || originView === archiveViewKeyRef.current) useStore.getState().restoreMessages(visibleRows);
       unreadByAccount(messages).forEach((count, accountId) => incrementUnread(accountId, count));
     };
 
     const performCall = (id) => {
+      if (guard && !guard.current()) return Promise.resolve({ __cancelled: true });
       const fn = label === 'spam' ? api.markSpam : api.markHam;
       return fn(id).catch(err => ({ __failed: true, id, message: err.message }));
     };
 
     timers.set('__call__', holdUndoable(async () => {
       if (settled) return;
+      if (guard && !guard.current()) { guard.dispose(); return; }
       timers.delete('__call__');
       const results = await Promise.allSettled(ids.map(performCall));
+      if (guard && !guard.current()) { guard.dispose(); return; }
       const failed = [];
       results.forEach((r, i) => {
         if (r.status === 'rejected' || r.value?.__failed) failed.push(ids[i]);
@@ -1422,8 +1508,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       // Even if our optimistic math was right, edge cases like the user
       // moving messages between two folders that share a parent, or a
       // concurrent IMAP IDLE update, can desync the local counters.
-      api.getUnreadCounts().then(c => useStore.getState().setUnreadCounts(c)).catch(() => {});
-      accountIds.forEach(accountId => api.getFolders(accountId).then(f => useStore.getState().setFolders(accountId, f)).catch(() => {}));
+      await Promise.allSettled([
+        api.getUnreadCounts().then(c => { if (!guard || guard.current()) useStore.getState().setUnreadCounts(c); }),
+        ...accountIds.map(accountId => api.getFolders(accountId).then(f => { if (!guard || guard.current()) useStore.getState().setFolders(accountId, f); })),
+      ]);
+      guard?.dispose();
     }, UNDO_COMMIT_DELAY_MS));
 
     addNotification({
@@ -1633,10 +1722,14 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   }, []);
 
   const selectAll = useCallback((msgs) => {
+    selectedSourceRevisionRef.current++;
+    selectedChildSourcesRef.current.clear();
     setSelectedIds(new Set(msgs.map(m => m.id)));
   }, []);
 
   const clearSelection = useCallback(() => {
+    selectedSourceRevisionRef.current++;
+    selectedChildSourcesRef.current.clear();
     setSelectedIds(new Set());
     setSelectionModeActive(false);
     setShowFolderPicker(false);
@@ -1645,6 +1738,166 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   // Derived from store — must be declared before callbacks that use it in dependency arrays
   const displayMessages = searchQuery.trim() ? searchResults : messages;
+
+  const gmailKeyboard = layout === 'gmail' && !showGtdTab;
+  const rowContext = gmailRowContext(useStore.getState());
+  const rowView = archiveViewKeyRef.current;
+  const expandedRows = useMemo(() => gmailKeyboard && threadedView && !searchQuery.trim()
+    && displayMessages.some(message => (message.thread_id || message.id) === expandedThreadId)
+    ? (threadMessages[expandedThreadId] || []).map(message => ({ ...message, [EXPANDED_ROW_PARENT]: expandedThreadId })) : [],
+  [gmailKeyboard, threadedView, searchQuery, displayMessages, expandedThreadId, threadMessages]);
+  // Stale/hidden child selections are omitted, never replaced by the same-id parent.
+  const selectedChild = useCallback(id => expandedRows.find(message => message.id === id
+    && listMessageIdentity(message) === selectedChildSourcesRef.current.get(id)), [expandedRows]);
+  const selectionMessages = gmailKeyboard ? [
+    ...displayMessages.map(message => selectedChildSourcesRef.current.has(message.id) ? selectedChild(message.id) : message).filter(Boolean),
+    ...expandedRows.filter(message => selectedIds.has(message.id) && selectedChild(message.id) === message
+      && !displayMessages.some(parent => parent.id === message.id)),
+  ] : displayMessages;
+  const rowEntries = useMemo(() => gmailKeyboard ? displayMessages.flatMap(message => {
+    const parent = { message, kind: threadedView && !searchQuery.trim() ? 'thread' : 'message' };
+    return [parent, ...((message.thread_id || message.id) === expandedThreadId
+      ? expandedRows.map(child => ({ message: child, kind: 'expanded' })) : [])];
+  }).map(entry => ({ ...entry, key: JSON.stringify([rowContext, rowView, entry.kind, listMessageIdentity(entry.message)]) })) : [],
+  [gmailKeyboard, displayMessages, threadedView, searchQuery, expandedThreadId, expandedRows, rowContext, rowView]);
+  const activeRowKey = rowEntries.some(entry => entry.key === focusedRowKey) ? focusedRowKey : rowEntries[0]?.key;
+  const rowEntryCurrent = entry => gmailRowContext(useStore.getState()) === rowContext
+    && archiveViewKeyRef.current === rowView && !useStore.getState().isLocked
+    && listActionRowsCurrent([entry.message], useStore.getState())
+    && (entry.kind !== 'expanded' || useStore.getState().expandedThreadId === expandedThreadId);
+  const selectedEntry = entry => selectedIds.has(entry.message.id)
+    && (entry.kind === 'expanded'
+      ? selectedChildSourcesRef.current.get(entry.message.id) === listMessageIdentity(entry.message)
+      : !selectedChildSourcesRef.current.has(entry.message.id));
+  const selectRowEntry = (entry, { replace = false, range = false } = {}) => {
+    if (!rowEntryCurrent(entry)) return;
+    selectedSourceRevisionRef.current++;
+    const id = entry.message.id;
+    if (replace) selectedChildSourcesRef.current.clear();
+    const wasSelected = !replace && selectedEntry(entry);
+    if (entry.kind === 'expanded' && !wasSelected) selectedChildSourcesRef.current.set(id, listMessageIdentity(entry.message));
+    else selectedChildSourcesRef.current.delete(id);
+    if (replace) setSelectedIds(new Set([id]));
+    else if (range && entry.kind !== 'expanded') handleRangeSelect(id);
+    else setSelectedIds(previous => {
+      const next = new Set(previous);
+      if (wasSelected) next.delete(id); else next.add(id);
+      return next;
+    });
+    lastSelectIdxRef.current = displayMessages.findIndex(message => message.id === id);
+  };
+  const rowElements = () => [...(listRef.current?.querySelectorAll('[data-mailflow-keyboard-row]') || [])]
+    .filter(visibleKeyboardRow);
+  const focusEntryElement = element => {
+    if (!visibleKeyboardRow(element)) return;
+    element.focus({ preventScroll: true });
+    element.scrollIntoView?.({ block: 'nearest' });
+  };
+  const moveRowFocus = (key, from = null) => {
+    if (gmailRowContext(useStore.getState()) !== rowContext || useStore.getState().isLocked) return;
+    const elements = rowElements();
+    const index = elements.indexOf(from || focusedRowRef.current?.element);
+    const next = key === 'Home' ? 0 : key === 'End' ? elements.length - 1
+      : index < 0 ? 0
+      : Math.max(0, Math.min(elements.length - 1, index + (key === 'ArrowDown' ? 1 : -1)));
+    focusEntryElement(elements[next]);
+  };
+  const openRowContext = (event, message, kind) => {
+    event.preventDefault();
+    if (!gmailKeyboard) { setContextMenu({ x: event.clientX, y: event.clientY, message }); return; }
+    const entry = rowEntries.find(item => item.message === message && (!kind || item.kind === kind));
+    if (!entry || !rowEntryCurrent(entry)) return;
+    event.stopPropagation();
+    if (!selectedEntry(entry)) selectRowEntry(entry, { replace: true });
+    const openerElement = event.currentTarget.closest('[data-mailflow-keyboard-row]') || event.currentTarget;
+    focusEntryElement(openerElement);
+    const rect = openerElement.getBoundingClientRect();
+    const keyboard = event.type === 'keydown';
+    setContextMenu({ x: keyboard ? rect.left + 32 : event.clientX,
+      y: keyboard ? rect.top + 20 : event.clientY, message, openerElement });
+  };
+  const rowKeyboardProps = (message, kind) => {
+    if (!gmailKeyboard) return {};
+    const entry = rowEntries.find(item => item.message === message && item.kind === kind);
+    if (!entry) return {};
+    const checked = selectedEntry(entry);
+    const unread = kind === 'thread' ? Number(message.unread_count) > 0 : !message.is_read;
+    return {
+      role: 'group', tabIndex: activeRowKey === entry.key ? 0 : -1,
+      'data-mailflow-keyboard-row': entry.key, 'data-gmail-row-id': message.id,
+      'data-account-id': message.account_id, 'data-row-kind': kind,
+      'data-checked': checked,
+      'aria-label': [checked && t('gmail.rows.selected', 'Selected'), unread && t('gmail.rows.unread', 'Unread'),
+        message.from_name || message.from_email || t('common.unknown', 'Unknown'),
+        message.subject || t('common.noSubject'), formatDateTime(message.date)].filter(Boolean).join(', '),
+      onFocus: event => {
+        if (!rowEntryCurrent(entry)) return;
+        setFocusedRowKey(entry.key);
+        focusedRowRef.current = { key: entry.key, element: event.currentTarget, context: rowContext, view: rowView };
+      },
+      onKeyDown: event => {
+        if (event.defaultPrevented || event.target !== event.currentTarget || event.altKey || event.ctrlKey || event.metaKey || event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229 || event.key === 'Process') return;
+        if (!rowEntryCurrent(entry) || !visibleKeyboardRow(event.currentTarget)) return;
+        const state = useStore.getState();
+        const customAction = resolveShortcutAction(event, state.shortcuts, state.layout);
+        if (customAction && Object.hasOwn(state.shortcuts || {}, customAction)) return;
+        const contextKey = event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10');
+        if (!contextKey && event.shiftKey && event.key !== ' ') return;
+        if (!['Enter', ' ', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) && !contextKey) return;
+        event.preventDefault(); event.stopPropagation();
+        if (event.key === 'Enter') { if (!event.repeat) handleSelect(message); }
+        else if (event.key === ' ') { if (!event.repeat) selectRowEntry(entry, { range: event.shiftKey }); }
+        else if (contextKey) openRowContext(event, message, kind);
+        else moveRowFocus(event.key, event.currentTarget);
+      },
+    };
+  };
+  gmailKeyboardRef.current = {
+    move: moveRowFocus,
+    focused: () => {
+      const entry = rowEntries.find(item => item.key === activeRowKey);
+      return entry && rowEntryCurrent(entry) ? entry : null;
+    },
+    open: () => { const entry = gmailKeyboardRef.current.focused(); if (entry) handleSelect(entry.message); },
+    select: () => { const entry = gmailKeyboardRef.current.focused(); if (entry) selectRowEntry(entry); },
+    selected: () => selectionMessages.filter(message => selectedIds.has(message.id)),
+    action: (action, rows) => { if (rows.length && rows.every(message => listActionRowsCurrent([message], useStore.getState()))) handleGmailToolbarAction(action, rows); },
+  };
+  // Removed rows surrender focus only within this same mailbox. A new view/session must
+  // not inherit an old row's focus or source-specific selection, including same-id reuse.
+  useLayoutEffect(() => {
+    const selectionContext = `${rowContext}|${rowView}`;
+    if (gmailKeyboard && gmailSelectionContextRef.current && gmailSelectionContextRef.current !== selectionContext) {
+      selectedChildSourcesRef.current.clear();
+      setSelectedIds(new Set());
+    }
+    gmailSelectionContextRef.current = selectionContext;
+    const previous = focusedRowRef.current;
+    if (previous && (!gmailKeyboard || previous.context !== rowContext || previous.view !== rowView)) {
+      if (previous.element.contains(document.activeElement)) document.activeElement.blur();
+      focusedRowRef.current = null;
+      setFocusedRowKey(null);
+    } else if (previous && !rowEntries.some(entry => entry.key === previous.key)) {
+      focusedRowRef.current = null;
+      setFocusedRowKey(null);
+      // React may reuse this element for a replacement UID/source with the same id.
+      // That new mail must not inherit the previous message's keyboard focus.
+      if (previous.element.isConnected && previous.element.contains(document.activeElement)) document.activeElement.blur();
+      else if (!previous.element.isConnected && document.activeElement === document.body) {
+        const first = [...(listRef.current?.querySelectorAll('[data-mailflow-keyboard-row]') || [])].find(visibleKeyboardRow);
+        first?.focus({ preventScroll: true });
+      }
+    }
+    const currentParents = new Map(displayMessages.map(message => [message.id, listMessageIdentity(message)]));
+    const staleParents = gmailKeyboard ? [...selectedIds].filter(id => !selectedChildSourcesRef.current.has(id)
+      && previousParentSourcesRef.current.has(id) && previousParentSourcesRef.current.get(id) !== currentParents.get(id)) : [];
+    previousParentSourcesRef.current = currentParents;
+    const stale = [...new Set([...staleParents, ...[...selectedChildSourcesRef.current.keys()].filter(id => !selectedIds.has(id) || !selectedChild(id))])];
+    if (stale.length) {
+      stale.forEach(id => selectedChildSourcesRef.current.delete(id));
+      setSelectedIds(previousIds => new Set([...previousIds].filter(id => !stale.includes(id))));
+    }
+  }, [gmailKeyboard, rowContext, rowView, rowEntries, selectedChild, selectedIds, displayMessages]);
 
   // Folder search results — shown at the top when searching with a plain query
   // (no special operator prefixes like from:, to:, subject:, has:, is:)
@@ -1668,6 +1921,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   })();
   // Keep scRef in sync so scheduleDelete can read displayMessages without a stale closure
   scRef.current.displayMessages = displayMessages;
+  scRef.current.selectionMessages = selectionMessages;
   // Same reason for the drag source: dragstart is synchronous and handleRowDragStart is
   // registered once ([] deps), so it reads the thread predicate and the fetch context from
   // here rather than closing over values that would be stale the moment the folder changes.
@@ -1677,6 +1931,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   // Arrow-key navigation: intercepts ArrowDown/ArrowUp when the list container has focus.
   const handleListKeyDown = useCallback((e) => {
+    if (useStore.getState().layout === 'gmail') {
+      if (e.target !== e.currentTarget || e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey || e.isComposing || e.nativeEvent?.isComposing || e.keyCode === 229 || e.key === 'Process') return;
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) { e.preventDefault(); e.stopPropagation(); gmailKeyboardRef.current?.move(e.key); }
+      return;
+    }
     if (e.key === 'ArrowDown') { e.preventDefault(); shortcutBus.emit('nextMessage'); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); shortcutBus.emit('prevMessage'); }
   }, []);
@@ -1695,11 +1954,13 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   // Called for normal (non-shift) row checkbox toggles — tracks anchor for range select
   const handleRowToggleSelect = useCallback((id) => {
+    selectedSourceRevisionRef.current++;
+    const wasChild = selectedChildSourcesRef.current.delete(id);
     const idx = displayMessages.findIndex(m => m.id === id);
     lastSelectIdxRef.current = idx;
     setSelectedIds(prev => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (wasChild) next.add(id); else if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
   }, [displayMessages]);
@@ -1731,6 +1992,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
   // Called on shift-click: selects all rows between anchor and current index
   const handleRangeSelect = useCallback((id) => {
+    selectedSourceRevisionRef.current++;
     const msgs = displayMessages;
     const clickedIdx = msgs.findIndex(m => m.id === id);
     if (clickedIdx === -1) return;
@@ -1739,7 +2001,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     const hi = Math.max(anchor, clickedIdx);
     setSelectedIds(prev => {
       const next = new Set(prev);
-      for (let i = lo; i <= hi; i++) next.add(msgs[i].id);
+      for (let i = lo; i <= hi; i++) { selectedChildSourcesRef.current.delete(msgs[i].id); next.add(msgs[i].id); }
       return next;
     });
     lastSelectIdxRef.current = clickedIdx;
@@ -1872,7 +2134,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     if (nativeLabelActionsBlocked(useStore.getState())) return;
     e.stopPropagation();
     const rect = e.currentTarget.getBoundingClientRect();
-    setContextMenu({ x: rect.left, y: rect.bottom + 4, message: msg, defaultMoveView: true });
+    setContextMenu({ x: rect.left, y: rect.bottom + 4, message: msg, defaultMoveView: true, openerElement: e.currentTarget.closest('[data-mailflow-keyboard-row]') || e.currentTarget });
   }, []);
 
   const handleRowDragStart = useCallback((e, message) => {
@@ -2230,32 +2492,37 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     };
 
     const onNext = () => {
+      if (getState().layout === 'gmail' && !getState().selectedMessageId) { gmailKeyboardRef.current?.move('ArrowDown'); return; }
       const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       if (!pool.length) return;
       const idx = pool.findIndex(m => m.id === selectedMessageId);
-      const next = pool[idx + 1] ?? pool[0];
+      const next = pool[idx + 1] ?? (getState().layout === 'gmail' ? pool[idx] : pool[0]);
+      if (!next) return;
       selectListedMessage(useStore, next.id);
       markRead(next);
     };
 
     const onPrev = () => {
+      if (getState().layout === 'gmail' && !getState().selectedMessageId) { gmailKeyboardRef.current?.move('ArrowUp'); return; }
       const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       if (!pool.length) return;
       const idx = pool.findIndex(m => m.id === selectedMessageId);
-      const prev = idx <= 0 ? pool[pool.length - 1] : pool[idx - 1];
+      const prev = idx <= 0 ? (getState().layout === 'gmail' ? pool[0] : pool[pool.length - 1]) : pool[idx - 1];
       selectListedMessage(useStore, prev.id);
       markRead(prev);
     };
 
     const onOpen = () => {
+      if (getState().layout === 'gmail') { if (!getState().selectedMessageId) gmailKeyboardRef.current?.open(); return; }
       const { messages, selectedMessageId } = getState();
       if (selectedMessageId || !messages.length) return;
       selectListedMessage(useStore, messages[0].id);
     };
 
     const onSelect = () => {
+      if (getState().layout === 'gmail') { if (!getState().selectedMessageId && !topOpenMessageWindow(getState())) gmailKeyboardRef.current?.select(); return; }
       const { selectedMessageId } = getState();
       if (!selectedMessageId) return;
       scRef.current.setSelectedIds(prev => {
@@ -2271,7 +2538,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       const pool = searchQuery.trim() ? searchResults : messages;
       const ids = [...scRef.current.selectedIds];
       if (ids.length > 0) {
-        const msgs = pool.filter(m => ids.includes(m.id));
+        const msgs = (getState().layout === 'gmail' ? scRef.current.selectionMessages : pool).filter(m => ids.includes(m.id));
         bulkArchiveRef.current(ids, msgs);
       } else if (selectedMessageId) {
         const msg = findVisibleArchiveMessage(pool, selectedMessageId, threadMessages);
@@ -2301,7 +2568,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       const pool = searchQuery.trim() ? searchResults : messages;
       const ids = [...scRef.current.selectedIds];
       if (ids.length > 0) {
-        const msgs = pool.filter(m => ids.includes(m.id));
+        const msgs = (getState().layout === 'gmail' ? scRef.current.selectionMessages : pool).filter(m => ids.includes(m.id));
         bulkDeleteRef.current(ids, msgs);
       } else if (selectedMessageId) {
         const msg = pool.find(m => m.id === selectedMessageId);
@@ -2338,9 +2605,15 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     };
 
     const onMarkUnread = () => {
+      if (getState().layout === 'gmail' && scRef.current.selectedIds.size) { gmailAction('unread'); return; }
       if (nativeLabelActionsBlocked(useStore.getState())) return;
       const state = getState();
       const message = selectedMessage(state);
+      const guard = state.layout === 'gmail' && message ? createListKeyboardActionGuard(useStore, [message], {
+        sourceKey: current => JSON.stringify([current.selectedMessageId, topOpenMessageWindow(current)?.messageId,
+          listMessageIdentity(selectedMessage(current))]),
+      }) : null;
+      if (guard && !guard.current()) { guard.dispose(); return; }
       markMessageUnread(message, {
         cancel: () => {
           if (message) {
@@ -2351,14 +2624,16 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           autoMarkReadTimerRef.current = null;
         },
         update: (id, fields) => {
+          if (guard && !guard.current()) return;
           state.updateMessage(id, fields);
           state.markGtdThreadRead(message.message_id || message.id, fields.is_read);
         },
-        incrementUnread: state.incrementUnread,
-        decrementUnread: state.decrementUnread,
-        adjustCategoryCount: state.adjustCategoryCount,
-        patch: api.bulkRead,
+        incrementUnread: (...args) => { if (!guard || guard.current()) state.incrementUnread(...args); },
+        decrementUnread: (...args) => { if (!guard || guard.current()) state.decrementUnread(...args); },
+        adjustCategoryCount: (...args) => { if (!guard || guard.current()) state.adjustCategoryCount(...args); },
+        patch: (ids, read) => api.bulkRead(ids, read).finally(() => guard?.dispose()),
       });
+      if (!message?.is_read) guard?.dispose();
     };
 
     const onForward = () => {
@@ -2399,6 +2674,28 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       void last.onUndo();
     };
 
+    const gmailAction = action => {
+      const state = getState();
+      if (state.layout !== 'gmail' || state.isLocked || nativeLabelActionsBlocked(state)) return;
+      const keyboard = gmailKeyboardRef.current;
+      const selection = keyboard?.selected() || [];
+      if (scRef.current.selectedIds.size && selection.length !== scRef.current.selectedIds.size) return;
+      const rows = selection.length ? selection : state.selectedMessageId
+        ? [selectedMessage(state)].filter(Boolean) : [];
+      keyboard?.action(action, rows);
+    };
+    const onExplicitRead = () => gmailAction('read');
+    const onMarkSpam = () => gmailAction('spam');
+    const onRowStar = () => {
+      const state = getState();
+      if (state.layout !== 'gmail' || state.selectedMessageId || topOpenMessageWindow(state)) return;
+      const entry = gmailKeyboardRef.current?.focused();
+      if (entry && !state.isLocked && !nativeLabelActionsBlocked(state)) gmailKeyboardRef.current.action(entry.message.is_starred ? 'unstar' : 'star', [entry.message]);
+    };
+    shortcutBus.on('markRead', onExplicitRead);
+    shortcutBus.on('markSpam', onMarkSpam);
+    shortcutBus.on('toggleStar', onRowStar);
+
     // (GTD classify keys t/w/d are handled by the GTD plugin's runtime, not here.)
     shortcutBus.on('nextMessage',   onNext);
     shortcutBus.on('prevMessage',   onPrev);
@@ -2414,6 +2711,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     shortcutBus.on('undoAction',    onUndoAction);
 
     return () => {
+      shortcutBus.off('markRead', onExplicitRead);
+      shortcutBus.off('markSpam', onMarkSpam);
+      shortcutBus.off('toggleStar', onRowStar);
       shortcutBus.off('nextMessage',   onNext);
       shortcutBus.off('prevMessage',   onPrev);
       shortcutBus.off('openMessage',   onOpen);
@@ -2444,7 +2744,8 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const handleHoverArchive = (e, msg) => { e.stopPropagation(); handleContextAction('archive', msg); };
   const handleHoverSnooze = (e, msg) => {
     e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY, message: msg, defaultSnoozeView: true });
+    const rect = e.currentTarget.getBoundingClientRect();
+    setContextMenu({ x: e.detail === 0 ? rect.left : e.clientX, y: e.detail === 0 ? rect.bottom : e.clientY, message: msg, defaultSnoozeView: true, openerElement: e.currentTarget.closest('[data-mailflow-keyboard-row]') || e.currentTarget });
   };
 
   const handleOpenFolderPicker = useCallback(async (selectedMsgs) => {
@@ -2566,7 +2867,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         // If multiple messages are checked and the right-clicked message is among them,
         // delegate to handleBulkMove so all selected messages are moved together.
         if (selectedIds.size > 1 && selectedIds.has(message.id)) {
-          const bulkMsgs = displayMessages.filter(m => selectedIds.has(m.id));
+          const bulkMsgs = selectionMessages.filter(m => selectedIds.has(m.id));
           handleBulkMove([...selectedIds], bulkMsgs, folder);
           // handleBulkMove already clears the selection internally.
           break;
@@ -2684,7 +2985,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       }
       case 'delete':
         if (selectedIds.size > 1 && selectedIds.has(message.id)) {
-          const bulkMsgs = displayMessages.filter(m => selectedIds.has(m.id));
+          const bulkMsgs = selectionMessages.filter(m => selectedIds.has(m.id));
           handleBulkDelete([...selectedIds], bulkMsgs);
         } else {
           scheduleDelete(message);
@@ -2694,7 +2995,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         // Bulk when more than one message is selected and the right-clicked
         // message is among them; otherwise just the single message.
         const targets = (selectedIds.size > 1 && selectedIds.has(message.id))
-          ? displayMessages.filter(m => selectedIds.has(m.id))
+          ? selectionMessages.filter(m => selectedIds.has(m.id))
           : [message];
         performSpamLabel(targets, 'spam');
         // The action bar should not claim "X selected" for messages that have
@@ -2706,7 +3007,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       }
       case 'markHam': {
         const targets = (selectedIds.size > 1 && selectedIds.has(message.id))
-          ? displayMessages.filter(m => selectedIds.has(m.id))
+          ? selectionMessages.filter(m => selectedIds.has(m.id))
           : [message];
         performSpamLabel(targets, 'ham');
         if (selectedIds.has(message.id)) clearSelection();
@@ -2755,7 +3056,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const handleThreadMarkRead = (e, message) => {
     e.stopPropagation();
     const uc = parseInt(message.unread_count);
-    const hasUnreadInThread = Number.isFinite(uc) && uc > 0;
+    const hasUnreadInThread = isThreadListRow(message) ? Number.isFinite(uc) && uc > 0 : !message.is_read;
     handleContextAction(hasUnreadInThread ? 'markRead' : 'markUnread', message);
   };
 
@@ -2835,7 +3136,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     recentMessageOpenUntilRef.current = Date.now() + 1500;
     api.getMessageBody(message.id).catch(() => {});
     selectListedMessage(useStore, message.id);
-    listRef.current?.focus({ preventScroll: true });
+    if (layout !== 'gmail') listRef.current?.focus({ preventScroll: true });
     markMessageReadOnOpen(message);
   };
 
@@ -2962,9 +3263,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   const selectionMode = selectedIds.size > 0 || selectionModeActive;
   // A row's body loads while the mouse rests on it, so the click shows it at once (#677).
   const hoverPrefetch = useHoverPrefetch({ enabled: !isMobile && !selectionMode });
-  const selectedMsgs = displayMessages.filter(m => selectedIds.has(m.id));
+  const selectedMsgs = selectionMessages.filter(m => selectedIds.has(m.id));
   const selectedCount = selectedIds.size;
-  const allSelected = displayMessages.length > 0 && selectedIds.size === displayMessages.length;
+  const allSelected = displayMessages.length > 0 && displayMessages.every(message => selectedIds.has(message.id) && !selectedChildSourcesRef.current.has(message.id));
   const selectedAccountIds = [...new Set(selectedMsgs.map(m => m.account_id))];
   const canMove = selectedAccountIds.length === 1;
   const bulkMarkAsRead = selectedMsgs.some(m => !m.is_read);
@@ -2997,6 +3298,8 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     }
     if (!rows.length) return;
     const originView = archiveViewKeyRef.current;
+    const preparation = createKeyboardPreparation(rows);
+    if (!preparation.current()) { preparation.dispose(); return; }
     const ids = rows.map(row => row.id);
     gmailActionLock.current = true;
     setGmailActionBusy(true);
@@ -3005,15 +3308,15 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       else if (action === 'delete') await handleBulkDelete(ids, rows);
       else if (action === 'move') await handleBulkMove(ids, rows, value);
       else if (action === 'spam') {
-        const resolved = await Promise.all(rows.map(async row => keepDraftsApart(await resolveMessagesForThreadAction(row), row.id)));
-        if (archiveViewKeyRef.current !== originView) return;
+        const resolved = await Promise.all(rows.map(async row => keepDraftsApart(await resolveMessagesForThreadAction(row, { requireComplete: true }), row.id)));
+        if (!preparation.current() || archiveViewKeyRef.current !== originView) return;
         const unique = conversationSpamTargets([...new Map(resolved.flat().map(message => [message.id, message])).values()], accounts);
         if (!unique.length) throw new Error(t("gmailToolbar.noReceivedMessagesInThisSelectionCanBeReportedAsSpam", "No received messages in this selection can be reported as spam."));
         await performSpamLabel(unique, 'spam', originView, rows);
         clearSelection();
       } else if (['read', 'unread', 'star', 'unstar'].includes(action)) {
         for (const row of rows) {
-          if (archiveViewKeyRef.current !== originView) break;
+          if (!preparation.current() || archiveViewKeyRef.current !== originView) break;
           const succeeded = action === 'read' || action === 'unread'
             ? await setMessagesReadState(row, action === 'read')
             : await setMessagesStarredState(row, action === 'star');
@@ -3023,21 +3326,29 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         // The server owns reply-chain expansion. A successful representative does not mean
         // every member of a subject-group thread was snoozed. Refresh from the server.
         let failed = 0;
+        const succeeded = [];
         for (const row of rows) {
-          if (archiveViewKeyRef.current !== originView) break;
+          if (!preparation.current()) return;
           try {
             if (action === 'snooze') await api.snoozeMessage(row.id, value);
             else if (action === 'changeSnooze') await api.changeSnooze(row.id, value);
             else await api.unsnoozeMessage(row.id);
-            if (archiveViewKeyRef.current === originView && action !== 'changeSnooze') removeMessage(row.id);
-            else if (action === 'changeSnooze') updateMessage(row.id, { snooze_until: value });
-          } catch { failed++; }
+            if (!preparation.current()) return;
+            succeeded.push(row);
+          } catch { if (!preparation.current()) return; failed++; }
         }
-        refreshCounts();
+        const counts = await api.getUnreadCounts().catch(() => null);
+        if (!preparation.current()) return;
+        if (counts) useStore.getState().setUnreadCounts(counts);
+        // Defer removal until every request has been checked against the unchanged
+        // source set; our own first removal must not invalidate the rest of a batch.
+        succeeded.forEach(row => action === 'changeSnooze'
+          ? updateMessage(row.id, { snooze_until: value }) : removeMessage(row.id));
         window.dispatchEvent(new Event('mailflow:refresh'));
         if (useStore.getState().searchQuery.trim()) setSearchReloadToken(token => token + 1);
-        if (failed) throw new Error(t("gmailToolbar.partialFailure", { defaultValue: "{{count}} selected message(s) could not be updated. They remain selected for retry.", count: failed }));
-        if (archiveViewKeyRef.current === originView) clearSelection();
+        if (failed) addNotification({ type: 'error', title: t("gmailToolbar.couldNotCompleteTheSelectedAction", "Could not complete the selected action"),
+          body: t("gmailToolbar.partialFailure", { defaultValue: "{{count}} selected message(s) could not be updated. They remain selected for retry.", count: failed }) });
+        else clearSelection();
       } else if (action === 'findSender' && rows.length === 1) {
         const sender = rows[0].from_email?.trim();
         if (!sender) throw new Error(t("gmailToolbar.thisMessageHasNoSearchableSenderAddress", "This message has no searchable sender address."));
@@ -3049,8 +3360,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         await openForwardAsAttachmentFromMessage(rows[0], { openCompose });
       }
     } catch (error) {
-      addNotification({ type: 'error', title: t("gmailToolbar.couldNotCompleteTheSelectedAction", "Could not complete the selected action"), body: error.message || t("gmailToolbar.pleaseTryAgain", "Please try again.") });
+      if (preparation.current()) addNotification({ type: 'error', title: t("gmailToolbar.couldNotCompleteTheSelectedAction", "Could not complete the selected action"), body: error.message || t("gmailToolbar.pleaseTryAgain", "Please try again.") });
     } finally {
+      preparation.dispose();
       gmailActionLock.current = false;
       setGmailActionBusy(false);
     }
@@ -3344,7 +3656,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
             on the row below. In a list narrower still, the controls wrap below the title, right-aligned,
             instead of squeezing the title away (#766). */}
         {layout === 'gmail' ? <GmailToolbar
-          messages={showGtdTab ? [] : displayMessages} selectedIds={selectedIds}
+          messages={showGtdTab ? [] : displayMessages} actionMessages={selectionMessages} selectedIds={selectedIds}
+          selectedTopLevelIds={new Set([...selectedIds].filter(id => !selectedChildSourcesRef.current.has(id)))}
+          selectionSourceKey={JSON.stringify([selectedSourceRevisionRef.current, selectedMsgs.map(message => [listMessageIdentity(message), message[EXPANDED_ROW_PARENT]])])}
           onSelect={rows => rows.length ? selectAll(rows) : clearSelection()}
           confirmDeleteInParent onAction={handleGmailToolbarAction} onRefresh={handleSync} busy={gmailActionBusy || loadingMessages || nativeLabelActionsBlocked(useStore.getState())} syncing={syncing}
           permanentDelete={selectedMsgs.some(message => {
@@ -3922,7 +4236,8 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           onKeyDown={handleListKeyDown}
           onPointerMove={hoverPrefetch.onPointerMove}
           onPointerLeave={hoverPrefetch.onPointerLeave}
-          tabIndex={0}
+          tabIndex={gmailKeyboard && rowEntries.length ? -1 : 0}
+          aria-label={gmailKeyboard ? t('gmail.rows.messages', 'Messages') : undefined}
           style={{ height: '100%', overflowY: 'auto', overflowX: 'hidden', outline: 'none', overscrollBehavior: 'contain' }}
         >
           {showGtdTab ? <GtdTabList /> : (<>
@@ -4404,8 +4719,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
               <ThreadRow
                 key={tid}
                 message={message}
+                keyboardProps={rowKeyboardProps(message, 'thread')}
+                childKeyboardProps={msg => rowKeyboardProps(msg, 'expanded')}
+                onChildSelect={msg => { const entry = rowEntries.find(item => item.message === msg && item.kind === 'expanded'); if (entry) selectRowEntry(entry); }}
                 isExpanded={expandedThreadId === tid}
-                threadMsgs={threadMessages[tid] || null}
+                threadMsgs={gmailKeyboard && expandedThreadId === tid ? expandedRows : (threadMessages[tid] || null)}
                 isLoadingThread={loadingThread === tid}
                 selectedMessageId={selectedMessageId}
                 selectedMid={selectedMid}
@@ -4426,10 +4744,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
                 hoverActionSet={hoverActionSet}
                 onArchive={handleHoverArchive}
                 onSnooze={handleHoverSnooze}
-                onContextMenu={(e, msg) => {
-                  e.preventDefault();
-                  setContextMenu({ x: e.clientX, y: e.clientY, message: msg });
-                }}
+                onContextMenu={openRowContext}
                 onMove={handleRowMove}
                 onDragStart={handleRowDragStart}
                 isMobile={isMobile}
@@ -4437,7 +4752,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
                 swipeRightAction={swipeRightAction}
                 onSwipeLeft={selectionMode || swipeLeftAction === 'disabled' ? undefined : (msg) => runSwipeAction(swipeLeftAction, msg)}
                 onSwipeRight={selectionMode || swipeRightAction === 'disabled' ? undefined : (msg) => runSwipeAction(swipeRightAction, msg)}
-                isChecked={selectedIds.has(message.id)}
+                isChecked={selectedIds.has(message.id) && !selectedChildSourcesRef.current.has(message.id)}
                 selectionMode={selectionMode}
                 onToggleSelect={handleRowToggleSelect}
                 onRangeSelect={handleRangeSelect}
@@ -4453,11 +4768,12 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
             const swipeRightAction = swipeActions?.right || 'markRead';
             return (
               <MessageRow
+                keyboardProps={rowKeyboardProps(message, 'message')}
                 key={message.id}
                 message={message}
                 selected={activeLabel ? message.id === selectedMessageId : isSelectedRow(message, selectedMessageId, selectedMid, selectedAcct)}
                 lastViewed={lastViewedMessageId === message.id && selectedMessageId !== message.id}
-                isChecked={selectedIds.has(message.id)}
+                isChecked={selectedIds.has(message.id) && !selectedChildSourcesRef.current.has(message.id)}
                 selectionMode={selectionMode}
                 showAccount={false} /* No per-account dot on unified rows: it added noise beside the unread indicator; the account is visible in the message pane header. */
                 isNarrow={isNarrow}
@@ -4476,10 +4792,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
                 hoverActionSet={hoverActionSet}
                 onArchive={handleHoverArchive}
                 onSnooze={handleHoverSnooze}
-                onContextMenu={(e, msg) => {
-                  e.preventDefault();
-                  setContextMenu({ x: e.clientX, y: e.clientY, message: msg });
-                }}
+                onContextMenu={openRowContext}
                 onMove={handleRowMove}
                 onDragStart={handleRowDragStart}
                 isMobile={isMobile}
@@ -4501,6 +4814,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
             x={contextMenu.x}
             y={contextMenu.y}
             message={contextMenu.message}
+            openerElement={contextMenu.openerElement}
             defaultMoveView={contextMenu.defaultMoveView}
             defaultSnoozeView={contextMenu.defaultSnoozeView}
             onClose={() => setContextMenu(null)}
@@ -4951,11 +5265,14 @@ function GmailRowControls({ message, checked, onToggleSelect, onRangeSelect, onS
   );
 }
 
-function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onModifierSelect, onLongPress, onExplainSpam }) {
+function ThreadRow({ keyboardProps = {}, childKeyboardProps = () => ({}), onChildSelect, message, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onModifierSelect, onLongPress, onExplainSpam }) {
   const { t } = useTranslation();
   const gmailLayout = useStore(s => s.layout === 'gmail');
   const checkboxRow = gmailLayout && !isMobile;
   const [hovered, setHovered] = useState(false);
+  const [focusWithin, setFocusWithin] = useState(false);
+  const [focusedChildId, setFocusedChildId] = useState(null);
+  const [hoveredChildId, setHoveredChildId] = useState(null);
   const messageCount = message.message_count || 1;
   const unreadCount  = parseInt(message.unread_count) || 0;
 
@@ -5000,6 +5317,9 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
       <div
         ref={isMobile ? contentRef : undefined}
         className={`mailflow-message-row${isMobile ? ' no-callout' : ''}`}
+        {...keyboardProps}
+        onFocusCapture={gmailLayout ? () => setFocusWithin(true) : undefined}
+        onBlurCapture={gmailLayout ? event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusWithin(false); } : undefined}
         data-unread={unreadCount > 0}
         data-selected={isLastViewed}
         data-checked={isChecked}
@@ -5197,7 +5517,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
             </div>
           )}
         </div>
-        {hovered && hoverQuickActions && (
+        {(hovered || (gmailLayout && focusWithin)) && hoverQuickActions && (
           <RowHoverActions
             message={message}
             isRead={unreadCount === 0}
@@ -5231,9 +5551,12 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
             <div
               key={msg.id}
               className="mailflow-thread-message-row"
-              onClick={e => { e.stopPropagation(); if (!selectionMode) onSelect(msg); }}
+              {...childKeyboardProps(msg)}
+              onFocusCapture={gmailLayout ? () => setFocusedChildId(msg.id) : undefined}
+              onBlurCapture={gmailLayout ? event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusedChildId(null); } : undefined}
+              onClick={e => { e.stopPropagation(); if (gmailLayout && selectionMode) onChildSelect?.(msg); else if (!selectionMode) onSelect(msg); }}
               onDoubleClick={onOpenWindow ? (e => { e.stopPropagation(); onOpenWindow(msg); }) : undefined}
-              onContextMenu={!isMobile ? (e => { e.preventDefault(); onContextMenu(e, msg); }) : undefined}
+              onContextMenu={!isMobile ? (e => { e.preventDefault(); onContextMenu(e, msg, 'expanded'); }) : undefined}
               style={{
                 display: 'flex', alignItems: 'flex-start', gap: 8,
                 padding: '9px 14px 9px 44px',
@@ -5242,8 +5565,8 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
                 borderTop: idx > 0 ? '1px solid var(--border-subtle)' : 'none',
                 transition: 'background 0.1s',
               }}
-              onMouseEnter={e => { if (selectedMessageId !== msg.id) e.currentTarget.style.background = 'var(--bg-tertiary)'; }}
-              onMouseLeave={e => { e.currentTarget.style.background = selectedMessageId === msg.id || lastViewedMessageId === msg.id ? 'var(--accent-glow)' : 'transparent'; }}
+              onMouseEnter={e => { if (gmailLayout) setHoveredChildId(msg.id); if (selectedMessageId !== msg.id) e.currentTarget.style.background = 'var(--bg-tertiary)'; }}
+              onMouseLeave={e => { if (gmailLayout) setHoveredChildId(null); e.currentTarget.style.background = selectedMessageId === msg.id || lastViewedMessageId === msg.id ? 'var(--accent-glow)' : 'transparent'; }}
             >
               {!msg.is_read && (
                 <div style={{
@@ -5272,6 +5595,11 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
                   {msg.snippet || ''}
                 </div>)}
               </div>
+              {gmailLayout && hoverQuickActions && (focusedChildId === msg.id || hoveredChildId === msg.id) && (
+                <RowHoverActions message={msg} isRead={msg.is_read} background="var(--bg-secondary)"
+                  onMarkRead={onMarkRead} onStar={onStar} onDelete={onDelete} onMove={onMove}
+                  onArchive={onArchive} onSnooze={onSnooze} actions={hoverActionSet} rowActionCtx={{ message: msg }} />
+              )}
             </div>
           ))}
         </div>
@@ -5280,11 +5608,12 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
   );
 }
 
-function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onModifierSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress, onExplainSpam }) {
+function MessageRow({ keyboardProps = {}, message, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onModifierSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress, onExplainSpam }) {
   const { t } = useTranslation();
   const gmailLayout = useStore(s => s.layout === 'gmail');
   const checkboxRow = gmailLayout && !isMobile;
   const [hovered, setHovered] = useState(false);
+  const [focusWithin, setFocusWithin] = useState(false);
   const [avatarHovered, setAvatarHovered] = useState(false);
   const { contentRef, swipeBgLeftRef, swipeBgRightRef, tappedRef } = useSwipeRow({
     isMobile, message, onSwipeLeft, onSwipeRight, onLongPress,
@@ -5362,6 +5691,9 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
       <div
         ref={isMobile ? contentRef : undefined}
         className={`mailflow-message-row${isMobile ? ' no-callout' : ''}`}
+        {...keyboardProps}
+        onFocusCapture={gmailLayout ? () => setFocusWithin(true) : undefined}
+        onBlurCapture={gmailLayout ? event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusWithin(false); } : undefined}
         data-unread={!message.is_read}
         data-selected={selected}
         data-checked={isChecked}
@@ -5542,7 +5874,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
       </div>
 
       {/* Hover actions — absolutely positioned so they never affect row height */}
-      {hovered && hoverQuickActions && (
+      {(hovered || (gmailLayout && focusWithin)) && hoverQuickActions && (
         <RowHoverActions
           message={message}
           isRead={message.is_read}
