@@ -572,8 +572,8 @@ test('Gmail toolbar Trash deletion requires a separate explicit confirmation and
   await React.act(async () => useStore.setState({ folders: { [ACCOUNT.id]: [{ path: 'Trash', special_use: '\\Trash' }] } }));
   CALLS = [];
   await toolbarClick('Delete permanently');
-  assert.match(document.querySelector('.gmail-toolbar-menu').textContent, /cannot be recovered/);
-  await menuClick('Cancel');
+  assert.match(document.querySelector('[role="alertdialog"]').textContent, /cannot be recovered/);
+  await React.act(async () => [...document.querySelectorAll('[role="alertdialog"] button')].find(button => button.textContent === 'Cancel').click());
   assert.equal(useStore.getState().messages[0].id, MESSAGE.id);
   assert.equal(CALLS.filter(call => call.method !== 'GET').length, 0);
 });

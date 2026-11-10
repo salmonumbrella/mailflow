@@ -123,9 +123,21 @@ for (const trigger of ['focus', 'timer']) test(`native two-page reader and check
   const oldFeed = api.getNativeLabelMessages;
   const oldQuery = api.queryNativeLabelMemberships;
   const oldInterval = window.setInterval;
-  let tick;
-  window.setInterval = (callback, delay, ...args) => { if (delay === 30000) tick = callback; return oldInterval(callback, delay, ...args); };
+  const oldClearInterval = window.clearInterval;
+  const intervals = new Map();
+  let nextTimer = -1;
+  let feedCalls = 0;
+  // The feed and label-definition hook both poll every 30s. Simulate a clock tick,
+  // not whichever callback happened to register last after the toolbar mounted.
+  window.setInterval = (callback, delay, ...args) => {
+    if (delay !== 30000) return oldInterval(callback, delay, ...args);
+    const id = nextTimer--;
+    intervals.set(id, () => callback(...args));
+    return id;
+  };
+  window.clearInterval = id => { if (!intervals.delete(id)) oldClearInterval(id); };
   api.getNativeLabelMessages = async (id, params) => {
+    feedCalls++;
     const start = Number(params.cursor || 0), end = start + params.limit;
     return { ...view, messages: rows.slice(start, end), nextCursor: end < rows.length ? String(end) : null, total: rows.length };
   };
@@ -140,7 +152,18 @@ for (const trigger of ['focus', 'timer']) test(`native two-page reader and check
     assert.ok(checkbox());
     await React.act(async () => { checkbox().click(); useStore.getState().setSelectedMessage('cache-d'); });
     assert.equal(checkbox().checked, true);
-    const refresh = async () => React.act(async () => { if (trigger === 'timer') tick(); else window.dispatchEvent(new window.Event('focus')); });
+    const refresh = async () => {
+      const before = feedCalls;
+      await React.act(async () => {
+        if (trigger === 'timer') {
+          assert.ok(intervals.size > 0, 'live polling intervals are registered');
+          for (const [id, tick] of [...intervals]) if (intervals.has(id)) tick();
+        } else window.dispatchEvent(new window.Event('focus'));
+      });
+      assert.ok(feedCalls > before, 'each refresh actually requests the message feed');
+      assert.equal(useStore.getState().nativeLabelFeed.status, 'ready');
+      assert.equal(useStore.getState().loadingMessages, false);
+    };
     await refresh();
     assert.deepEqual(useStore.getState().messages.map(row => row.entityId), ['a','b','c','d']);
     assert.equal(useStore.getState().selectedMessageId, 'cache-d');
@@ -149,5 +172,14 @@ for (const trigger of ['focus', 'timer']) test(`native two-page reader and check
     assert.deepEqual(useStore.getState().messages.map(row => row.entityId), ['a','b','c','e']);
     assert.equal(useStore.getState().selectedMessageId, null);
     assert.equal(container.querySelectorAll('.mailflow-gmail-row-controls input:checked').length, 0);
-  } finally { api.getNativeLabelMessages = oldFeed; api.queryNativeLabelMemberships = oldQuery; window.setInterval = oldInterval; }
+  } finally {
+    // Unmount while the test clock still owns its fake interval handles.
+    if (root) await React.act(async () => root.unmount());
+    root = null;
+    api.getNativeLabelMessages = oldFeed;
+    api.queryNativeLabelMemberships = oldQuery;
+    window.setInterval = oldInterval;
+    window.clearInterval = oldClearInterval;
+    assert.equal(intervals.size, 0, 'unmounted polling intervals are cleared');
+  }
 });

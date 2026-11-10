@@ -542,6 +542,7 @@ export const api = {
   pushUnsubscribe:  (body)       => request('POST',    '/auth/push/unsubscribe',   body),
 
   // Inbox Rules
+  previewSearchRule: (data) => request('POST', '/rules/search-preview', data),
   getRules:    ()         => request('GET',    '/rules'),
   createRule:  (data)     => request('POST',   '/rules', data),
   updateRule:  (id, data) => request('PUT',    `/rules/${id}`, data),

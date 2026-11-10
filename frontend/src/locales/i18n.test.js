@@ -116,6 +116,9 @@ const dir = dirname(fileURLToPath(import.meta.url));
 // Any unlisted pair will still fail.
 const SAME_VALUE_ALLOWED = {
   // Native-label vocabulary shared naturally by these language pairs.
+  'nativeLabelRules.convertedFalse': [['en', 'es', 'it']], // No is the negative answer in English, Spanish and Italian.
+  'nativeLabelRules.review': [['es', 'ptBR']], // Revisar filtro in Spanish and Brazilian Portuguese.
+  'nativeLabelRules.reviewing': [['es', 'ptBR']], // Revisando… in Spanish and Brazilian Portuguese.
   'gmail.labelNavigation.expand': [['es', 'ptBR']], // Expandir {{name}} in Spanish and Brazilian Portuguese.
   'gmail.labelNavigation.label': [['de', 'en']], // Label is also the German mail-interface term.
   'gmail.labelNavigation.labels': [['de', 'en']], // Labels is its plural in both languages.
@@ -944,7 +947,7 @@ describe('i18n locale files', () => {
   });
 
   it('every native-label source key has a translation with matching interpolation in every locale', () => {
-    const sourceKeys = loadLiteralSourceTranslationKeys(['gmail.nativeLabels.', 'gmail.memberships.', 'gmail.labelNavigation.', 'nativeLabelRules.', 'gmailSearch.supportedSearchOperatorsWithSize', 'gmailSearch.existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules']);
+    const sourceKeys = loadLiteralSourceTranslationKeys(['messageList.preparedAction.', 'gmail.nativeLabels.', 'gmail.memberships.', 'gmail.labelNavigation.', 'nativeLabelRules.', 'gmailSearch.supportedSearchOperatorsWithSize', 'gmailSearch.existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules']);
     assert.ok(sourceKeys.includes('nativeLabelRules.coverageCount'), 'native search coverage strings must be translated');
     assert.ok(sourceKeys.length > 100, 'native-label coverage must include definition, membership, navigation and recovery strings');
     const placeholders = text => [...new Set([...text.matchAll(/{{\s*([\w]+)\s*}}/g)].map(match => match[1]))].sort();

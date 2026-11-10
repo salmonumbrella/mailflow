@@ -50,7 +50,7 @@ function SnoozeCalendar({ value, onChange }) {
 // Only native MailFlow capabilities are actionable. The reference's Google-only simulations
 // stay explanatory rather than inventing persisted state or silently doing something else.
 export default function GmailToolbar({ messages, selectedIds, onSelect, onAction, onRefresh, busy = false, syncing = false,
-  folders = [], loadFolders, canMove = false, count, page = 1, pageSize, paginated = false, totalKnown = true, onPage, contextKey, snoozed = false, permanentDelete = false, order = { sort: 'date', dir: 'desc' }, sortControl }) {
+  folders = [], loadFolders, canMove = false, count, page = 1, pageSize, paginated = false, totalKnown = true, onPage, contextKey, snoozed = false, permanentDelete = false, confirmDeleteInParent = false, order = { sort: 'date', dir: 'desc' }, sortControl }) {
   const { t } = useTranslation();
   const scale = useUiScale();
   const selected = messages.filter(message => selectedIds.has(message.id));
@@ -125,7 +125,7 @@ export default function GmailToolbar({ messages, selectedIds, onSelect, onAction
     <div className="gmail-toolbar-actions">
       <GmailSelectionMenu messages={messages} selectedIds={selectedIds} onSelect={rows => { if (!busy) onSelect(rows); }} />
       {selected.length > 0 ? <>
-        {trigger('archive', t("gmailToolbar.archive", "Archive"), null, 'archive')}{trigger('spam', t("gmailToolbar.reportSpam", "Report spam"), null, 'spam')}{trigger('delete', permanentDelete ? t("gmailToolbar.deletePermanently", "Delete permanently") : t("gmailToolbar.delete", "Delete"), permanentDelete ? 'delete' : null, 'delete')}
+        {trigger('archive', t("gmailToolbar.archive", "Archive"), null, 'archive')}{trigger('spam', t("gmailToolbar.reportSpam", "Report spam"), null, 'spam')}{trigger('delete', permanentDelete ? t("gmailToolbar.deletePermanently", "Delete permanently") : t("gmailToolbar.delete", "Delete"), permanentDelete && !confirmDeleteInParent ? 'delete' : null, 'delete')}
         <span className="gmail-toolbar-divider" />
         {trigger(selected.some(m => !m.is_read) ? 'read' : 'unread', selected.some(m => !m.is_read) ? t("gmailToolbar.markAsRead", "Mark as read") : t("gmailToolbar.markAsUnread", "Mark as unread"), null, selected.some(m => !m.is_read) ? 'read' : 'unread')}
         {trigger('snooze', t("gmailToolbar.snooze", "Snooze"), 'snooze')}{trigger('task', t("gmailToolbar.addToTasks", "Add to Tasks"), 'tasks')}

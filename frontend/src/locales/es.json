@@ -597,7 +597,14 @@
     "categoryCountTitle": "Mensajes: {{total}} · Sin leer: {{unread}}",
     "emptyCategory": "No hay nada en {{category}}",
     "emptyCategoryOthers": "Las otras categorías todavía tienen correo.",
-    "emptyCategoryNone": "La bandeja de entrada está vacía."
+    "emptyCategoryNone": "La bandeja de entrada está vacía.",
+    "preparedAction": {
+      "changedScope": "La selección de mensajes ha cambiado. Vuelve a seleccionar los mensajes e inténtalo de nuevo.",
+      "unresolvedScope": "No se pudieron cargar todos los mensajes de la conversación. Inténtalo de nuevo.",
+      "changedQueued": "El buzón cambió antes de enviar la acción. No se modificó ningún mensaje. Actualiza la vista e inténtalo de nuevo.",
+      "deleteCount": "Mensajes seleccionados: {{count}}.",
+      "permanentDeleteWarning": "Los mensajes que ya están en la Papelera o en Borradores se eliminarán permanentemente cuando termine el plazo para deshacer la acción. No se podrán recuperar una vez enviada la eliminación al servidor."
+    }
   },
   "lockScreen": {
     "subtitle": "Introduce tu PIN para desbloquear",
@@ -2444,7 +2451,7 @@
       "show": "Mostrar",
       "title": "Etiquetas de MailFlow",
       "scope": "Estas etiquetas se guardan en MailFlow para esta cuenta. Son independientes de las carpetas IMAP y no se sincronizan con Google ni con otras aplicaciones de correo.",
-      "cacheScope": "Aplica etiquetas a mensajes individuales verificados. Las listas y los recuentos de etiquetas solo incluyen correo sincronizado, excluyendo Spam y Papelera. Aún no se admiten búsquedas, reglas de filtrado ni asignaciones al redactar.",
+      "cacheScope": "Asigna etiquetas a mensajes individuales verificados y úsalas en búsquedas y reglas de MailFlow. Las listas y los recuentos de etiquetas solo abarcan el correo sincronizado, excluidos Spam y Papelera. No se admite asignar etiquetas al redactar ni conservarlas entre borradores y mensajes enviados.",
       "pending": "Hay una solicitud de etiquetas pendiente de verificación. Los demás cambios de etiquetas están en pausa.",
       "retryMutation": "Reintentar la solicitud de etiquetas pendiente",
       "create": "Crear etiqueta de MailFlow",
@@ -2598,10 +2605,28 @@
     "unverified": "Las identidades para las etiquetas no están verificadas. Vuelve a cargar las etiquetas antes de guardar.",
     "conflicting": "Una regla no puede aplicar y quitar la misma etiqueta.",
     "coverageCount": "Identidades no verificadas: {{unavailable}} de {{total}} mensajes en caché.",
-    "emptyPartial": "No hay coincidencias en los datos indexados disponibles. Los mensajes con identidades no verificadas para las etiquetas podrían coincidir."
+    "emptyPartial": "No hay coincidencias en los datos indexados disponibles. Los mensajes con identidades no verificadas para las etiquetas podrían coincidir.",
+    "condition": "Asignación de etiquetas de MailFlow",
+    "membership": "Condición de asignación",
+    "has": "Tiene la etiqueta",
+    "notHas": "No tiene la etiqueta",
+    "exactCondition": "Esta condición conserva exactamente el significado de la búsqueda guardada. Para cambiarla, elimínala y añade una nueva condición manual, o crea un nuevo filtro desde la búsqueda.",
+    "previewMismatch": "La vista previa no corresponde a esta cuenta o búsqueda. Revísala de nuevo antes de guardar.",
+    "reviewRequired": "Revisa el filtro actual antes de guardar. Han cambiado la búsqueda, las acciones, la cuenta o las etiquetas.",
+    "review": "Revisar filtro",
+    "reviewing": "Revisando…",
+    "preview": "Vista previa exacta del filtro",
+    "exactHelp": "Los filtros admiten condiciones sin anidar unidas con AND para etiquetas, remitente, asunto, adjuntos y estado de lectura. Los grupos, OR y los términos no admitidos se rechazan por completo. La ejecución sobre mensajes existentes solo abarca los mensajes actuales en caché de Recibidos que no se hayan eliminado, y solo ejecuta este filtro. Las etiquetas propias son locales de MailFlow y no se sincronizan con las del proveedor.",
+    "narrowsAccount": "Elegir una cuenta limita esta búsqueda unificada. El filtro solo se aplicará a los mensajes de Recibidos de la cuenta elegida.",
+    "unknownHelp": "La identidad no verificada de un mensaje es desconocida, no un conjunto vacío de etiquetas. No puede cumplir una condición negativa de etiqueta.",
+    "convertedIs": "Es",
+    "convertedIsNot": "No es",
+    "convertedTrue": "Sí",
+    "convertedFalse": "No",
+    "runCounts": "Procesados: {{processed}} · Coincidencias: {{matched}} · Fallidos: {{failed}} · Desconocidos: {{unknown}} · Pendientes: {{pending}}",
+    "runRevisionMissing": "El filtro se ha guardado, pero no se ha podido verificar su revisión. Revisa el filtro guardado en las reglas de MailFlow antes de aplicarlo a los mensajes existentes en Recibidos."
   },
   "gmailSearch": {
-    "supportedSearchOperatorsWithSize": "MailFlow admite from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: e in:. También admite OR, AND, paréntesis, grupos entre llaves, filename:, category: y newer_than:/older_than: (d, m, y). Las categorías usan los nombres de MailFlow. size: y larger: significan estrictamente mayor que; smaller: significa estrictamente menor que. label: busca en las etiquetas propias de MailFlow. La importancia no se indexa. Los nombres de los archivos adjuntos y el texto de los mensajes dependen del contenido sincronizado.",
-    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Las ejecuciones sobre mensajes existentes solo abarcan la bandeja de entrada y no ejecutan tus otros filtros. Las acciones sobre etiquetas propias de MailFlow son específicas de cada cuenta y no sincronizan las etiquetas del proveedor. El motor de reglas de MailFlow no admite condiciones de etiqueta, importancia ni la opción de no enviar nunca a spam. El reenvío se puede configurar en las reglas de MailFlow."
+    "supportedSearchOperatorsWithSize": "MailFlow admite from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: e in:. También admite OR, AND, paréntesis, grupos entre llaves, filename:, category: y newer_than:/older_than: (d, m, y). Las categorías usan los nombres de MailFlow. size: y larger: significan estrictamente mayor que; smaller: significa estrictamente menor que. label: busca en las etiquetas propias de MailFlow. La importancia no se indexa. Los nombres de los archivos adjuntos y el texto de los mensajes dependen del contenido sincronizado."
   }
 }

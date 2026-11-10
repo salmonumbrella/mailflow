@@ -1,3 +1,4 @@
+import { validateSearchRuleCondition } from './searchRuleSemantics.js';
 // Rules retain UUID references after deletion. No provider or membership writes here.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const NATIVE_LABEL_ACTIONS = new Set(['apply_native_label', 'remove_native_label']);
@@ -33,8 +34,12 @@ export function validateNativeLabelRuleShape(rule) {
       !['AND', 'OR', undefined].includes(rule.condition_logic)) bad();
   const textOperators = new Set(['contains', 'not_contains', 'equals', 'starts_with', 'ends_with', 'regex']);
   for (const c of rule.conditions) {
-    if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some(key => !['field', 'operator', 'value', 'headerName'].includes(key))) bad();
-    if (['from', 'to', 'subject', 'body', 'header'].includes(c.field)) {
+    if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some(key => !['field', 'operator', 'value', 'headerName', 'semantics'].includes(key))) bad();
+    if (c.semantics !== undefined) {
+      if (!validateSearchRuleCondition(c)) bad();
+    } else if (c.field === 'native_label') {
+      if (!['has', 'not_has'].includes(c.operator) || typeof c.value !== 'string' || !UUID.test(c.value) || c.value !== c.value.toLowerCase()) bad();
+    } else if (['from', 'to', 'subject', 'body', 'header'].includes(c.field)) {
       if (!textOperators.has(c.operator) || typeof c.value !== 'string' || !c.value.trim()) bad();
       if (c.field === 'header' && (typeof c.headerName !== 'string' || !c.headerName.trim())) bad();
     } else if (c.field === 'has_attachment') {
@@ -60,13 +65,13 @@ export function validateNativeLabelRuleShape(rule) {
 export async function validateNativeLabelRuleReferences(client, { userId, rule, account, allowMissing = false }) {
   const refs = extractNativeLabelReferences(rule);
   nativeLabelDelta(rule.actions);
-  if (!refs.length) return [];
+  if (!refs.length && !rule.conditions?.some(c => c?.semantics === 'search_v1')) return [];
   validateNativeLabelRuleShape(rule);
   if (!rule.account_id || !account || account.id !== rule.account_id || account.user_id !== userId) {
     throw ruleReferenceError('native_label_account_required', 'Native label rules require one owned account', 400);
   }
+  if (account.enabled === false) throw ruleReferenceError('account_disabled', 'Choose an enabled account');
   if (rule.storage_generation !== account.storage_generation) throw ruleReferenceError('storage_generation_conflict', 'This rule belongs to a previous mailbox. Create a new rule for this mailbox.');
-  if ((rule.conditions || []).some(c => c?.field === 'native_label')) throw ruleReferenceError('unsupported_label_condition', 'Native label conditions are not supported yet', 400);
   const { rows } = await client.query('SELECT id,full_path FROM mail_labels WHERE account_id=$1 AND id=ANY($2::uuid[])', [account.id, refs]);
   const result = refs.map(id => ({ id, path: rows.find(row => row.id === id)?.full_path ?? null, missing: !rows.some(row => row.id === id) }));
   if (!allowMissing && result.some(ref => ref.missing)) throw ruleReferenceError('missing_label_reference', 'A referenced native label is unavailable. Repair the rule before enabling or running it.');
@@ -77,14 +82,15 @@ export async function validateNativeLabelRuleReferences(client, { userId, rule, 
 export async function verifyNativeLabelRule(client, { userId, input }) {
   const { rows: [rule] } = await client.query('SELECT *,updated_at::text AS rule_revision FROM inbox_rules WHERE id=$1 AND user_id=$2 FOR UPDATE', [input.ruleId, userId]);
   if (!rule?.enabled || rule.account_id !== input.accountId || rule.storage_generation !== input.storageGeneration || rule.rule_revision !== input.ruleRevision) {
-    throw ruleReferenceError('rule_changed', 'The rule changed or was disabled. No label action was applied.');
+    throw ruleReferenceError('rule_changed', 'The rule changed or was disabled. This action was not authorized.');
   }
-  const account = { id: input.accountId, user_id: userId, storage_generation: input.storageGeneration };
+  const account = (await client.query('SELECT id,user_id,enabled,storage_generation FROM email_accounts WHERE id=$1 AND user_id=$2', [input.accountId, userId])).rows[0];
   await validateNativeLabelRuleReferences(client, { userId, rule, account });
   const delta = nativeLabelDelta(rule.actions);
   if (JSON.stringify(delta.addLabelIds) !== JSON.stringify(input.addLabelIds) || JSON.stringify(delta.removeLabelIds) !== JSON.stringify(input.removeLabelIds)) {
     throw ruleReferenceError('rule_changed', 'The label action no longer matches this rule.');
   }
+  return rule;
 }
 export async function findLabelRuleReferences(client, accountId, labelIds) {
   const { rows } = await client.query('SELECT id,name,enabled,conditions,actions FROM inbox_rules WHERE account_id=$1 ORDER BY priority,id', [accountId]);

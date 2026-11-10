@@ -597,7 +597,14 @@
     "categoryCountTitle": "Messages: {{total}} · Unread: {{unread}}",
     "emptyCategory": "Nothing in {{category}}",
     "emptyCategoryOthers": "Other categories still have mail.",
-    "emptyCategoryNone": "The Inbox is empty."
+    "emptyCategoryNone": "The Inbox is empty.",
+    "preparedAction": {
+      "changedScope": "The message selection changed. Please select the messages again and retry.",
+      "unresolvedScope": "The conversation could not be fully resolved. Please try again.",
+      "changedQueued": "The mailbox changed before the action was sent. No messages were changed. Refresh and retry.",
+      "deleteCount": "Selected messages: {{count}}.",
+      "permanentDeleteWarning": "Messages already in Trash or Drafts will be permanently deleted after the Undo period. They cannot be recovered after deletion is sent to the server."
+    }
   },
   "lockScreen": {
     "subtitle": "Enter your PIN to unlock",
@@ -2444,7 +2451,7 @@
       "show": "Show",
       "title": "MailFlow labels",
       "scope": "These labels are saved in MailFlow for this account. They are separate from IMAP folders and do not sync to Google or other mail apps.",
-      "cacheScope": "Apply labels to verified individual messages. Label lists and counts cover synchronized mail only, excluding Spam and Trash. Search, filter rules and compose-time assignments are not supported yet.",
+      "cacheScope": "Apply labels to verified individual messages and use them in search and MailFlow rules. Label lists and counts cover synchronized mail only, excluding Spam and Trash. Compose-time assignments and preserving labels between drafts and sent messages are not supported.",
       "pending": "A label request is pending verification. Other label changes are paused.",
       "retryMutation": "Retry pending label request",
       "create": "Create MailFlow label",
@@ -2598,10 +2605,28 @@
     "unverified": "Label identities are not verified. Reload labels before saving.",
     "conflicting": "A rule cannot apply and remove the same label.",
     "coverageCount": "Unverified identities: {{unavailable}} of {{total}} cached messages.",
-    "emptyPartial": "No matches in the available indexed data. Messages with unverified label identities may still match."
+    "emptyPartial": "No matches in the available indexed data. Messages with unverified label identities may still match.",
+    "condition": "MailFlow label membership",
+    "membership": "Membership condition",
+    "has": "Has label",
+    "notHas": "Does not have label",
+    "exactCondition": "This condition uses exact saved-search semantics. To change it, remove it and add a new manual condition, or create a new filter from search.",
+    "previewMismatch": "The preview did not match this account or search. Review it again before saving.",
+    "reviewRequired": "Review the current filter before saving. Search, actions, account, or labels changed.",
+    "review": "Review filter",
+    "reviewing": "Reviewing…",
+    "preview": "Exact filter preview",
+    "exactHelp": "Filters support flat AND conditions for labels, From, Subject, attachment and read state. Groups, OR and unsupported terms are rejected in full. Existing-message runs cover only current cached, nondeleted Inbox messages and only this filter. Native labels are local to MailFlow and do not sync provider labels.",
+    "narrowsAccount": "Choosing one account narrows this unified search. The filter will apply only to Inbox messages in the chosen account.",
+    "unknownHelp": "Unverified message identity is unknown, not an empty label set. It cannot satisfy a negative label condition.",
+    "convertedIs": "Is",
+    "convertedIsNot": "Is not",
+    "convertedTrue": "Yes",
+    "convertedFalse": "No",
+    "runCounts": "Processed: {{processed}} · Matched: {{matched}} · Failed: {{failed}} · Unknown: {{unknown}} · Pending: {{pending}}",
+    "runRevisionMissing": "Filter saved, but its revision could not be verified. Review the saved filter in MailFlow Rules before applying it to existing Inbox messages."
   },
   "gmailSearch": {
-    "supportedSearchOperatorsWithSize": "MailFlow supports from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after:, and in:. OR, AND, parentheses, curly-brace groups, filename:, category: and newer_than:/older_than: (d, m, y) are supported. Categories use MailFlow’s names. size: and larger: mean strictly greater than; smaller: means strictly less than. label: searches native MailFlow labels. Importance is not indexed. Attachment filenames and body text depend on synced content.",
-    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Existing-message runs cover the Inbox only and do not run your other filters. Native MailFlow label actions are account-specific and do not sync provider labels. Label conditions, importance and never-spam are not supported by MailFlow’s rules engine. Forwarding can be configured in MailFlow Rules."
+    "supportedSearchOperatorsWithSize": "MailFlow supports from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after:, and in:. OR, AND, parentheses, curly-brace groups, filename:, category: and newer_than:/older_than: (d, m, y) are supported. Categories use MailFlow’s names. size: and larger: mean strictly greater than; smaller: means strictly less than. label: searches native MailFlow labels. Importance is not indexed. Attachment filenames and body text depend on synced content."
   }
 }

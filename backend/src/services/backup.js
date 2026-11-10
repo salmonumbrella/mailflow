@@ -31,6 +31,7 @@ export const SETUP_TABLES = [
   'entity_locations',
   'entity_provider_keys',
   'inbox_rule_forwards',
+  'inbox_rule_action_attempts',
   'inbox_rules',
   'integration_config',
   'invites',
@@ -78,7 +79,7 @@ const RESTORABLE_TABLES = new Set([...SETUP_TABLES, ...MAIL_CACHE_TABLES]);
 // file cannot omit one: treating it as an empty optional table would silently erase content.
 const DURABLE_METADATA_TABLES = [
   'message_entities', 'entity_provider_keys', 'entity_locations', 'mailbox_identity_epochs',
-  'native_label_memberships', 'native_label_mutations',
+  'native_label_memberships', 'native_label_mutations', 'inbox_rule_action_attempts',
   'mail_identity_operations', 'mail_labels', 'mail_label_state', 'mail_label_mutations',
   'mail_signatures', 'mail_signature_state', 'mail_signature_defaults', 'snoozed_messages',
 ];

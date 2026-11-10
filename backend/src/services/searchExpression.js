@@ -4,7 +4,7 @@ export class SearchQueryError extends Error {}
 
 const OPERATOR = /^(from|to|cc|bcc|subject|has|is|after|before|newer|older|newer_than|older_than|in|category|filename|label|size|larger|smaller):(.+)$/i;
 
-export function parseSearchExpression(raw) {
+export function lexSearchExpression(raw) {
   const source = String(raw || '');
   if (source.length > 500) throw new SearchQueryError('Search query too long');
   const tokens = [];
@@ -17,6 +17,11 @@ export function parseSearchExpression(raw) {
   }
   if (quoted) throw new SearchQueryError('Close the quotation marks in your search.');
   flush();
+  return { tokens, hasGroups: tokens.some(token => ['(', ')', '{', '}'].includes(token)), hasOr: tokens.includes('OR') };
+}
+
+export function parseSearchExpression(raw) {
+  const { tokens } = lexSearchExpression(raw);
   if (!tokens.length) return null;
   let index = 0, leaves = 0;
   const combine = (type, children) => children.length === 1 ? children[0] : { type, children };

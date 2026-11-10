@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => ({ query: vi.fn(), withTransaction: async callback => callback({query}) }));
+vi.mock('../services/nativeLabelMemberships.js', () => ({ captureRuleMembershipBatchInTransaction: async (_client,_user,rows) => rows.map(source => ({availability:'unknown',source,labelIds:null})) }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: req.headers['x-test-user'] || 'owner' }; next(); } }));
 vi.mock('../services/inboxRules.js', () => ({ applyInboxRules: vi.fn(), isDangerousRegex: () => false, RULE_CATEGORIES: new Set() }));
 import express from 'express';
@@ -117,7 +118,7 @@ describe('apply only one saved filter to existing Inbox messages', () => {
     expect((await run()).status).toBe(202);
     await tick();
     const accountCalls = query.mock.calls.filter(([sql]) => sql.includes('FROM email_accounts WHERE id'));
-    expect(accountCalls.map(([, params]) => params[0])).toEqual([ACCOUNT]);
+    expect([...new Set(accountCalls.map(([, params]) => params[0]))]).toEqual([ACCOUNT]);
   });
   it('rejects malformed condition types instead of silently reporting no matches', async () => {
     rule.conditions[0].value = { untrusted: true };

@@ -1,3 +1,4 @@
+import { captureRuleMembershipSourceInTransaction } from './nativeLabelMemberships.js';
 import { currentSnoozeMessageSql } from './snoozeIdentity.js';
 import { applyConfirmedMoveCache } from './messageMoveCache.js';
 import { withReadSourceIdentity } from './messageReadScope.js';
@@ -5325,7 +5326,8 @@ export class ImapManager {
               sanitizeStr(parsed.forwardedFromName), sanitizeStr(parsed.forwardedFromEmail), sanitizeStr(parsed.forwardedVia),
               identityContext.providerNamespace ? parsed.providerMsgid || null : null,
               parsed.rfc822SizeBytes ?? null,
-            ]));
+            ]), { captureRuleSource: (tx, source, row) => row.is_new && !parsed.isRead && folder.toLowerCase() === 'inbox'
+              ? captureRuleMembershipSourceInTransaction(tx, account.user_id, source) : null });
             // A message a move dropped the row of, filed again here: it gets back what MailFlow
             // knew about it and is not new mail, as a move with a known uid is not
             // (services/movedRowCarry.js).
@@ -5351,12 +5353,7 @@ export class ImapManager {
                 // persisted binding/version, not a later occupant of this folder/UID.
                 const persisted = result.rows[0];
                 newMessages.push({ ...parsed, ...persisted, accountId: account.id, account_id: account.id, folder,
-                  _nativeLabelProof: persisted.entity_id && persisted.metadata_version != null ? {
-                    source: { id: persisted.id, account_id: account.id, entity_id: persisted.entity_id,
-                      canonicalEntityId: persisted.entity_id, storage_generation: persisted.storage_generation,
-                      folder, uid_validity: String(persisted.uid_validity), uid: String(parsed.uid) },
-                    expectedMetadataVersion: persisted.metadata_version,
-                  } : null });
+                  _nativeLabelProof: persisted._nativeLabelProof });
               }
               this.maybeClassifyNewMessage(account, result.rows[0].id, parsed);
             }
@@ -7748,7 +7745,7 @@ export class ImapManager {
     });
   }
 
-  async setFlag(account, uid, folder, flag, value, { expectedSource } = {}) {
+  async setFlag(account, uid, folder, flag, value, { expectedSource, beforeDispatch } = {}) {
     // Serialized per account. Review found a cross-call inversion: call A's persistent
     // STORE could be granted its lock just before the 5s deadline, linger on the wire
     // while the fallback also stored, and land AFTER a newer call B stored the opposite
@@ -7762,7 +7759,7 @@ export class ImapManager {
     const run = prev.catch(() => {}).then(async () => {
       const proof = await captured;
       capturedAccount.storage_generation = proof.context.storageGeneration;
-      return this._setFlagInner(capturedAccount, uid, folder, flag, value, proof);
+      return this._setFlagInner(capturedAccount, uid, folder, flag, value, proof, beforeDispatch);
     });
     this._flagOpChains.set(account.id, run);
     try {
@@ -7772,7 +7769,26 @@ export class ImapManager {
     }
   }
 
-  async _setFlagInner(account, uid, folder, flag, value, proof) {
+  async _setFlagInner(account, uid, folder, flag, value, proof, beforeDispatch) {
+    // Guarded rules take one provider attempt. A lost acknowledgement is pending,
+    // never a retry on a fresh connection or the background flag queue.
+    if (beforeDispatch) {
+      return withFreshClient(account, async client => {
+        const selectedBefore = client.mailbox;
+        const lock = await client.getMailboxLock(folder);
+        try {
+          if (selectedBefore && selectedBefore === client.mailbox) await refreshSelectedMailbox(client);
+          await assertMailboxIdentity(proof.context, client);
+          await assertExpectedSource(proof.context, proof.expectedSource);
+          await beforeDispatch();
+          const result = value
+            ? await client.messageFlagsAdd(String(uid), [flag], { uid: true })
+            : await client.messageFlagsRemove(String(uid), [flag], { uid: true });
+          if (result === false) throw new Error('The server did not confirm the guarded flag change');
+          return;
+        } finally { lock.release(); }
+      });
+    }
     const validate = async client => {
       await assertMailboxIdentity(proof.context, client);
       await assertExpectedSource(proof.context, proof.expectedSource);
@@ -8298,7 +8314,7 @@ export class ImapManager {
   //
   // Exact UIDPLUS mappings can be applied with the durable journal. Acknowledged but
   // unmapped or uncertain provider work stays pending, without heuristic cache relocation.
-  async bulkMoveMessages(account, uids, fromFolder, toFolder, { expectedSources } = {}) {
+  async bulkMoveMessages(account, uids, fromFolder, toFolder, { expectedSources, beforeDispatch } = {}) {
     if (!uids.length) return { uidMap: new Map(), succeeded: [], failed: [] };
     account={...account};uids=[...uids];
     const proof=await captureMessageSources(account,fromFolder,uids,expectedSources);
@@ -8331,6 +8347,16 @@ export class ImapManager {
             await fetchCopies(client, uids.map(String).join(','));
           }
           await validateSources();
+          if (beforeDispatch) {
+            try { await beforeDispatch(); }
+            catch (error) {
+              // No provider command started. Keep a denied/uncertain rule claim
+              // consumed, but do not pretend this MOVE has an unknown wire outcome.
+              await completeIdentityOperations(operations, null, { outcome: 'failed' })
+                .catch(journalError => console.error('Could not close unexecuted rule MOVE:', journalError.message));
+              throw error;
+            }
+          }
           ({ result, identityUnsafe } = await runIdentityCommand(operations, () => {
             providerAttempted = true;
             return moveUids(client, uids.map(String), toFolder, validateSources);

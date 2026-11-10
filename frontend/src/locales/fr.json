@@ -597,7 +597,14 @@
     "categoryCountTitle": "Messages : {{total}} · Non lus : {{unread}}",
     "emptyCategory": "Rien dans {{category}}",
     "emptyCategoryOthers": "Les autres catégories contiennent encore des messages.",
-    "emptyCategoryNone": "La boîte de réception est vide."
+    "emptyCategoryNone": "La boîte de réception est vide.",
+    "preparedAction": {
+      "changedScope": "La sélection de messages a changé. Sélectionnez à nouveau les messages et réessayez.",
+      "unresolvedScope": "Impossible de charger tous les messages de la conversation. Veuillez réessayer.",
+      "changedQueued": "La boîte aux lettres a changé avant l’envoi de l’action. Aucun message n’a été modifié. Actualisez la vue et réessayez.",
+      "deleteCount": "Messages sélectionnés : {{count}}.",
+      "permanentDeleteWarning": "Les messages déjà présents dans la Corbeille ou les Brouillons seront supprimés définitivement à la fin du délai d’annulation. Ils ne pourront plus être récupérés une fois la suppression envoyée au serveur."
+    }
   },
   "lockScreen": {
     "subtitle": "Saisissez votre PIN pour déverrouiller",
@@ -2444,7 +2451,7 @@
       "show": "Afficher",
       "title": "Libellés MailFlow",
       "scope": "Ces libellés sont enregistrés dans MailFlow pour ce compte. Ils sont distincts des dossiers IMAP et ne sont pas synchronisés avec Google ni avec les autres applications de messagerie.",
-      "cacheScope": "Appliquez les libellés à des messages individuels vérifiés. Les listes et les compteurs de libellés couvrent uniquement les messages synchronisés, hors spam et corbeille. La recherche, les règles de filtrage et l’attribution pendant la rédaction ne sont pas encore pris en charge.",
+      "cacheScope": "Appliquez des libellés aux messages individuels vérifiés et utilisez-les dans la recherche et les règles MailFlow. Les listes et les compteurs de libellés couvrent uniquement les messages synchronisés, hors spam et corbeille. L’attribution de libellés pendant la rédaction et leur conservation entre les brouillons et les messages envoyés ne sont pas prises en charge.",
       "pending": "Une demande concernant les libellés est en attente de vérification. Les autres modifications de libellés sont suspendues.",
       "retryMutation": "Réessayer la demande de libellé en attente",
       "create": "Créer un libellé MailFlow",
@@ -2598,10 +2605,28 @@
     "unverified": "Les identités pour les libellés ne sont pas vérifiées. Rechargez les libellés avant d’enregistrer.",
     "conflicting": "Une règle ne peut pas appliquer et retirer le même libellé.",
     "coverageCount": "Identités non vérifiées : {{unavailable}} sur {{total}} messages en cache.",
-    "emptyPartial": "Aucune correspondance dans les données indexées disponibles. Les messages dont les identités pour les libellés ne sont pas vérifiées peuvent néanmoins correspondre."
+    "emptyPartial": "Aucune correspondance dans les données indexées disponibles. Les messages dont les identités pour les libellés ne sont pas vérifiées peuvent néanmoins correspondre.",
+    "condition": "Association à un libellé MailFlow",
+    "membership": "Condition d’association",
+    "has": "Possède le libellé",
+    "notHas": "Ne possède pas le libellé",
+    "exactCondition": "Cette condition conserve exactement le sens de la recherche enregistrée. Pour la modifier, supprimez-la et ajoutez une nouvelle condition manuelle, ou créez un nouveau filtre à partir de la recherche.",
+    "previewMismatch": "L’aperçu ne correspond pas à ce compte ou à cette recherche. Vérifiez-le à nouveau avant d’enregistrer.",
+    "reviewRequired": "Vérifiez le filtre actuel avant d’enregistrer. La recherche, les actions, le compte ou les libellés ont changé.",
+    "review": "Vérifier le filtre",
+    "reviewing": "Vérification…",
+    "preview": "Aperçu exact du filtre",
+    "exactHelp": "Les filtres prennent en charge des conditions non imbriquées reliées par AND pour les libellés, l’expéditeur, l’objet, les pièces jointes et l’état de lecture. Les groupes, OR et les termes non pris en charge sont entièrement rejetés. L’exécution sur les messages existants couvre uniquement les messages actuels en cache, non supprimés, de la boîte de réception et n’exécute que ce filtre. Les libellés propres à MailFlow restent locaux et ne sont pas synchronisés avec ceux du fournisseur.",
+    "narrowsAccount": "Le choix d’un compte restreint cette recherche unifiée. Le filtre s’appliquera uniquement aux messages de la boîte de réception du compte choisi.",
+    "unknownHelp": "L’identité non vérifiée d’un message est inconnue, et ne représente pas un ensemble vide de libellés. Elle ne peut pas satisfaire une condition négative de libellé.",
+    "convertedIs": "Est",
+    "convertedIsNot": "N’est pas",
+    "convertedTrue": "Oui",
+    "convertedFalse": "Non",
+    "runCounts": "Traités : {{processed}} · Correspondances : {{matched}} · Échecs : {{failed}} · Inconnus : {{unknown}} · En attente : {{pending}}",
+    "runRevisionMissing": "Le filtre a été enregistré, mais sa révision n’a pas pu être vérifiée. Vérifiez le filtre enregistré dans les règles MailFlow avant de l’appliquer aux messages existants de la boîte de réception."
   },
   "gmailSearch": {
-    "supportedSearchOperatorsWithSize": "MailFlow prend en charge from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: et in:. OR, AND, les parenthèses, les groupes entre accolades, filename:, category: et newer_than:/older_than: (d, m, y) sont pris en charge. Les catégories utilisent les noms de MailFlow. size: et larger: signifient strictement supérieur à ; smaller: signifie strictement inférieur à. label: recherche les libellés propres à MailFlow. L’importance n’est pas indexée. Les noms des pièces jointes et le texte des messages dépendent du contenu synchronisé.",
-    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Les exécutions sur les messages existants portent uniquement sur la boîte de réception et ne déclenchent pas vos autres filtres. Les actions sur les libellés propres à MailFlow sont spécifiques à chaque compte et ne synchronisent pas les libellés du fournisseur. Le moteur de règles de MailFlow ne prend pas en charge les conditions de libellé, l’importance ni l’option « Ne jamais classer comme spam ». Le transfert peut être configuré dans les règles MailFlow."
+    "supportedSearchOperatorsWithSize": "MailFlow prend en charge from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: et in:. OR, AND, les parenthèses, les groupes entre accolades, filename:, category: et newer_than:/older_than: (d, m, y) sont pris en charge. Les catégories utilisent les noms de MailFlow. size: et larger: signifient strictement supérieur à ; smaller: signifie strictement inférieur à. label: recherche les libellés propres à MailFlow. L’importance n’est pas indexée. Les noms des pièces jointes et le texte des messages dépendent du contenu synchronisé."
   }
 }

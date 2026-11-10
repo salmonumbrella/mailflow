@@ -611,7 +611,14 @@
     "categoryCountTitle": "Wiadomości: {{total}} · Nieprzeczytane: {{unread}}",
     "emptyCategory": "Brak wiadomości w kategorii {{category}}",
     "emptyCategoryOthers": "W innych kategoriach są jeszcze wiadomości.",
-    "emptyCategoryNone": "Skrzynka odbiorcza jest pusta."
+    "emptyCategoryNone": "Skrzynka odbiorcza jest pusta.",
+    "preparedAction": {
+      "changedScope": "Wybór wiadomości uległ zmianie. Zaznacz wiadomości ponownie i spróbuj jeszcze raz.",
+      "unresolvedScope": "Nie udało się wczytać wszystkich wiadomości w rozmowie. Spróbuj ponownie.",
+      "changedQueued": "Skrzynka pocztowa zmieniła się przed wysłaniem operacji. Nie zmieniono żadnych wiadomości. Odśwież widok i spróbuj ponownie.",
+      "deleteCount": "Liczba wybranych wiadomości: {{count}}.",
+      "permanentDeleteWarning": "Wiadomości znajdujące się już w Koszu lub Szkicach zostaną trwale usunięte po upływie czasu na cofnięcie operacji. Po wysłaniu żądania usunięcia do serwera nie będzie można ich odzyskać."
+    }
   },
   "lockScreen": {
     "subtitle": "Wpisz swój PIN aby odblokować",
@@ -2463,7 +2470,7 @@
       "show": "Pokaż",
       "title": "Etykiety MailFlow",
       "scope": "Te etykiety są zapisywane w MailFlow dla tego konta. Są niezależne od folderów IMAP i nie synchronizują się z Google ani innymi aplikacjami pocztowymi.",
-      "cacheScope": "Przypisuj etykiety do pojedynczych, zweryfikowanych wiadomości. Listy etykiet i liczniki obejmują tylko zsynchronizowaną pocztę, z wyjątkiem spamu i kosza. Wyszukiwanie, reguły filtrów i przypisywanie podczas pisania wiadomości nie są jeszcze obsługiwane.",
+      "cacheScope": "Przypisuj etykiety do pojedynczych zweryfikowanych wiadomości i używaj ich w wyszukiwaniu oraz regułach MailFlow. Listy i liczniki etykiet obejmują tylko zsynchronizowaną pocztę, z wyłączeniem spamu i kosza. Przypisywanie podczas pisania i zachowywanie etykiet między wersjami roboczymi a wysłanymi wiadomościami nie są obsługiwane.",
       "pending": "Żądanie dotyczące etykiet oczekuje na weryfikację. Pozostałe zmiany etykiet są wstrzymane.",
       "retryMutation": "Ponów oczekujące żądanie dotyczące etykiet",
       "create": "Utwórz etykietę MailFlow",
@@ -2617,10 +2624,28 @@
     "unverified": "Tożsamości na potrzeby etykiet nie są zweryfikowane. Wczytaj ponownie etykiety przed zapisaniem.",
     "conflicting": "Reguła nie może przypisywać i usuwać tej samej etykiety.",
     "coverageCount": "Niezweryfikowane tożsamości: {{unavailable}} z {{total}} wiadomości w pamięci podręcznej.",
-    "emptyPartial": "Brak dopasowań w dostępnych zindeksowanych danych. Wiadomości z niezweryfikowanymi tożsamościami na potrzeby etykiet mogą jednak pasować."
+    "emptyPartial": "Brak dopasowań w dostępnych zindeksowanych danych. Wiadomości z niezweryfikowanymi tożsamościami na potrzeby etykiet mogą jednak pasować.",
+    "condition": "Przypisanie do etykiety MailFlow",
+    "membership": "Warunek przypisania",
+    "has": "Ma etykietę",
+    "notHas": "Nie ma etykiety",
+    "exactCondition": "Ten warunek zachowuje dokładne znaczenie zapisanego wyszukiwania. Aby go zmienić, usuń go i dodaj nowy warunek ręcznie lub utwórz nowy filtr z wyszukiwania.",
+    "previewMismatch": "Podgląd nie odpowiada temu kontu lub wyszukiwaniu. Sprawdź go ponownie przed zapisaniem.",
+    "reviewRequired": "Sprawdź bieżący filtr przed zapisaniem. Wyszukiwanie, działania, konto lub etykiety uległy zmianie.",
+    "review": "Sprawdź filtr",
+    "reviewing": "Sprawdzanie…",
+    "preview": "Dokładny podgląd filtra",
+    "exactHelp": "Filtry obsługują niezagnieżdżone warunki połączone operatorem AND dla etykiet, nadawcy, tematu, załączników i stanu przeczytania. Grupy, OR i nieobsługiwane wyrażenia są odrzucane w całości. Uruchomienie na istniejących wiadomościach obejmuje tylko bieżące, nieusunięte wiadomości w pamięci podręcznej skrzynki odbiorczej i wykonuje tylko ten filtr. Własne etykiety są lokalne dla MailFlow i nie synchronizują się z etykietami dostawcy.",
+    "narrowsAccount": "Wybór jednego konta zawęża to wyszukiwanie zbiorcze. Filtr będzie stosowany tylko do wiadomości w skrzynce odbiorczej wybranego konta.",
+    "unknownHelp": "Niezweryfikowana tożsamość wiadomości jest nieznana, a nie pustym zbiorem etykiet. Nie może spełnić warunku braku etykiety.",
+    "convertedIs": "Jest",
+    "convertedIsNot": "Nie jest",
+    "convertedTrue": "Tak",
+    "convertedFalse": "Nie",
+    "runCounts": "Przetworzone: {{processed}} · Dopasowane: {{matched}} · Błędy: {{failed}} · Nieznane: {{unknown}} · Oczekujące: {{pending}}",
+    "runRevisionMissing": "Filtr został zapisany, ale nie udało się zweryfikować jego rewizji. Sprawdź zapisany filtr w regułach MailFlow przed zastosowaniem go do istniejących wiadomości w skrzynce odbiorczej."
   },
   "gmailSearch": {
-    "supportedSearchOperatorsWithSize": "MailFlow obsługuje from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: i in:. Obsługiwane są OR, AND, nawiasy, grupy w nawiasach klamrowych, filename:, category: i newer_than:/older_than: (d, m, y). Kategorie używają nazw z MailFlow. size: i larger: oznaczają ściśle większe niż, a smaller: oznacza ściśle mniejsze niż. label: wyszukuje etykiety własne MailFlow. Ważność nie jest indeksowana. Nazwy plików załączników i treść wiadomości zależą od zsynchronizowanej zawartości.",
-    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Uruchomienia dla istniejących wiadomości obejmują tylko skrzynkę odbiorczą i nie uruchamiają innych filtrów. Działania na etykietach własnych MailFlow są przypisane do konkretnego konta i nie synchronizują etykiet dostawcy. Mechanizm reguł MailFlow nie obsługuje warunków etykiet, ważności ani opcji nigdy nie oznaczaj jako spam. Przekazywanie można skonfigurować w regułach MailFlow."
+    "supportedSearchOperatorsWithSize": "MailFlow obsługuje from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: i in:. Obsługiwane są OR, AND, nawiasy, grupy w nawiasach klamrowych, filename:, category: i newer_than:/older_than: (d, m, y). Kategorie używają nazw z MailFlow. size: i larger: oznaczają ściśle większe niż, a smaller: oznacza ściśle mniejsze niż. label: wyszukuje etykiety własne MailFlow. Ważność nie jest indeksowana. Nazwy plików załączników i treść wiadomości zależą od zsynchronizowanej zawartości."
   }
 }

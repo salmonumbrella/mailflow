@@ -291,6 +291,7 @@ export async function forwardRuleMessage({
   account,
   imapManager,
   recipient,
+  beforeDispatch,
 }) {
   const loopTokens = receivedLoopTokens(message);
   if (loopTokens.includes(loopToken(account))) {
@@ -320,6 +321,7 @@ export async function forwardRuleMessage({
 
   const reservationId = reserved.rows[0].id;
   let delivered = false;
+  let claimed = false;
   try {
     const rowResult = await query(
       `SELECT id, account_id, uid, folder, subject, from_name, from_email,
@@ -346,6 +348,7 @@ export async function forwardRuleMessage({
     if (smtp.error) throw new Error(smtp.error);
     if (!smtp.transport) throw new Error('SMTP transport is unavailable');
 
+    if (beforeDispatch) { await beforeDispatch(); claimed = true; }
     try {
       await smtp.transport.sendMail(mailOptions);
     } catch {
@@ -360,7 +363,7 @@ export async function forwardRuleMessage({
     );
     return 'sent';
   } catch (err) {
-    if (!delivered) {
+    if (!delivered && !claimed) {
       await query(
         `DELETE FROM inbox_rule_forwards
          WHERE id = $1 AND status = 'pending'`,

@@ -59,14 +59,18 @@ const GmailSearch = (await import('./GmailSearch.jsx')).default;
 let root, query = '', payloads = [], rejectSave = false;
 const container = () => document.getElementById('root');
 const button = label => [...container().querySelectorAll('button')].find(b => b.textContent.trim() === label || b.getAttribute('aria-label') === label);
-const click = async node => { assert.ok(node); await React.act(async () => node.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))); };
+const click = async node => { assert.ok(node); if (node.type === 'submit' && node.textContent.trim() === 'Create filter' && button('nativeLabelRules.review') && !button('nativeLabelRules.review').disabled) await React.act(async () => button('nativeLabelRules.review').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))); await React.act(async () => node.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))); };
 const input = async (node, value) => { assert.ok(node); await React.act(async () => { Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new dom.window.Event('input', { bubbles: true })); }); };
 async function mount(initial = '') {
   query = initial; payloads = []; rejectSave = false;
-  useStore.setState({ user: { id: 'user-a' }, accounts: [{ id: 'acct-a', email_address: 'a@example.test', enabled: true }], selectedAccountId: 'acct-a', folders: { 'acct-a': [{ path: 'INBOX' }, { path: 'Archive' }] }, notifications: [] });
-  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', labels: [] });
+  useStore.setState({ user: { id: 'user-a' }, accounts: [{ id: 'acct-a', email_address: 'a@example.test', storage_generation: 'gen-a', enabled: true }], selectedAccountId: 'acct-a', folders: { 'acct-a': [{ path: 'INBOX' }, { path: 'Archive' }] }, notifications: [], nativeLabelSnapshots: {}, selectedFolder: 'INBOX' });
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', treeRevision: '1', labels: [] });
   api.getNativeLabelCounts = async accountId => ({ accountId, storageGeneration: 'gen-a', counts: [] });
-  api.createRule = async value => { payloads.push(value); if (rejectSave) throw new Error('Offline, try again'); return { id: 'saved-rule' }; };
+  api.previewSearchRule = async ({ sourceSearch }) => {
+    if (/(?:after|larger|smaller|size):/.test(sourceSearch.query)) throw Object.assign(new Error('Only flat conditions can be saved. No search terms were removed.'), { status: 400 });
+    return { accountId: sourceSearch.accountId, expectedStorageGeneration: sourceSearch.expectedStorageGeneration, sourceSearch, conditionLogic: 'AND', conditions: [{ field: 'from', operator: 'contains', value: 'alice', semantics: 'search_v1' }] };
+  };
+  api.createRule = async value => { payloads.push(value); if (rejectSave) throw new Error('Offline, try again'); return { id: 'saved-rule', rule_revision: 'saved-revision' }; };
   function Harness() { const [value, setValue] = React.useState(initial); return React.createElement(GmailSearch, { query: value, onChange: next => { query = next; setValue(next); } }); }
   await React.act(async () => { root = createRoot(container()); root.render(React.createElement(Harness)); });
 }
@@ -104,7 +108,9 @@ test('creates an actual native rule with selected actions and no invented state'
   await click([...dialog.querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
   await click(button('Create filter'));
   assert.equal(payloads.length, 1);
-  assert.deepEqual(payloads[0].conditions, [{ field: 'from', operator: 'contains', value: 'alice' }]);
+  assert.equal(payloads[0].sourceSearch.query, 'from:alice');
+  assert.equal(payloads[0].conditions, undefined);
+  assert.equal(payloads[0].conditionLogic, undefined);
   assert.deepEqual(payloads[0].actions, [{ type: 'star' }]);
   assert.equal(payloads[0].accountId, 'acct-a');
   assert.equal(container().querySelector('[role="dialog"]'), null);
@@ -114,9 +120,10 @@ test('creates an actual native rule with selected actions and no invented state'
 test('unsupported filter criteria cannot silently become broader rules', async () => {
   await mount('from:alice after:2026-01-01');
   await click(button('Advanced search options')); await click(button('Create filter'));
-  assert.match(container().querySelector('[role="alert"]').textContent, /cannot yet save/);
+  await click(button('nativeLabelRules.review'));
+  assert.match(container().querySelector('[role="alert"]').textContent, /No search terms were removed/);
   assert.equal(payloads.length, 0);
-  assert.ok(container().querySelector('[aria-label="Advanced search"]'));
+  assert.ok(container().querySelector('[aria-label="Create filter"]'));
 });
 
 test('failed saves remain open and do not claim success', async () => {
@@ -178,9 +185,9 @@ test('advanced address suggestions ignore a stale autocomplete response', async 
 test('unified search offers only displayed accounts and requires an explicit per-account filter', async () => {
   await mount('from:alice');
   await React.act(async () => useStore.setState({ selectedAccountId: null, accounts: [
-    { id: 'acct-a', email_address: 'a@example.test', enabled: true },
-    { id: 'acct-b', email_address: 'b@example.test', enabled: true },
-    { id: 'hidden', email_address: 'hidden@example.test', enabled: true, include_in_unified_inbox: false },
+    { id: 'acct-a', email_address: 'a@example.test', storage_generation: 'gen-a', enabled: true },
+    { id: 'acct-b', email_address: 'b@example.test', storage_generation: 'gen-a', enabled: true },
+    { id: 'hidden', email_address: 'hidden@example.test', storage_generation: 'gen-a', enabled: true, include_in_unified_inbox: false },
   ] }));
   await click(button('Advanced search options')); await click(button('Create filter'));
   const selector = container().querySelector('[aria-label="Filter account"]');
@@ -188,7 +195,8 @@ test('unified search offers only displayed accounts and requires an explicit per
   await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
   await click(button('Create filter'));
   assert.equal(payloads.length, 0);
-  assert.match(container().querySelector('[role="alert"]').textContent, /Choose an account/);
+  assert.equal(button('Create filter').disabled, true);
+  assert.equal(button('nativeLabelRules.review').disabled, true);
   await React.act(async () => { selector.value = 'acct-b'; selector.dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
   await click(button('Create filter'));
   assert.equal(payloads[0].accountId, 'acct-b');
@@ -227,8 +235,8 @@ async function senderFilter(message = senderMessage) {
 async function senderSetup() {
   await mount('subject:existing-search');
   await React.act(async () => useStore.setState({ layout: 'gmail', accounts: [
-    { id: 'acct-a', enabled: true },
-    { id: 'acct-b', enabled: true, include_in_unified_inbox: false },
+    { id: 'acct-a', storage_generation: 'gen-a', enabled: true },
+    { id: 'acct-b', storage_generation: 'gen-a', enabled: true, include_in_unified_inbox: false },
     { id: 'disabled', enabled: false },
   ] }));
 }
@@ -250,7 +258,8 @@ test('sender filter opens editable criteria for the clicked account without chan
   await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
   await click(button('Create filter'));
   assert.deepEqual(payloads[0].searchScope, { accountIds: ['acct-b'], scopeAccountId: 'acct-b' });
-  assert.deepEqual(payloads[0].conditions, [{ field: 'from', operator: 'contains', value: 'edited@example.test' }]);
+  assert.equal(payloads[0].sourceSearch.query, 'from:edited@example.test');
+  assert.equal(payloads[0].conditions, undefined);
 });
 
 test('sender filter cannot fall back to unified for absent, disabled, unowned accounts or missing sender', async () => {
@@ -278,10 +287,10 @@ test('sender filter rejects an account disabled or removed after opening and can
   for (const stale of ['disabled', 'removed']) {
     await senderSetup(); await senderFilter(); await click(button('Create filter'));
     await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
-    await React.act(async () => useStore.setState({ accounts: stale === 'removed' ? [{ id: 'acct-a', enabled: true }] : [{ id: 'acct-a', enabled: true }, { id: 'acct-b', enabled: false }] }));
+    await React.act(async () => useStore.setState({ accounts: stale === 'removed' ? [{ id: 'acct-a', storage_generation: 'gen-a', enabled: true }] : [{ id: 'acct-a', storage_generation: 'gen-a', enabled: true }, { id: 'acct-b', enabled: false }] }));
     await click(button('Create filter'));
     assert.equal(payloads.length, 0);
-    assert.match(container().querySelector('[role="alert"]').textContent, /account.*(available|scope)/i);
+    assert.match(container().querySelector('[role="alert"]').textContent, /account.*(available|scope|Changed)/i);
     await React.act(async () => root.unmount()); root = null;
   }
 });
@@ -303,6 +312,7 @@ test('sender filter preserves its exact account for historical runs and does not
   assert.equal(starts.length, 1);
   assert.equal(starts[0].scope.scopeAccountId, 'acct-b');
   assert.deepEqual(starts[0].scope.accountIds, ['acct-b']);
+  assert.equal(starts[0].scope.expectedRuleRevision, 'saved-revision');
 });
 
 test('sender criteria retain the clicked account across Back and reject staleness before creating a filter', async () => {
@@ -312,7 +322,7 @@ test('sender criteria retain the clicked account across Back and reject stalenes
   await click(button('Create filter'));
   assert.equal(container().querySelector('[aria-label="Filter account"]').value, 'acct-b');
   await click(button('‹ Back to search options'));
-  await React.act(async () => useStore.setState({ accounts: [{ id: 'acct-a', enabled: true }] }));
+  await React.act(async () => useStore.setState({ accounts: [{ id: 'acct-a', storage_generation: 'gen-a', enabled: true }] }));
   await click(button('Create filter'));
   assert.ok(container().querySelector('[aria-label="Advanced search"]'));
   assert.match(container().querySelector('[role="alert"]').textContent, /account.*available/i);
@@ -336,7 +346,7 @@ test('a sender action cannot replace an in-flight save, and reopening starts wit
   await click(button('Create filter'));
   assert.equal(await senderFilter({ ...senderMessage, account_id: 'acct-a' }), false);
   assert.equal(container().querySelector('[aria-label="Filter account"]').value, 'acct-b');
-  await React.act(async () => finish({ id: 'saved-rule' }));
+  await React.act(async () => finish({ id: 'saved-rule', rule_revision: 'saved-revision' }));
   await senderFilter(); await click(button('Create filter'));
   assert.equal([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input').checked, false);
   await click(button('Cancel'));
@@ -372,8 +382,10 @@ test('invalid size stays visible and size searches cannot create broader filters
   await mount('from:alice larger:2M');
   await click(button('Advanced search options'));
   await click(button('Create filter'));
-  assert.match(container().querySelector('[role="alert"]').textContent, /cannot yet save/);
+  await click(button('nativeLabelRules.review'));
+  assert.match(container().querySelector('[role="alert"]').textContent, /No search terms were removed/);
   assert.equal(payloads.length, 0);
+  await click(button('‹ Back to search options'));
   await input(container().querySelector('[aria-label="Size value"]'), '1e6');
   await click(button('Search'));
   assert.ok(container().querySelector('[aria-label="Advanced search"]'));
@@ -416,7 +428,7 @@ const nativeLabels = [{ id: 'label-1', name: 'Child', path: 'Parent/Child' }, { 
 async function openNativeFilter() {
   await mount('from:alice');
   await React.act(async () => useStore.setState({ nativeLabelSnapshots: {}, accounts: [{ id: 'acct-a', email_address: 'a@example.test', enabled: true, storage_generation: 'gen-a' }] }));
-  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', labels: nativeLabels });
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', treeRevision: '1', labels: nativeLabels });
   await click(button('Advanced search options')); await click(button('Create filter'));
 }
 
@@ -436,7 +448,7 @@ test('changing the captured filter account clears both native label actions', as
   await React.act(async () => useStore.setState({ selectedAccountId: null, accounts: [
     { id: 'acct-a', enabled: true, storage_generation: 'gen-a' }, { id: 'acct-b', enabled: true, storage_generation: 'gen-a' },
   ], nativeLabelSnapshots: {} }));
-  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', labels: nativeLabels });
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', treeRevision: '1', labels: nativeLabels });
   await click(button('Advanced search options')); await click(button('Create filter'));
   await choose(container().querySelector('[aria-label="Filter account"]'), 'acct-a');
   await choose(container().querySelector('[aria-label="Apply MailFlow label"]'), 'label-1');
@@ -460,10 +472,10 @@ test('account replacement while a native filter is open cannot retarget its capt
 test('renames update display paths without changing identity and deleted references remain visible', async () => {
   await openNativeFilter();
   await choose(container().querySelector('[aria-label="Apply MailFlow label"]'), 'label-1');
-  await React.act(async () => useStore.getState().setNativeLabelSnapshot('acct-a', { accountId: 'acct-a', storageGeneration: 'gen-a', labels: [{ ...nativeLabels[0], path: 'Renamed/Child' }] }));
+  await React.act(async () => useStore.getState().setNativeLabelSnapshot('acct-a', { accountId: 'acct-a', storageGeneration: 'gen-a', treeRevision: '1', labels: [{ ...nativeLabels[0], path: 'Renamed/Child' }] }));
   assert.equal(container().querySelector('[aria-label="Apply MailFlow label"]').value, 'label-1');
   assert.match(container().textContent, /Renamed\/Child/);
-  await React.act(async () => useStore.getState().setNativeLabelSnapshot('acct-a', { accountId: 'acct-a', storageGeneration: 'gen-a', labels: [] }));
+  await React.act(async () => useStore.getState().setNativeLabelSnapshot('acct-a', { accountId: 'acct-a', storageGeneration: 'gen-a', treeRevision: '1', labels: [] }));
   assert.match(container().textContent, /Missing label/);
   await click(button('Create filter'));
   assert.equal(payloads.length, 0);
@@ -474,6 +486,7 @@ test('repeated submit events use one save and an uncertain save cannot create a 
   await choose(container().querySelector('[aria-label="Apply MailFlow label"]'), 'label-1');
   let fail;
   api.createRule = value => { payloads.push(value); return new Promise((_, reject) => { fail = reject; }); };
+  await click(button('nativeLabelRules.review'));
   const form = container().querySelector('form[aria-label="Create filter"]');
   await React.act(async () => { form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
   assert.equal(payloads.length, 1);
@@ -483,23 +496,106 @@ test('repeated submit events use one save and an uncertain save cannot create a 
   assert.equal(payloads.length, 1);
 });
 
-test('advanced native label selection inserts its stable UUID and refuses rule conversion intact', async () => {
+test('advanced native label selection retains its stable UUID for authoritative preview', async () => {
   await mount('from:alice');
-  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', labels: nativeLabels });
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', treeRevision: '1', labels: nativeLabels });
   await click(button('Advanced search options'));
   await choose(container().querySelector('[aria-label="MailFlow label"]'), 'label-2');
   await click(button('Create filter'));
-  assert.match(container().textContent, /cannot yet save.*label:label-2/);
+  let received;
+  api.previewSearchRule = async body => { received = body; throw Object.assign(new Error('Preview blocked'), { status: 409 }); };
+  await click(button('nativeLabelRules.review'));
+  assert.equal(received.sourceSearch.query, 'from:alice label:label-2');
   assert.equal(payloads.length, 0);
-  await click(button('Search'));
-  assert.equal(query, 'from:alice label:label-2');
+  assert.match(container().textContent, /Preview blocked/);
 });
 
 test('unified label search choices exclude accounts outside the displayed unified scope', async () => {
   await mount();
   await React.act(async () => useStore.setState({ selectedAccountId: null, accounts: [
-    { id: 'acct-a', enabled: true }, { id: 'hidden', enabled: true, include_in_unified_inbox: false }, { id: 'disabled', enabled: false },
+    { id: 'acct-a', storage_generation: 'gen-a', enabled: true }, { id: 'hidden', storage_generation: 'gen-a', enabled: true, include_in_unified_inbox: false }, { id: 'disabled', enabled: false },
   ] }));
   await click(button('Advanced search options'));
   assert.deepEqual([...container().querySelector('[aria-label="Label account"]').options].map(option => option.value), ['', 'acct-a']);
+});
+
+const rawSubmit = async () => React.act(async () => container().querySelector('form[aria-label="Create filter"]').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })));
+const canonicalPreview = sourceSearch => ({ sourceSearch, accountId: sourceSearch.accountId, expectedStorageGeneration: sourceSearch.expectedStorageGeneration, conditionLogic: 'AND', conditions: [{ field: 'native_label', operator: 'not_has', value: 'label-1' }], resolvedReferences: [{ labelId: 'label-1', path: 'Parent/Child' }] });
+
+test('negative native search shows canonical account path and saves only the complete raw search', async () => {
+  await mount('-label:"Parent/Child" subject:"100%_é"');
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', treeRevision: '7', labels: nativeLabels });
+  const previews = [];
+  api.previewSearchRule = async body => { previews.push(body); return canonicalPreview(body.sourceSearch); };
+  await click(button('Advanced search options')); await click(button('Create filter'));
+  await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
+  assert.equal(button('Create filter').disabled, true);
+  await rawSubmit(); assert.equal(payloads.length, 0);
+  await click(button('nativeLabelRules.review'));
+  assert.match(container().textContent, /nativeLabelRules.notHas a@example.test · Parent\/Child/);
+  assert.match(container().textContent, /nativeLabelRules.unknownHelp/);
+  await rawSubmit();
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].conditions, undefined);
+  assert.equal(payloads[0].sourceSearch.query, previews[0].sourceSearch.query);
+  assert.equal(payloads[0].sourceSearch.expectedTreeRevision, '7');
+});
+
+test('action, tree, scope and account changes invalidate a reviewed preview before any save', async () => {
+  await openNativeFilter();
+  await choose(container().querySelector('[aria-label="Apply MailFlow label"]'), 'label-1');
+  await click(button('nativeLabelRules.review'));
+  assert.equal(button('Create filter').disabled, false);
+  await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
+  assert.equal(button('Create filter').disabled, true);
+  await rawSubmit(); assert.equal(payloads.length, 0);
+  await click(button('nativeLabelRules.review'));
+  await React.act(async () => useStore.getState().setNativeLabelSnapshot('acct-a', { accountId: 'acct-a', storageGeneration: 'gen-a', treeRevision: '2', labels: nativeLabels }));
+  assert.equal(button('Create filter').disabled, true);
+  await click(button('nativeLabelRules.review'));
+  await React.act(async () => useStore.setState({ selectedFolder: 'Archive' }));
+  assert.equal(button('Create filter').disabled, true);
+  await rawSubmit(); assert.equal(payloads.length, 0);
+});
+
+test('late preview responses cannot authorize changed actions or a different account', async () => {
+  await openNativeFilter();
+  let resolvePreview;
+  api.previewSearchRule = ({ sourceSearch }) => new Promise(resolve => { resolvePreview = () => resolve(canonicalPreview(sourceSearch)); });
+  await click(button('nativeLabelRules.review'));
+  await click([...container().querySelectorAll('label')].find(l => l.textContent === 'Star it').querySelector('input'));
+  await React.act(async () => resolvePreview());
+  assert.equal(button('Create filter').disabled, true);
+  assert.equal(container().querySelector('[aria-label="nativeLabelRules.preview"]'), null);
+  await rawSubmit(); assert.equal(payloads.length, 0);
+});
+
+test('preview response scope mismatches and server save conflicts fail closed', async () => {
+  await openNativeFilter();
+  await choose(container().querySelector('[aria-label="Apply MailFlow label"]'), 'label-1');
+  api.previewSearchRule = async ({ sourceSearch }) => ({ ...canonicalPreview(sourceSearch), accountId: 'other-account' });
+  await click(button('nativeLabelRules.review'));
+  assert.match(container().textContent, /nativeLabelRules.previewMismatch/);
+  assert.equal(button('Create filter').disabled, true);
+  api.previewSearchRule = async ({ sourceSearch }) => canonicalPreview(sourceSearch);
+  await click(button('nativeLabelRules.review'));
+  api.createRule = async value => { payloads.push(value); throw Object.assign(new Error('Label tree changed. Preview again.'), { status: 409 }); };
+  await rawSubmit();
+  assert.match(container().textContent, /Label tree changed/);
+  assert.equal(button('Create filter').disabled, true);
+  await rawSubmit(); assert.equal(payloads.length, 1);
+});
+
+test('unsupported groups, OR and negated unsupported leaves reach the server intact', async () => {
+  for (const original of ['(label:label-1)', 'label:label-1 OR from:bob', '-label:label-1 -filename:secret.pdf']) {
+    await mount(original);
+    let seen;
+    api.previewSearchRule = async ({ sourceSearch }) => { seen = sourceSearch.query; throw Object.assign(new Error('Unsupported expression. No terms removed.'), { status: 400 }); };
+    await click(button('Advanced search options')); await click(button('Create filter'));
+    await click(button('nativeLabelRules.review'));
+    assert.equal(seen, original);
+    assert.equal(button('Create filter').disabled, true);
+    assert.equal(payloads.length, 0);
+    await React.act(async () => root.unmount()); root = null;
+  }
 });

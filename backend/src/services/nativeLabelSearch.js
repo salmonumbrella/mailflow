@@ -24,7 +24,11 @@ function normalizedReference(value) {
   catch { failure('label_not_found', 'Label not found in the selected accounts. Choose a current label or its ID.'); }
 }
 
-// The caller must resolve and execute inside the same REPEATABLE READ snapshot.
+// The caller must resolve and execute inside the same REPEATABLE READ snapshot,
+// OR hold every selected account's FOR UPDATE lock throughout resolution and
+// persistence. All definition writers acquire that account lock before changing
+// tree_revision or labels. The latter is the locked snapshot contract used by
+// server-authoritative rule conversion; never resolve then save on another client.
 // Cap each account's definitions, and the total, rather than accepting an unbounded
 // result from corrupt/unsupported imports. No truncated set can imply uniqueness.
 export async function resolveNativeLabelSearch(userId, accountIds, tree, execute) {
@@ -59,10 +63,10 @@ export async function resolveNativeLabelSearch(userId, accountIds, tree, execute
 // A scalar correlated subquery preserves unavailable identity as NULL instead of
 // erasing its row. Thus an independently true ordinary OR branch can still match.
 // These are physical search rows; unlike label feeds no entity deduplication occurs.
-const identityFrom = `FROM messages label_source ${nativeLabelLiveJoins('label_source')}
+const identityFrom = () => `FROM messages label_source ${nativeLabelLiveJoins('label_source')}
   WHERE label_source.id=m.id AND label_source.account_id=m.account_id
     AND label_source.is_deleted=false`;
-export const nativeLabelIdentityAvailableSql = () => `EXISTS (SELECT 1 ${identityFrom})`;
+export const nativeLabelIdentityAvailableSql = () => `EXISTS (SELECT 1 ${identityFrom()})`;
 export function nativeLabelCondition(reference, bind) {
   if (!reference) failure('label_not_found', 'Resolve native labels in the selected account scope before searching.');
   const account = bind(reference.accountId), generation = bind(reference.storageGeneration), label = bind(reference.labelId);
@@ -70,5 +74,5 @@ export function nativeLabelCondition(reference, bind) {
     WHERE membership.account_id=entity.account_id AND membership.storage_generation=entity.storage_generation
       AND membership.entity_id=entity.id AND membership.account_id=${account}::uuid
       AND membership.storage_generation=${generation}::uuid AND membership.label_id=${label}::uuid)
-    ${identityFrom})`;
+    ${identityFrom()})`;
 }

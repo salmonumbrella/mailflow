@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => ({ query: vi.fn(), withTransaction: async callback => callback({query}) }));
+vi.mock('../services/nativeLabelMemberships.js', () => ({ captureRuleMembershipBatchInTransaction: async (_client,_user,rows) => rows.map(source => ({availability:'unknown',source,labelIds:null})) }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));

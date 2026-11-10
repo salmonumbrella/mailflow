@@ -597,7 +597,14 @@
     "categoryCountTitle": "邮件：{{total}} · 未读：{{unread}}",
     "emptyCategory": "{{category}}中没有邮件",
     "emptyCategoryOthers": "其他类别中仍有邮件。",
-    "emptyCategoryNone": "收件箱为空。"
+    "emptyCategoryNone": "收件箱为空。",
+    "preparedAction": {
+      "changedScope": "所选邮件已更改。请重新选择邮件后重试。",
+      "unresolvedScope": "无法完整加载会话中的邮件。请重试。",
+      "changedQueued": "发送操作前邮箱已发生变化。未更改任何邮件。请刷新后重试。",
+      "deleteCount": "已选择的邮件：{{count}} 封。",
+      "permanentDeleteWarning": "已位于垃圾箱或草稿箱中的邮件将在撤销期限结束后被永久删除。删除请求发送到服务器后，这些邮件将无法恢复。"
+    }
   },
   "lockScreen": {
     "subtitle": "输入 PIN 码以解锁",
@@ -2444,7 +2451,7 @@
       "show": "显示",
       "title": "MailFlow 标签",
       "scope": "这些标签保存在 MailFlow 中，仅用于此账户。它们与 IMAP 文件夹相互独立，不会同步到 Google 或其他邮件应用。",
-      "cacheScope": "将标签应用于已验证的单封邮件。标签列表和计数仅涵盖已同步的邮件，不包括垃圾邮件和已删除邮件。目前尚不支持搜索、过滤规则和撰写邮件时分配标签。",
+      "cacheScope": "可为身份已验证的单封邮件分配标签，并在搜索和 MailFlow 规则中使用。标签列表和计数仅涵盖已同步的邮件，不包括垃圾邮件和已删除邮件。不支持在撰写时分配标签，也不支持在草稿和已发送邮件之间保留标签。",
       "pending": "有一个标签请求待验证。其他标签更改已暂停。",
       "retryMutation": "重试待处理的标签请求",
       "create": "创建 MailFlow 标签",
@@ -2598,10 +2605,28 @@
     "unverified": "用于标签匹配的身份尚未验证。请先重新加载标签，再保存。",
     "conflicting": "一条规则不能同时应用和移除同一标签。",
     "coverageCount": "身份未验证：{{total}} 封缓存邮件中有 {{unavailable}} 封。",
-    "emptyPartial": "可用的索引数据中没有匹配结果。用于标签匹配的身份尚未验证的邮件仍可能符合条件。"
+    "emptyPartial": "可用的索引数据中没有匹配结果。用于标签匹配的身份尚未验证的邮件仍可能符合条件。",
+    "condition": "MailFlow 标签归属",
+    "membership": "标签归属条件",
+    "has": "包含标签",
+    "notHas": "不包含标签",
+    "exactCondition": "此条件严格保留已保存搜索的含义。如需更改，请移除此条件并手动添加新条件，或从搜索创建新过滤器。",
+    "previewMismatch": "预览与此账户或搜索不匹配。请在保存前重新检查。",
+    "reviewRequired": "请在保存前检查当前过滤器。搜索、操作、账户或标签已更改。",
+    "review": "检查过滤器",
+    "reviewing": "正在检查…",
+    "preview": "精确过滤器预览",
+    "exactHelp": "过滤器支持以 AND 连接的非嵌套条件，可按标签、发件人、主题、附件和已读状态筛选。分组、OR 和不支持的搜索词将被整体拒绝。对现有邮件的运行仅涵盖当前缓存中未删除的收件箱邮件，且仅运行此过滤器。原生标签仅在 MailFlow 内使用，不会同步服务商的标签。",
+    "narrowsAccount": "选择一个账户会缩小此统一搜索的范围。过滤器将仅应用于所选账户的收件箱邮件。",
+    "unknownHelp": "未验证的邮件身份表示未知，并不代表标签集合为空。因此，该邮件不能满足不包含某标签的条件。",
+    "convertedIs": "是",
+    "convertedIsNot": "不是",
+    "convertedTrue": "是",
+    "convertedFalse": "否",
+    "runCounts": "已处理：{{processed}} · 已匹配：{{matched}} · 失败：{{failed}} · 未知：{{unknown}} · 待处理：{{pending}}",
+    "runRevisionMissing": "过滤器已保存，但无法验证其修订版本。请先在 MailFlow 规则中检查已保存的过滤器，再将其应用于现有收件箱邮件。"
   },
   "gmailSearch": {
-    "supportedSearchOperatorsWithSize": "MailFlow 支持 from:、to:、subject:、has:attachment、is:read/unread/starred、before:、after: 和 in:。还支持 OR、AND、圆括号、花括号分组、filename:、category: 和 newer_than:/older_than:（d、m、y）。分类使用 MailFlow 中的名称。size: 和 larger: 表示严格大于；smaller: 表示严格小于。label: 用于搜索 MailFlow 原生标签。不索引重要性。附件文件名和邮件正文的搜索取决于已同步的内容。",
-    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "对现有邮件运行过滤器时，仅处理收件箱，且不会运行其他过滤器。MailFlow 原生标签操作仅适用于指定账户，不会同步邮件服务商的标签。MailFlow 规则引擎不支持标签条件、重要性和“永不标记为垃圾邮件”。可在 MailFlow 规则中配置转发。"
+    "supportedSearchOperatorsWithSize": "MailFlow 支持 from:、to:、subject:、has:attachment、is:read/unread/starred、before:、after: 和 in:。还支持 OR、AND、圆括号、花括号分组、filename:、category: 和 newer_than:/older_than:（d、m、y）。分类使用 MailFlow 中的名称。size: 和 larger: 表示严格大于；smaller: 表示严格小于。label: 用于搜索 MailFlow 原生标签。不索引重要性。附件文件名和邮件正文的搜索取决于已同步的内容。"
   }
 }

@@ -1,3 +1,5 @@
+import ListDeleteConfirmation from './ListDeleteConfirmation.jsx';
+import { listActionScopeKey, listActionRowsCurrent, listActionSourceKey, listActionTargetsCurrent, isPermanentListDelete, sameListActionTarget, createListActionCommitGuard } from '../utils/listActionScope.js';
 import { createNativeLabelFeed } from '../utils/nativeLabelFeed.js';
 import { labelViewKey, NATIVE_LABELS_CHANGED, nativeLabelActionsBlocked } from '../utils/nativeLabelNavigation.js';
 import NativeLabelChips from './NativeLabelChips.jsx';
@@ -306,6 +308,19 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // Bulk selection state
   const [selectedIds, setSelectedIds] = useState(new Set());
   const gmailActionLock = useRef(false);
+  const listActionLock = useRef(false);
+  const deleteConfirmationRef = useRef(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState(null);
+  const finishDeleteConfirmation = useCallback(confirmed => {
+    deleteConfirmationRef.current?.(confirmed);
+    deleteConfirmationRef.current = null;
+    setDeleteConfirmation(null);
+  }, []);
+  const listActionMounted = useRef(true);
+  useEffect(() => {
+    listActionMounted.current = true;
+    return () => { listActionMounted.current = false; deleteConfirmationRef.current?.(false); };
+  }, []);
   const [gmailActionBusy, setGmailActionBusy] = useState(false);
   const [selectionModeActive, setSelectionModeActive] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
@@ -984,7 +999,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // on the delete and move paths, silently untouched. See utils/threadActions.js.
   // The thread holds every enabled account's copies, but outside the unified inbox the row
   // stands for its own account's only, so that is all the action takes.
-  const resolveMessagesForThreadAction = useCallback(async (message, { allowCache = false } = {}) => {
+  const resolveMessagesForThreadAction = useCallback(async (message, { allowCache = false, requireComplete = false } = {}) => {
     const tid = message.thread_id || message.id;
     const effectiveFolder = selectedAccountId ? selectedFolder : 'INBOX';
     return resolveThreadMessages({
@@ -992,10 +1007,16 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       isThreadRow: isThreadListRow(message),
       cached: threadMessages[tid],
       allowCache,
-      fetchThread: () => api.getThread(tid, effectiveFolder, isUnified),
+      fetchThread: async () => {
+        const result = await api.getThread(tid, effectiveFolder, isUnified);
+        if (requireComplete && (!Array.isArray(result?.messages) || !result.messages.some(member => sameListActionTarget(message, member)))) {
+          throw new Error(t('messageList.preparedAction.unresolvedScope', 'The conversation could not be fully resolved. Please try again.'));
+        }
+        return result;
+      },
       accountId: isUnified ? null : message.account_id,
     });
-  }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified]);
+  }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified, t]);
 
   const invalidateThreadCache = useCallback((threadId) => {
     invalidateThreadLoad(threadLoadVersionsRef.current, threadId);
@@ -1182,6 +1203,58 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     setMessagesStarredState(message, !message.is_starred);
   };
 
+  // Every list entry point prepares the same immutable targets before removing rows.
+  // Confirmation must never reread the selection or expand a conversation a second time.
+  const prepareListAction = useCallback(async (action, ids, rows) => {
+    if (listActionLock.current || nativeLabelActionsBlocked(useStore.getState())) return null;
+    listActionLock.current = true;
+    const originView = archiveViewKeyRef.current;
+    const scopeKey = () => listActionScopeKey(useStore.getState(), scRef.current.selectedIds, archiveViewKeyRef.current, listGenRef.current);
+    const originScope = scopeKey();
+    const originSource = listActionSourceKey(rows, useStore.getState());
+    const current = () => listActionMounted.current && scopeKey() === originScope
+      && listActionSourceKey(rows, useStore.getState()) === originSource
+      && !nativeLabelActionsBlocked(useStore.getState()) && listActionRowsCurrent(rows, useStore.getState());
+    try {
+      if (!ids.length || ids.length !== rows.length || ids.some(id => !rows.some(row => row.id === id)) || !current()) {
+        throw new Error(t('messageList.preparedAction.changedScope', 'The message selection changed. Please select the messages again and retry.'));
+      }
+      const groups = await Promise.all(rows.map(async row => {
+        const members = keepDraftsApart(await resolveMessagesForThreadAction(row, { requireComplete: true }), row.id);
+        return action === 'move' ? members.filter(member => member.account_id === row.account_id) : members;
+      }));
+      if (groups.some((members, index) => !members.some(member => sameListActionTarget(rows[index], member)))) {
+        throw new Error(t('messageList.preparedAction.unresolvedScope', 'The conversation could not be fully resolved. Please try again.'));
+      }
+      const targets = [...new Map(groups.flat().map(message => [message.id, { ...message }])).values()];
+      if (!current() || !listActionTargetsCurrent(targets, useStore.getState())) throw new Error(t('messageList.preparedAction.changedScope', 'The message selection changed. Please select the messages again and retry.'));
+      if (action === 'delete' && targets.some(message => isPermanentListDelete(message, useStore.getState()))) {
+        const confirmed = await new Promise(resolve => {
+          deleteConfirmationRef.current = resolve;
+          setDeleteConfirmation(targets);
+        });
+        if (!confirmed) return null;
+        if (!current() || !listActionTargetsCurrent(targets, useStore.getState())) throw new Error(t('messageList.preparedAction.changedScope', 'The message selection changed. Please select the messages again and retry.'));
+      }
+      const commitCurrent = createListActionCommitGuard(targets, useStore.getState());
+      let cancelled = false;
+      const beforeCommit = () => {
+        if (cancelled) return false;
+        if (commitCurrent(useStore.getState())) return true;
+        cancelled = true;
+        targets.forEach(message => clearDeleteGuard(message.id));
+        addNotification({ type: 'error', title: t('gmailToolbar.couldNotCompleteTheSelectedAction', 'Could not complete the selected action'),
+          body: t('messageList.preparedAction.changedQueued', 'The mailbox changed before the action was sent. No messages were changed. Refresh and retry.') });
+        return false;
+      };
+      return { targets, originView, beforeCommit, responseCurrent: () => commitCurrent(useStore.getState()) };
+    } catch (error) {
+      if (!listActionMounted.current) return null;
+      addNotification({ type: 'error', title: t('gmailToolbar.couldNotCompleteTheSelectedAction', 'Could not complete the selected action'), body: error.message });
+      return null;
+    } finally { listActionLock.current = false; }
+  }, [resolveMessagesForThreadAction, addNotification, t]);
+
   // Undo-able delete: optimistically remove, delay the API call by 4.5s so user can undo
   const scheduleDelete = useCallback(async (message) => {
     if (nativeLabelActionsBlocked(useStore.getState())) return;
@@ -1190,15 +1263,10 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     const key = isThreadRow ? `thread:${tid}` : message.id;
     if (pendingDeleteTimers.current.has(key)) return;
 
-    let deleteMessages = [message];
-    try {
-      // Drafts and the rest of a conversation are never deleted together (keepDraftsApart).
-      deleteMessages = keepDraftsApart(await resolveMessagesForThreadAction(message), message.id);
-    } catch (err) {
-      console.error('Failed to load thread for delete:', err.message);
-      addNotification({ type: 'error', title: t('messageList.deleted.failTitle'), body: t('messageList.deleted.failBody') });
-      return;
-    }
+    const prepared = await prepareListAction('delete', [message.id], [message]);
+    if (!prepared) return;
+    const { targets: deleteMessages, originView } = prepared;
+    const restore = rows => restoreMessagesIfViewCurrent(originView, archiveViewKeyRef, rows);
 
     const ids = [...new Set(deleteMessages.map(msg => msg.id).filter(Boolean))];
     const visibleMessage = message;
@@ -1218,16 +1286,18 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
 
     const timer = setTimeout(async () => {
       pendingDeleteTimers.current.delete(key);
+      if (!prepared.beforeCommit()) return;
       try {
         if (ids.length > 1) {
           const result = await api.bulkDelete(ids);
+          if (!prepared.responseCurrent()) { ids.forEach(clearDeleteGuard); return; }
           const deletedSet = new Set(result.deleted ?? []);
           ids.forEach(id => (deletedSet.has(id) ? setCompletedDelete(id) : clearDeleteGuard(id)));
           const failedIds = ids.filter(id => !deletedSet.has(id));
           if (failedIds.length > 0) {
             const idToMsg = new Map(deleteMessages.map(m => [m.id, m]));
             const failedUnreadDelta = failedIds.filter(id => idToMsg.has(id) && !idToMsg.get(id).is_read).length;
-            useStore.getState().restoreMessages([visibleMessage]);
+            restore([visibleMessage]);
             if (failedUnreadDelta > 0) incrementUnread(message.account_id, failedUnreadDelta);
             addNotification({
               type: 'error',
@@ -1237,11 +1307,13 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           }
         } else {
           await api.deleteMessage(ids[0] || visibleMessage.id);
+          if (!prepared.responseCurrent()) { ids.forEach(clearDeleteGuard); return; }
           ids.forEach((id) => setCompletedDelete(id));
         }
       } catch {
         ids.forEach((id) => clearDeleteGuard(id));
-        useStore.getState().restoreMessages([visibleMessage]);
+        if (!prepared.responseCurrent()) return;
+        restore([visibleMessage]);
         if (unreadDelta > 0) incrementUnread(message.account_id, unreadDelta);
         addNotification({
           type: 'error',
@@ -1250,7 +1322,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         });
       }
     }, UNDO_COMMIT_DELAY_MS);
-    pendingDeleteTimers.current.set(key, { timer, message: visibleMessage, ids });
+    pendingDeleteTimers.current.set(key, { timer, message: visibleMessage, ids, beforeCommit: prepared.beforeCommit, responseCurrent: prepared.responseCurrent });
     addNotification({
       title: ids.length > 1 ? t('messageList.bulkDeleted.title', { count: ids.length }) : t('messageList.deleted.title'),
       body: ids.length > 1 ? t('messageList.bulkDeleted.body') : t('messageList.deleted.body'),
@@ -1260,12 +1332,13 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         clearTimeout(pending.timer);
         pendingDeleteTimers.current.delete(key);
         ids.forEach((id) => clearPendingDelete(id));
-        useStore.getState().restoreMessages([visibleMessage]);
+        if (!prepared.beforeCommit()) return;
+        restore([visibleMessage]);
         if (unreadDelta > 0) incrementUnread(message.account_id, unreadDelta);
       },
     });
   }, [
-    isThreadListRow, expandedThreadId, resolveMessagesForThreadAction,
+    isThreadListRow, expandedThreadId, prepareListAction,
     removeMessage, setExpandedThreadId, decrementUnread, incrementUnread,
     addNotification, t,
   ]);
@@ -1367,8 +1440,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // the unmount cleanup below does not double-fire on normal navigation.
   useEffect(() => {
     const handleBeforeUnload = () => {
-      pendingDeleteTimers.current.forEach(({ timer, message, ids }) => {
+      pendingDeleteTimers.current.forEach(({ timer, message, ids, beforeCommit }) => {
         clearTimeout(timer);
+        if (!beforeCommit()) return;
         const deleteIds = ids?.length ? ids : [message.id];
         try {
           if (deleteIds.length > 1) {
@@ -1403,8 +1477,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   // lock would send them after it, and they would be refused.
   useEffect(() => {
     const flushDeletes = () => {
-      pendingDeleteTimers.current.forEach(({ timer, message, ids }) => {
+      pendingDeleteTimers.current.forEach(({ timer, message, ids, beforeCommit, responseCurrent }) => {
         clearTimeout(timer);
+        if (!beforeCommit()) return;
         const deleteIds = ids?.length ? ids : [message.id];
         const deletePromise =
           deleteIds.length > 1
@@ -1412,6 +1487,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
             : api.deleteMessage(deleteIds[0]);
         deletePromise
           .then(result => {
+            if (!responseCurrent()) { deleteIds.forEach(clearDeleteGuard); return; }
             const actuallyDeleted = new Set(result?.deleted ?? deleteIds);
             deleteIds.forEach(id => (actuallyDeleted.has(id) ? setCompletedDelete(id) : clearDeleteGuard(id)));
           })
@@ -1669,21 +1745,13 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     lastSelectIdxRef.current = clickedIdx;
   }, [displayMessages]);
 
-  const handleBulkDelete = useCallback(async (ids, msgs, resolvedMessages = null) => {
-    if (nativeLabelActionsBlocked(useStore.getState())) return;
-    const originView = archiveViewKeyRef.current;
-    const restore = rows => resolvedMessages ? restoreMessagesIfViewCurrent(originView, archiveViewKeyRef, rows) : useStore.getState().restoreMessages(rows);
+  const handleBulkDelete = useCallback(async (ids, msgs) => {
+    const prepared = await prepareListAction('delete', ids, msgs);
+    if (!prepared) return;
+    const { targets, originView } = prepared;
+    const restore = rows => restoreMessagesIfViewCurrent(originView, archiveViewKeyRef, rows);
     const key = `bulk:${ids[0]}`;
-    // Selected thread rows delete the whole conversation, matching the
-    // single-row delete path — without this only each thread's visible
-    // (newest) message was deleted and the rest of the thread survived.
-    let deleteIds = ids;
-    try {
-      const resolved = resolvedMessages || await Promise.all(msgs.map(async m => keepDraftsApart(await resolveMessagesForThreadAction(m), m.id)));
-      deleteIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
-    } catch (err) {
-      console.error('Failed to load thread for bulk delete:', err.message);
-    }
+    const deleteIds = targets.map(message => message.id);
     const searchOffsetBeforeRemoval = searchFetchedOffsetRef.current;
     const shouldPrefetchSearch = Boolean(useStore.getState().searchQuery.trim() && searchHasMore);
     deleteIds.forEach(id => setPendingDelete(id));
@@ -1701,10 +1769,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     let undone = false;
     const timer = setTimeout(async () => {
       pendingDeleteTimers.current.delete(key);
-      if (undone) return;
+      if (undone || !prepared.beforeCommit()) return;
       const chunks = [];
       for (let i = 0; i < deleteIds.length; i += 500) chunks.push(deleteIds.slice(i, i + 500));
       const results = await Promise.allSettled(chunks.map(chunk => api.bulkDelete(chunk)));
+      if (!prepared.responseCurrent()) { deleteIds.forEach(clearDeleteGuard); return; }
       results
         .filter(r => r.status === 'rejected')
         .forEach(r => console.error('Bulk delete failed:', r.reason?.message));
@@ -1728,7 +1797,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         setSearchReloadToken(token => token + 1);
       }
     }, UNDO_COMMIT_DELAY_MS);
-    pendingDeleteTimers.current.set(key, { timer, message: msgs[0], ids: deleteIds });
+    pendingDeleteTimers.current.set(key, { timer, message: msgs[0], ids: deleteIds, beforeCommit: prepared.beforeCommit, responseCurrent: prepared.responseCurrent });
     addNotification({
       title: t('messageList.bulkDeleted.title', { count: deleteIds.length }),
       body: t('messageList.bulkDeleted.body'),
@@ -1740,6 +1809,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         clearTimeout(timer);
         pendingDeleteTimers.current.delete(key);
         deleteIds.forEach(id => clearPendingDelete(id));
+        if (!prepared.beforeCommit()) return;
         restore(msgs);
         msgs.forEach(msg => {
           const delta = parseInt(msg.unread_count) || (msg.is_read ? 0 : 1);
@@ -1747,26 +1817,14 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         });
       },
     });
-  }, [searchHasMore, removeMessage, prefetchSearchAfterRemoval, resolveMessagesForThreadAction, decrementUnread, incrementUnread, addNotification, t]);
+  }, [searchHasMore, removeMessage, prefetchSearchAfterRemoval, prepareListAction, decrementUnread, incrementUnread, addNotification, t]);
 
-  const handleBulkMove = useCallback(async (ids, msgs, folder, resolvedMessages = null) => {
-    if (nativeLabelActionsBlocked(useStore.getState())) return;
-    const originView = archiveViewKeyRef.current;
-    const restore = rows => resolvedMessages ? restoreMessagesIfViewCurrent(originView, archiveViewKeyRef, rows) : useStore.getState().restoreMessages(rows);
-    // Selected thread rows move the whole conversation. A folder path is
-    // account-specific, so scope each thread's expansion to its row's own
-    // account — the server would just skip (and previously silently drop)
-    // another account's copies from a folder that doesn't exist there.
-    let moveIds = ids;
-    try {
-      const resolved = resolvedMessages || await Promise.all(msgs.map(async (m) => {
-        const thread = keepDraftsApart(await resolveMessagesForThreadAction(m), m.id);
-        return thread.filter(tm => tm?.account_id === m.account_id);
-      }));
-      moveIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
-    } catch (err) {
-      console.error('Failed to load thread for bulk move:', err.message);
-    }
+  const handleBulkMove = useCallback(async (ids, msgs, folder) => {
+    const prepared = await prepareListAction('move', ids, msgs);
+    if (!prepared) return;
+    const { targets, originView } = prepared;
+    const restore = rows => restoreMessagesIfViewCurrent(originView, archiveViewKeyRef, rows);
+    const moveIds = targets.map(message => message.id);
     ids.forEach(id => removeMessage(id));
     msgs.forEach(msg => { if (!msg.is_read) decrementUnread(msg.account_id, 1, { undoable: true }); });
     setSelectedIds(new Set());
@@ -1774,23 +1832,25 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     setShowFolderPicker(false);
     let undone = false;
     const timer = holdUndoable(async () => {
-      if (undone) return;
+      if (undone || !prepared.beforeCommit()) return;
       try {
         const result = await api.bulkMove(moveIds, folder);
+        if (!prepared.responseCurrent()) return;
         const movedSet = new Set(result.moved ?? []);
         const failedCount = moveIds.filter(id => !movedSet.has(id)).length;
         if (failedCount > 0) {
           const failedMsgs = msgs.filter(msg => !movedSet.has(msg.id));
           if (failedMsgs.length > 0) restore(failedMsgs);
-          if (resolvedMessages) failedMsgs.forEach(msg => { if (!msg.is_read) incrementUnread(msg.account_id); });
+          failedMsgs.forEach(msg => { if (!msg.is_read) incrementUnread(msg.account_id); });
           addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
         } else if (msgs[0]?.account_id) {
           useStore.getState().recordRecentFolder({ accountId: msgs[0].account_id, path: folder });
         }
       } catch (err) {
+        if (!prepared.responseCurrent()) return;
         console.error('Bulk move failed:', err);
         restore(msgs);
-        if (resolvedMessages) msgs.forEach(msg => { if (!msg.is_read) incrementUnread(msg.account_id); });
+        msgs.forEach(msg => { if (!msg.is_read) incrementUnread(msg.account_id); });
         addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: moveIds.length }) });
       }
     }, UNDO_COMMIT_DELAY_MS);
@@ -1801,11 +1861,12 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         // Already sent (a flush, as the page went into the back-forward cache): nothing to undo.
         if (!releaseUndoable(timer)) return;
         undone = true;
+        if (!prepared.beforeCommit()) return;
         restore(msgs);
         msgs.forEach(msg => { if (!msg.is_read) incrementUnread(msg.account_id); });
       },
     });
-  }, [removeMessage, decrementUnread, incrementUnread, resolveMessagesForThreadAction, addNotification, t]);
+  }, [removeMessage, decrementUnread, incrementUnread, prepareListAction, addNotification, t]);
 
   const handleRowMove = useCallback((e, msg) => {
     if (nativeLabelActionsBlocked(useStore.getState())) return;
@@ -2511,21 +2572,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           break;
         }
         const moved = message;
-        let moveMessages;
-        try {
-          moveMessages = keepDraftsApart(await resolveMessagesForThreadAction(message), message.id);
-        } catch (err) {
-          console.error('Failed to load thread for move:', err.message);
-          addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });
-          break;
-        }
-        // A folder path is account-specific: a thread can span accounts (and
-        // always includes Sent copies), and the server skips messages whose
-        // account lacks the destination folder. Scope the move to the
-        // right-clicked message's account so nothing is silently dropped.
-        moveMessages = moveMessages.filter(msg => msg?.account_id === moved.account_id);
-        const moveIds = [...new Set(moveMessages.map(msg => msg.id).filter(Boolean))];
-        if (!moveIds.length) moveIds.push(moved.id);
+        const prepared = await prepareListAction('move', [message.id], [message]);
+        if (!prepared) break;
+        const moveIds = prepared.targets.map(member => member.id);
         removeMessage(moved.id);
         if (!moved.is_read) decrementUnread(moved.account_id, 1, { undoable: true });
         // Remove the moved message from the selection so the action bar doesn't
@@ -2538,9 +2587,10 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         }
         let moveUndone = false;
         const moveTimer = holdUndoable(async () => {
-          if (moveUndone) return;
+          if (moveUndone || !prepared.beforeCommit()) return;
           try {
             const result = await api.bulkMove(moveIds, folder);
+            if (!prepared.responseCurrent()) return;
             // The server reports per-message success (200 even when some IMAP
             // moves fail or are skipped) — surface partial failures instead of
             // letting the thread silently reappear on the next sync.
@@ -2548,7 +2598,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
             const failedCount = moveIds.filter(id => !movedSet.has(id)).length;
             if (failedCount > 0) {
               if (!movedSet.has(moved.id)) {
-                useStore.getState().restoreMessages([moved]);
+                restoreMessagesIfViewCurrent(prepared.originView, archiveViewKeyRef, [moved]);
                 if (!moved.is_read) incrementUnread(moved.account_id);
               }
               addNotification({ type: 'error', title: t('message.moved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
@@ -2556,8 +2606,9 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
               useStore.getState().recordRecentFolder({ accountId: moved.account_id, path: folder });
             }
           } catch (err) {
+            if (!prepared.responseCurrent()) return;
             console.error('Move failed:', err.message);
-            useStore.getState().restoreMessages([moved]);
+            restoreMessagesIfViewCurrent(prepared.originView, archiveViewKeyRef, [moved]);
             if (!moved.is_read) incrementUnread(moved.account_id);
             addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });
           }
@@ -2569,7 +2620,8 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
             // Already sent (a flush, as the page went into the back-forward cache): nothing to undo.
             if (!releaseUndoable(moveTimer)) return;
             moveUndone = true;
-            useStore.getState().restoreMessages([moved]);
+            if (!prepared.beforeCommit()) return;
+            restoreMessagesIfViewCurrent(prepared.originView, archiveViewKeyRef, [moved]);
             if (!moved.is_read) incrementUnread(moved.account_id);
           },
         });
@@ -2950,21 +3002,15 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     setGmailActionBusy(true);
     try {
       if (action === 'archive') handleBulkArchive(ids, rows);
-      else if (action === 'delete' || action === 'move' || action === 'spam') {
-        // Never degrade a selected conversation to its representative if resolution fails.
-        const resolved = await Promise.all(rows.map(async row => {
-          const members = keepDraftsApart(await resolveMessagesForThreadAction(row), row.id);
-          return action === 'move' ? members.filter(member => member.account_id === row.account_id) : members;
-        }));
+      else if (action === 'delete') await handleBulkDelete(ids, rows);
+      else if (action === 'move') await handleBulkMove(ids, rows, value);
+      else if (action === 'spam') {
+        const resolved = await Promise.all(rows.map(async row => keepDraftsApart(await resolveMessagesForThreadAction(row), row.id)));
         if (archiveViewKeyRef.current !== originView) return;
-        if (action === 'delete') await handleBulkDelete(ids, rows, resolved);
-        else if (action === 'move') await handleBulkMove(ids, rows, value, resolved);
-        else {
-          const unique = conversationSpamTargets([...new Map(resolved.flat().map(message => [message.id, message])).values()], accounts);
-          if (!unique.length) throw new Error(t("gmailToolbar.noReceivedMessagesInThisSelectionCanBeReportedAsSpam", "No received messages in this selection can be reported as spam."));
-          await performSpamLabel(unique, 'spam', originView, rows);
-          clearSelection();
-        }
+        const unique = conversationSpamTargets([...new Map(resolved.flat().map(message => [message.id, message])).values()], accounts);
+        if (!unique.length) throw new Error(t("gmailToolbar.noReceivedMessagesInThisSelectionCanBeReportedAsSpam", "No received messages in this selection can be reported as spam."));
+        await performSpamLabel(unique, 'spam', originView, rows);
+        clearSelection();
       } else if (['read', 'unread', 'star', 'unstar'].includes(action)) {
         for (const row of rows) {
           if (archiveViewKeyRef.current !== originView) break;
@@ -3300,7 +3346,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         {layout === 'gmail' ? <GmailToolbar
           messages={showGtdTab ? [] : displayMessages} selectedIds={selectedIds}
           onSelect={rows => rows.length ? selectAll(rows) : clearSelection()}
-          onAction={handleGmailToolbarAction} onRefresh={handleSync} busy={gmailActionBusy || loadingMessages || nativeLabelActionsBlocked(useStore.getState())} syncing={syncing}
+          confirmDeleteInParent onAction={handleGmailToolbarAction} onRefresh={handleSync} busy={gmailActionBusy || loadingMessages || nativeLabelActionsBlocked(useStore.getState())} syncing={syncing}
           permanentDelete={selectedMsgs.some(message => {
             const account = accounts.find(item => item.id === message.account_id);
             const folder = folders[message.account_id]?.find(item => item.path === message.folder) || { path: message.folder };
@@ -4448,6 +4494,8 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           })
         )}
 
+        {deleteConfirmation && <ListDeleteConfirmation messages={deleteConfirmation}
+          onConfirm={() => finishDeleteConfirmation(true)} onCancel={() => finishDeleteConfirmation(false)} />}
         {contextMenu && (
           <ContextMenu
             x={contextMenu.x}

@@ -16,11 +16,17 @@ describe('native rule reference language', () => {
   it('rejects grouped conditions, future actions, malformed entries and misleading operators', () => {
     const valid = rule([{ type: 'apply_native_label', value: id }]);
     expect(() => validateNativeLabelRuleShape(valid)).not.toThrow();
-    for (const c of [{ field: 'has_attachment', operator: 'not_equals', value: false }, { field: 'native_label', operator: 'not_has', value: id }, { type: 'or', children: [] }]) {
+    for (const c of [{ field: 'has_attachment', operator: 'not_equals', value: false }, { field: 'native_label', operator: 'contains', value: id }, { type: 'or', children: [] }]) {
       expect(() => validateNativeLabelRuleShape({ ...valid, conditions: [c] })).toThrow();
     }
     for (const action of [null, { type: 'future_action' }, { type: 'archive', unsafe: true }]) {
       expect(() => validateNativeLabelRuleShape({ ...valid, actions: [...valid.actions, action] })).toThrow();
     }
   });
+  it.each(['has','not_has'])('accepts direct UUID %s conditions without native actions', operator => {
+    const conditional = { conditions:[{field:'native_label',operator,value:id}], actions:[{type:'star'}] };
+    expect(() => validateNativeLabelRuleShape(conditional)).not.toThrow();
+    expect(extractNativeLabelReferences(conditional)).toEqual([id]);
+  });
+
 });

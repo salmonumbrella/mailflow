@@ -68,7 +68,7 @@ describe.skipIf(!ADMIN_URL)('native label definitions on PostgreSQL', () => {
     vi.unstubAllEnvs(); vi.restoreAllMocks();
   });
   beforeEach(async () => {
-    await h.pool.query('TRUNCATE native_label_memberships, native_label_mutations, mail_labels, mail_label_state, mail_label_mutations');
+    await h.pool.query('TRUNCATE inbox_rule_action_attempts, native_label_memberships, native_label_mutations, mail_labels, mail_label_state, mail_label_mutations');
     await h.pool.query('UPDATE email_accounts SET enabled=true');
     vi.clearAllMocks();
   });

@@ -106,8 +106,23 @@ describe('sync identity evidence and legacy reconciliation', () => {
       expect(readMailboxIdentity.mock.invocationCallOrder[0]).toBeLessThan(client.getMailboxLock.mock.invocationCallOrder[0]);
       expect(observeMailboxIdentity).toHaveBeenCalledWith(expect.any(Object), client);
       expect(client.fetch).toHaveBeenCalledWith('5', expect.objectContaining({ size: true }), { uid: true });
+      expect(writeObservedMessage).toHaveBeenCalledOnce();
+      const [, , writeMessage, options] = writeObservedMessage.mock.calls[0];
+      expect(typeof writeMessage).toBe('function');
+      expect(Object.keys(options)).toEqual(['captureRuleSource']);
+      const { captureRuleSource } = options;
+      expect(typeof captureRuleSource).toBe('function');
       expect(writeObservedMessage).toHaveBeenCalledWith(expect.objectContaining({ providerNamespace: expectedNamespace }),
-        expect.objectContaining({ uid: 5, emailId: '9007199254740993' }), expect.any(Function));
+        expect.objectContaining({ uid: 5, emailId: '9007199254740993' }), writeMessage, { captureRuleSource });
+      // The transaction-local capture hook must not promote this read legacy
+      // message into an unread-arrival rule candidate, even if the row is new.
+      const transaction = { query: vi.fn() };
+      const persistedSource = { id: 'cache', account_id: account.id, folder: 'INBOX', uid: 5 };
+      const queryCount = query.mock.calls.length;
+      expect(captureRuleSource(transaction, persistedSource, { id: 'cache', is_new: false })).toBeNull();
+      expect(captureRuleSource(transaction, persistedSource, { id: 'cache', is_new: true })).toBeNull();
+      expect(transaction.query).not.toHaveBeenCalled();
+      expect(query).toHaveBeenCalledTimes(queryCount);
       const [sql, params] = query.mock.calls.find(([text]) => text.includes('INSERT INTO messages'));
       const columns = sql.match(/INSERT INTO messages\s*\(([^)]*)\)/)[1].split(',').map(c => c.trim());
       expect(params[columns.indexOf('rfc822_size_bytes')]).toBe(123);

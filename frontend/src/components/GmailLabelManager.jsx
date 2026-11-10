@@ -154,7 +154,7 @@ export default function GmailLabelManager({ accountId, onLockChange, initialCrea
   }}>
     <h2 id={`${uid}-title`}>{t('gmail.nativeLabels.title', 'MailFlow labels')}</h2>
     <p>{t('gmail.nativeLabels.scope', 'These labels are saved in MailFlow for this account. They are separate from IMAP folders and do not sync to Google or other mail apps.')}</p>
-    <p>{t('gmail.nativeLabels.cacheScope', 'Apply labels to verified individual messages. Label lists and counts cover synchronized mail only, excluding Spam and Trash. Search, filter rules and compose-time assignments are not supported yet.')}</p>
+    <p>{t('gmail.nativeLabels.cacheScope', 'Apply labels to verified individual messages and use them in search and MailFlow rules. Label lists and counts cover synchronized mail only, excluding Spam and Trash. Compose-time assignments and preserving labels between drafts and sent messages are not supported.')}</p>
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     {pending && <div role="status" data-label-editor className="mf-native-labels-recovery"><p>{t('gmail.nativeLabels.pending', 'A label request is pending verification. Other label changes are paused.')}</p><button type="button" disabled={busy} onClick={() => mutate(pending)}>{t('gmail.nativeLabels.retryMutation', 'Retry pending label request')}</button></div>}

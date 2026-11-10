@@ -33,12 +33,33 @@ describe.skipIf(!URL)('native label rule persistence on PostgreSQL', () => {
   });
   const body = extra => ({ name: 'Label invoices', accountId: account.id, expectedStorageGeneration: account.storage_generation,
     conditions: [{ field: 'subject', operator: 'contains', value: 'invoice' }], actions: [{ type: 'apply_native_label', value: label.id }], ...extra });
-  const call = async (method, path = '', data) => { const res = await fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) }); return { status: res.status, body: await res.json() }; };
+  const call = async (method, path = '', data) => {
+    if (method === 'PUT' && data.expectedRuleRevision === undefined) data = {...data, expectedRuleRevision:(await h.pool.query('SELECT updated_at::text AS revision FROM inbox_rules WHERE id=$1',[path.slice(1)])).rows[0]?.revision};
+    const res = await fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) }); return { status: res.status, body: await res.json() }; };
   const remove = async id => { const preview = await previewDeletion(h.userId, id, { accountId: account.id }); return deleteDefinition(h.userId,id,{ accountId: account.id,mutationId:randomUUID(),expectedTreeRevision:preview.treeRevision,confirmSubtree:true }); };
   it('saves account and generation with deduplicated explicit UUID actions and exact revision', async () => {
     const action = { type: 'apply_native_label', value: label.id };
     const result = await call('POST','',body({ actions: [action, action] }));
     expect(result).toMatchObject({ status: 201, body: { account_id: account.id, storage_generation: account.storage_generation, actions: [action], rule_revision: expect.any(String) } });
+  });
+  it.each(['create', 'toggle'])('ordinary %s responses support a native edit without a reload', async operation => {
+    const ordinary = body({ actions: [{ type: 'star' }] });
+    let saved = await call('POST', '', ordinary);
+    expect(saved.status).toBe(201);
+    if (operation === 'toggle') {
+      saved = await call('PUT', `/${saved.body.id}`, { ...ordinary, enabled: false });
+      expect(saved.status).toBe(200);
+    }
+    const revision = (await h.pool.query('SELECT updated_at::text AS revision FROM inbox_rules WHERE id=$1', [saved.body.id])).rows[0].revision;
+    // Bypass the legacy test helper: no hidden GET may supply the missing DTO field.
+    const response = await fetch(`${base}/${saved.body.id}`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body({ expectedRuleRevision: saved.body.rule_revision })) });
+    expect(response.status).toBe(200);
+    expect(saved.body.rule_revision).toBe(revision);
+    const converted = await response.json();
+    expect(converted.actions).toEqual(body().actions);
+    expect(converted.rule_revision).toEqual(expect.any(String));
+    expect(converted.rule_revision).not.toBe(revision);
   });
   it('rejects global, stale, foreign, missing and conflicting native actions without creating rules', async () => {
     for (const extra of [{ accountId: null }, { expectedStorageGeneration: randomUUID() }, { expectedStorageGeneration: undefined },
@@ -48,9 +69,9 @@ describe.skipIf(!URL)('native label rule persistence on PostgreSQL', () => {
     }
     expect((await h.pool.query('SELECT * FROM inbox_rules')).rows).toHaveLength(0);
   });
-  it('rejects malformed or unsupported native shapes before normalization and never persists native conditions', async () => {
+  it('rejects malformed or unsupported native shapes before normalization', async () => {
     for (const extra of [{ actions: [null, ...body().actions] }, { actions: [...body().actions, { type: 'future_action' }] },
-      { conditions: [{ field:'has_attachment',operator:'not_equals',value:false }] }, { conditions: [{ field:'native_label',operator:'not_has',value:label.id }] }]) {
+      { conditions: [{ field:'has_attachment',operator:'not_equals',value:false }] }, { conditions: [{ field:'native_label',operator:'contains',value:label.id }] }]) {
       expect((await call('POST','',body(extra))).status).toBe(400);
     }
   });
@@ -85,4 +106,27 @@ describe.skipIf(!URL)('native label rule persistence on PostgreSQL', () => {
     expect(await call('PUT',`/${saved.body.id}`,body({expectedStorageGeneration:newer}))).toMatchObject({status:409,body:{code:'storage_generation_conflict'}});
     expect((await h.pool.query('SELECT storage_generation,enabled FROM inbox_rules WHERE id=$1',[saved.body.id])).rows[0]).toMatchObject({storage_generation:account.storage_generation,enabled:false});
   });
+  it.each(['has','not_has'])('persists condition-only %s UUID references and blocks deletion until disabled',async operator=>{
+    const input=body({conditions:[{field:'native_label',operator,value:label.id}],actions:[{type:'star'}]});
+    const saved=await call('POST','',input);expect(saved.status).toBe(201);
+    const preview=await previewDeletion(h.userId,label.id,{accountId:account.id});expect(preview.blockedByRules).toBe(true);
+    await expect(remove(label.id)).rejects.toMatchObject({code:'label_referenced_by_rule'});
+    expect((await call('PUT',`/${saved.body.id}`,{...input,enabled:false})).status).toBe(200);
+    await remove(label.id);
+    expect((await call('GET')).body[0].nativeLabelReferences).toEqual([{id:label.id,path:null,missing:true}]);
+    expect(await call('PUT',`/${saved.body.id}`,input)).toMatchObject({status:409,body:{code:'missing_label_reference'}});
+  });
+  it('uses exact CAS revisions for edits and advances revision on reorder',async()=>{
+    const saved=await call('POST','',body());
+    const changed=await call('PUT',`/${saved.body.id}`,body({name:'Changed',expectedRuleRevision:saved.body.rule_revision}));expect(changed.status).toBe(200);
+    expect(await call('PUT',`/${saved.body.id}`,body({name:'Lost update',expectedRuleRevision:saved.body.rule_revision}))).toMatchObject({status:409,body:{code:'rule_changed'}});
+    const reordered=await call('PATCH','/reorder',{ids:[saved.body.id]});expect(reordered.status).toBe(200);
+    expect((await call('GET')).body[0].rule_revision).not.toBe(changed.body.rule_revision);
+  });
+  it('rejects a historical request naming an earlier saved revision',async()=>{
+    const saved=await call('POST','',body({conditions:[{field:'native_label',operator:'not_has',value:label.id}],actions:[{type:'star'}]}));
+    await h.pool.query("UPDATE inbox_rules SET updated_at=updated_at+INTERVAL '1 microsecond' WHERE id=$1",[saved.body.id]);
+    expect(await call('POST',`/${saved.body.id}/run`,{accountIds:[account.id],expectedRuleRevision:saved.body.rule_revision})).toMatchObject({status:409,body:{code:'rule_changed'}});
+  });
+
 });

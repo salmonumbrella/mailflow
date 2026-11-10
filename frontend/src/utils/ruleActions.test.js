@@ -48,3 +48,19 @@ test('opposite native decisions are rejected and account changes discard native 
   assert.deepEqual(ruleActionsForAccount(actions, 'b'), [{ type: 'star' }, { type: 'move', value: '' }]);
   assert.deepEqual(ruleActionsForAccount(actions, ''), [{ type: 'star' }]);
 });
+
+const { ruleConditionsForAccount } = await import('./ruleActions.js');
+test('negative native conditions require verified membership definitions even without native actions', () => {
+  const context = { ...nativeContext(), actions: [], conditions: [{ field: 'native_label', operator: 'not_has', value: 'label-1' }] };
+  assert.equal(nativeRuleActionError(context), null);
+  assert.equal(nativeRuleActionError({ ...context, snapshots: {} }), 'nativeLabelRules.unverified');
+  assert.equal(nativeRuleActionError({ ...context, snapshots: { a: { storageGeneration: 'gen-1', labels: [] } } }), 'nativeLabelRules.missing');
+  assert.equal(nativeRuleActionError({ ...context, accountId: 'other' }), 'nativeLabelRules.accountChanged');
+});
+
+test('switching account retains an unresolved negative predicate instead of silently removing it', () => {
+  const legacy = { field: 'from', operator: 'contains', value: 'alice' };
+  const exact = { field: 'subject', operator: 'not_contains', value: '%', semantics: 'search_v1' };
+  const negative = { field: 'native_label', operator: 'not_has', value: 'label-1' };
+  assert.deepEqual(ruleConditionsForAccount([legacy, exact, negative]), [legacy, exact, { ...negative, value: '' }]);
+});

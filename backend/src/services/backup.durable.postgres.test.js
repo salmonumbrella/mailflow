@@ -22,7 +22,7 @@ import { readMailboxIdentity, observeMailboxIdentity, writeObservedMessage } fro
 
 const ADMIN_URL = process.env.MAILFLOW_TEST_DATABASE_URL;
 const durable = ['message_entities', 'entity_provider_keys', 'entity_locations', 'mailbox_identity_epochs',
-  'native_label_memberships', 'native_label_mutations',
+  'native_label_memberships', 'native_label_mutations', 'inbox_rule_action_attempts',
   'mail_identity_operations', 'mail_labels', 'mail_label_state', 'mail_label_mutations',
   'mail_signatures', 'mail_signature_state', 'mail_signature_defaults', 'snoozed_messages'];
 const encode = lines => gzipSync(lines.map(JSON.stringify).join('\n') + '\n');
@@ -99,6 +99,15 @@ describe.skipIf(!ADMIN_URL)('durable metadata backup on PostgreSQL', () => {
     await h.pool.query('INSERT INTO native_label_memberships(account_id,storage_generation,entity_id,label_id) VALUES ($1,$2,$3,$4)', [account.id, account.storage_generation, originalEntity, labelIds[0]]);
     await h.pool.query(`INSERT INTO native_label_mutations(account_id,mutation_id,storage_generation,request_hash,response)
       VALUES ($1,$2,$3,$4,'{"metadataVersion":"9007199254740993"}'),($1,$5,$3,$4,NULL)`, [account.id, randomUUID(), account.storage_generation, 'b'.repeat(64), randomUUID()]);
+    const decisionId = randomUUID();
+    await h.pool.query(`INSERT INTO native_label_mutations(account_id,mutation_id,storage_generation,request_hash,response,operation_kind)
+      VALUES ($1,$2,$3,$4,'{"undoSupported":false,"receipt":{"inputVersion":"9007199254740992","outputVersion":"9007199254740993"}}','rule_decision')`,
+    [account.id,decisionId,account.storage_generation,'c'.repeat(64)]);
+    for (const [ordinal,status] of ['claimed','pending','confirmed','failed'].entries()) {
+      await h.pool.query(`INSERT INTO inbox_rule_action_attempts(account_id,storage_generation,decision_id,action_ordinal,action_hash,execution_id,rule_id,rule_revision,source,expected_metadata_version,status,outcome)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'2026-11-10 12:00:00.123456+00',$8::jsonb,9007199254740993,$9,'{"opaque":"900719925474099312345"}')`,
+      [account.id,account.storage_generation,decisionId,ordinal,'d'.repeat(64),randomUUID(),randomUUID(),JSON.stringify({entity_id:originalEntity,account_id:account.id}),status]);
+    }
     await h.pool.query('INSERT INTO mail_label_state VALUES ($1,9007199254740993)', [account.id]);
     await h.pool.query(`INSERT INTO mail_label_mutations(account_id,mutation_id,request_hash,response) VALUES ($1,$2,$3,'{"success":true}')`, [account.id, randomUUID(), 'a'.repeat(64)]);
     const alias = (await h.pool.query("INSERT INTO account_aliases(account_id,name,email) VALUES ($1,'Alias','alias@test') RETURNING id", [account.id])).rows[0].id;
@@ -199,6 +208,7 @@ describe.skipIf(!ADMIN_URL)('durable metadata backup on PostgreSQL', () => {
     ['native_label_mutations', 'undo_state'],
     ['native_label_mutations', 'operation_kind'],
     ['native_label_mutations', 'request_hash'],
+    ...['status','source','action_hash','rule_revision','expected_metadata_version','execution_id','action_ordinal','decision_id'].map(column => ['inbox_rule_action_attempts',column]),
     ['native_label_memberships', 'entity_id'],
     ['snoozed_messages', 'entity_id'],
     ['snoozed_messages', 'wake_state'],

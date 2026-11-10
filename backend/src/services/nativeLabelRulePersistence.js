@@ -1,8 +1,14 @@
+import { convertNativeLabelRuleSearchInTransaction } from './nativeLabelRuleConversion.js';
 import { query, withTransaction } from './db.js';
-import { extractNativeLabelReferences, validateNativeLabelRuleReferences, ruleReferenceError } from './nativeLabelRuleReferences.js';
+import { extractNativeLabelReferences, validateNativeLabelRuleReferences, validateNativeLabelRuleShape, ruleReferenceError } from './nativeLabelRuleReferences.js';
 
 // No new durable state: references live in the already-backed-up rule JSON.
 export async function saveNativeLabelRule(userId, id, body) {
+  body = { ...body };
+  if (body.sourceSearch) {
+    if (body.accountId && body.accountId !== body.sourceSearch.accountId) throw ruleReferenceError('invalid_search_scope', 'Search and rule accounts must agree', 400);
+    body.accountId = body.sourceSearch.accountId;
+  }
   const previous = id ? (await query('SELECT * FROM inbox_rules WHERE id=$1 AND user_id=$2', [id, userId])).rows[0] : null;
   if (id && !previous) throw ruleReferenceError('not_found', 'Rule not found', 404);
   return withTransaction(async client => {
@@ -11,21 +17,35 @@ export async function saveNativeLabelRule(userId, id, body) {
     const ids = [...new Set([previous?.account_id, body.accountId].filter(Boolean))].sort();
     const accounts = [];
     for (const accountId of ids) {
-      const row = (await client.query('SELECT id,user_id,storage_generation FROM email_accounts WHERE id=$1 AND user_id=$2 FOR UPDATE', [accountId, userId])).rows[0];
+      const row = (await client.query('SELECT id,user_id,enabled,storage_generation FROM email_accounts WHERE id=$1 AND user_id=$2 FOR UPDATE', [accountId, userId])).rows[0];
       if (!row) throw ruleReferenceError('not_found', 'Account not found', 404);
       accounts.push(row);
     }
-    const current = id ? (await client.query('SELECT * FROM inbox_rules WHERE id=$1 AND user_id=$2 FOR UPDATE', [id, userId])).rows[0] : null;
+    const current = id ? (await client.query('SELECT *,updated_at::text AS rule_revision FROM inbox_rules WHERE id=$1 AND user_id=$2 FOR UPDATE', [id, userId])).rows[0] : null;
     if (id && (!current || current.account_id !== previous.account_id)) throw ruleReferenceError('rule_changed', 'Rule scope changed. Refresh before saving.');
+    if (current && body.expectedRuleRevision !== current.rule_revision) throw ruleReferenceError('rule_changed', 'The rule changed. Refresh before saving.');
     const account = accounts.find(row => row.id === body.accountId);
+    if (account?.enabled === false) throw ruleReferenceError('account_disabled', 'Choose an enabled account');
+    if (body.sourceSearch) {
+      const canonical = await convertNativeLabelRuleSearchInTransaction(client, { userId, sourceSearch: body.sourceSearch,
+        displayedScope: body.displayedScope, clientConditions: body.conditions, conditionLogic: body.conditionLogic });
+      body = { ...body, conditions: canonical.conditions, conditionLogic: canonical.conditionLogic,
+        expectedStorageGeneration: canonical.expectedStorageGeneration };
+    } else if ((body.conditions || []).some(c => c?.semantics !== undefined)) {
+      const oldAnnotations = (current?.conditions || []).filter(c => c?.semantics !== undefined);
+      const newAnnotations = body.conditions.filter(c => c?.semantics !== undefined);
+      if (JSON.stringify(oldAnnotations) !== JSON.stringify(newAnnotations)) throw ruleReferenceError('invalid_search_semantics', 'Search conditions must be produced by a fresh server preview', 400);
+    }
     const rule = { user_id: userId, account_id: body.accountId || null, enabled: body.enabled !== false,
       conditions: body.conditions, actions: body.actions, condition_logic: body.conditionLogic,
       storage_generation: current?.account_id === body.accountId ? current.storage_generation : account?.storage_generation ?? null };
+    validateNativeLabelRuleShape(rule);
     const refs = extractNativeLabelReferences(rule);
     if (refs.length && !rule.account_id) throw ruleReferenceError('native_label_account_required', 'Native label rules require one owned account', 400);
-    if (refs.length && (!account || body.expectedStorageGeneration !== account.storage_generation)) {
+    if ((refs.length || body.sourceSearch || rule.conditions.some(c => c?.semantics === 'search_v1')) && (!account || body.expectedStorageGeneration !== account.storage_generation)) {
       throw ruleReferenceError('storage_generation_conflict', 'Refresh native labels and choose the current account before saving this rule.');
     }
+    if (current && (extractNativeLabelReferences(current).length || current.conditions?.some(c => c?.semantics === 'search_v1')) && current.account_id === rule.account_id && current.storage_generation !== account?.storage_generation) throw ruleReferenceError('storage_generation_conflict', 'This rule belongs to a previous mailbox');
     // Missing references may be retained only when disabling/editing an existing
     // disabled rule, never introduced through a new or changed reference.
     const oldRefs = current ? extractNativeLabelReferences(current) : [];
@@ -51,9 +71,9 @@ export async function saveNativeLabelRule(userId, id, body) {
 }
 
 export async function validateNativeRuleForRun(userId, rule) {
-  if (!extractNativeLabelReferences(rule).length) return;
+  if (!extractNativeLabelReferences(rule).length && !rule.conditions?.some(c => c?.semantics === 'search_v1')) return;
   await withTransaction(async client => {
-    const account = (await client.query('SELECT id,user_id,storage_generation FROM email_accounts WHERE id=$1 AND user_id=$2 FOR UPDATE', [rule.account_id, userId])).rows[0];
+    const account = (await client.query('SELECT id,user_id,enabled,storage_generation FROM email_accounts WHERE id=$1 AND user_id=$2 FOR UPDATE', [rule.account_id, userId])).rows[0];
     const current = (await client.query('SELECT *,updated_at::text AS rule_revision FROM inbox_rules WHERE id=$1 AND user_id=$2 FOR UPDATE', [rule.id, userId])).rows[0];
     if (!current?.enabled || current.rule_revision !== rule.rule_revision) throw ruleReferenceError('rule_changed', 'The rule changed. Refresh before running.');
     await validateNativeLabelRuleReferences(client, { userId, rule: current, account });

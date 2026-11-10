@@ -212,7 +212,7 @@ async function resolveObserved(client, context, uid, key) {
   return { entityId };
 }
 
-export async function writeObservedMessage(context, message, write) {
+export async function writeObservedMessage(context, message, write, { captureRuleSource } = {}) {
   const uid = protocolNumber(message?.uid);
   if (!uid) throw identityError('invalid_identity_uid', 'Invalid message UID', 400);
   const result = await withTransaction(async client => {
@@ -230,7 +230,13 @@ export async function writeObservedMessage(context, message, write) {
           AND e.account_id=messages.account_id AND e.storage_generation=messages.storage_generation
           AND e.canonical_entity_id IS NULL) AS metadata_version`,
     [context.accountId, context.folderPath, uid, resolved.entityId, context.storageGeneration, context.uidValidity]);
-    if (saved?.rows) for (const row of saved.rows) Object.assign(row, bound.rows.find(candidate => candidate.id === row.id) || {});
+    if (saved?.rows) for (const row of saved.rows) {
+      Object.assign(row, bound.rows.find(candidate => candidate.id === row.id) || {});
+      if (captureRuleSource) row._nativeLabelProof = await captureRuleSource(client, {
+        id: row.id, entity_id: row.entity_id, storage_generation: row.storage_generation, uid_validity: row.uid_validity,
+        account_id: context.accountId, folder: context.folderPath, uid,
+      }, row);
+    }
     return saved;
   });
   if (result?.conflict) throw identityError('identity_provider_conflict', 'Provider identity contradicts the existing message location; metadata was retained for recovery');

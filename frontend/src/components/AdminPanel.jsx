@@ -33,7 +33,7 @@ import { usePushNotifications } from '../hooks/usePushNotifications.js';
 import SignatureEditor from './SignatureEditor.jsx';
 import DiagnosticsReportModal from './DiagnosticsReportModal.jsx';
 import { getEffectiveShortcuts, getGroupedActions, getShortcutConflicts, shortcutActionText, shortcutBindingFromEvent, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
-import { isValidForwardAddress, isNativeLabelAction, nativeRuleActionError, ruleActionsForAccount } from '../utils/ruleActions.js';
+import { exactRuleConditionSummary, isValidForwardAddress, isNativeLabelAction, isNativeLabelCondition, nativeRuleActionError, ruleActionsForAccount, ruleConditionsForAccount } from '../utils/ruleActions.js';
 import NativeRuleLabelSelect from './NativeRuleLabelSelect.jsx';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import AdminUserEditor from './AdminUserEditor.jsx';
@@ -6014,9 +6014,20 @@ function AboutTab() {
 }
 
 // ─── Rules Tab ────────────────────────────────────────────────────────────────
+function ruleEditorScope(state) {
+  return JSON.stringify([state.user?.id, state.accounts.map(account => [account.id, account.storage_generation, account.enabled]).sort()]);
+}
+
 function RulesTab() {
   const { t } = useTranslation();
   const { accounts, folders: storeFolders, setFolders, rulesPreFill, setRulesPreFill } = useStore();
+  const scopeKey = ruleEditorScope(useStore.getState());
+  const scopeEpoch = useRef(0);
+  const rulesUserId = useRef(useStore.getState().user?.id);
+  const reorderPending = useRef(null);
+  const [reordering, setReordering] = useState(false);
+  const [rulesReload, setRulesReload] = useState(0);
+  const [rulesRefreshFailed, setRulesRefreshFailed] = useState(false);
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [formMode, setFormMode] = useState(null); // null | 'add' | 'edit'
@@ -6038,6 +6049,7 @@ function RulesTab() {
   const isMobile = useMobile();
 
   async function handleRunRules() {
+    if (reorderPending.current || loading || rulesRefreshFailed) return;
     setRunningRules(true);
     setRunResult(null);
     setRunError('');
@@ -6064,10 +6076,20 @@ function RulesTab() {
   }, [t]);
 
   useEffect(() => {
+    const epoch = ++scopeEpoch.current;
+    const current = () => scopeEpoch.current === epoch && ruleEditorScope(useStore.getState()) === scopeKey;
+    reorderPending.current = null;
+    setReordering(false);
+    setRules([]); setLoading(true); setRuleError(''); setRulesRefreshFailed(false);
+    if (rulesUserId.current !== useStore.getState().user?.id) {
+      setFormMode(null); setFormId(null); setFormData(null); setConfirmDelete(null);
+      rulesUserId.current = useStore.getState().user?.id;
+    }
     api.getRules()
-      .then(data => { setRules(data); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, []);
+      .then(data => { if (current()) { setRules(data); setLoading(false); } })
+      .catch(error => { if (current()) { setLoading(false); setRulesRefreshFailed(true); setRuleError(error.message || t('admin.rules.errorSave')); } });
+    return () => { scopeEpoch.current = epoch + 1; reorderPending.current = null; };
+  }, [scopeKey, rulesReload]); // eslint-disable-line react-hooks/exhaustive-deps -- reload for identity/retry changes, not translation function changes
 
   useEffect(() => {
     if (rulesPreFill) {
@@ -6102,6 +6124,7 @@ function RulesTab() {
   }
 
   function openAdd(prefill) {
+    if (reorderPending.current) return;
     setFormData(blankForm(prefill));
     setFormId(null);
     setFormMode('add');
@@ -6109,6 +6132,7 @@ function RulesTab() {
   }
 
   function openEdit(rule) {
+    if (reorderPending.current) return;
     const rawActions = Array.isArray(rule.actions) ? rule.actions : [];
     const destActionsSet = new Set(['move', 'archive', 'delete']);
     let destSeen = false;
@@ -6123,6 +6147,7 @@ function RulesTab() {
       name: rule.name,
       accountId: rule.account_id || '',
       expectedStorageGeneration: rule.storage_generation,
+      expectedRuleRevision: rule.rule_revision,
       conditionLogic: rule.condition_logic || 'AND',
       conditions: Array.isArray(rule.conditions) ? rule.conditions : [],
       actions,
@@ -6142,7 +6167,7 @@ function RulesTab() {
   }
 
   async function handleToggle(rule) {
-    if (savingRule.current) return;
+    if (savingRule.current || reorderPending.current) return;
     savingRule.current = true; setRuleError('');
     const updated = { ...rule, enabled: !rule.enabled };
     try {
@@ -6150,6 +6175,7 @@ function RulesTab() {
         name: rule.name,
         accountId: rule.account_id || null,
         expectedStorageGeneration: rule.storage_generation,
+      expectedRuleRevision: rule.rule_revision,
         conditionLogic: rule.condition_logic,
         conditions: rule.conditions,
         actions: rule.actions,
@@ -6162,15 +6188,18 @@ function RulesTab() {
   }
 
   async function handleDelete(id) {
+    if (savingRule.current || reorderPending.current) return;
+    savingRule.current = true;
     try {
       await api.deleteRule(id);
       setRules(prev => prev.filter(r => r.id !== id));
     } catch { /* intentional */ }
+    finally { savingRule.current = false; }
     setConfirmDelete(null);
   }
 
   async function handleSave() {
-    if (savingRule.current) return;
+    if (savingRule.current || reorderPending.current) return;
     const { name, conditionLogic, conditions, actions, accountId, enabled, stopProcessing } = formData;
     if (!name.trim() || conditions.length === 0 || actions.length === 0) {
       setFormError(t('admin.rules.errorRequired'));
@@ -6187,7 +6216,7 @@ function RulesTab() {
       return;
     }
     const state = useStore.getState();
-    const nativeError = nativeRuleActionError({ actions, accountId, expectedStorageGeneration: formData.expectedStorageGeneration, accounts: state.accounts, snapshots: state.nativeLabelSnapshots });
+    const nativeError = nativeRuleActionError({ actions, conditions, accountId, expectedStorageGeneration: formData.expectedStorageGeneration, accounts: state.accounts, snapshots: state.nativeLabelSnapshots });
     if (nativeError) { setFormError(t(nativeError)); return; }
     savingRule.current = true; setFormSaving(true);
     setFormError('');
@@ -6195,6 +6224,7 @@ function RulesTab() {
       const payload = {
         name: name.trim(),
         expectedStorageGeneration: formData.expectedStorageGeneration,
+        expectedRuleRevision: formData.expectedRuleRevision,
         accountId: accountId || null,
         conditionLogic,
         conditions,
@@ -6218,14 +6248,32 @@ function RulesTab() {
   }
 
   async function handleReorderRules(from, to) {
-    const copy = [...rules];
+    if (savingRule.current || reorderPending.current) return;
+    const token = { epoch: scopeEpoch.current, scopeKey };
+    reorderPending.current = token;
+    setReordering(true); setRuleError('');
+    const current = () => reorderPending.current === token && scopeEpoch.current === token.epoch
+      && ruleEditorScope(useStore.getState()) === token.scopeKey;
     const reordered = [...rules];
     const [moved] = reordered.splice(from, 1);
     reordered.splice(to, 0, moved);
-
     setRules(reordered);
-
-    api.reorderRules(reordered.map(r => r.id)).catch(() => { setRules(copy); })
+    let reorderError;
+    try {
+      try { await api.reorderRules(reordered.map(rule => rule.id)); }
+      catch (error) { reorderError = error; }
+      if (!current()) return;
+      // Reorder advances exact revisions. Even a lost response may have committed,
+      // so never restore stale objects or permit editing before a fresh read.
+      const saved = await api.getRules();
+      if (!current()) return;
+      setRules(saved);
+      if (reorderError) setRuleError(reorderError.message || t('admin.rules.errorSave'));
+    } catch (error) {
+      if (current()) { setRules([]); setRulesRefreshFailed(true); setRuleError(error.message || t('admin.rules.errorSave')); }
+    } finally {
+      if (reorderPending.current === token) { reorderPending.current = null; setReordering(false); }
+    }
   }
 
   function setCondition(idx, key, val) {
@@ -6238,7 +6286,7 @@ function RulesTab() {
   function addCondition() {
     setFormData(prev => ({
       ...prev,
-      conditions: [...prev.conditions, { field: 'from', operator: 'contains', value: '' }],
+      conditions: prev.conditions.length < 50 ? [...prev.conditions, { field: 'from', operator: 'contains', value: '' }] : prev.conditions,
     }));
   }
 
@@ -6277,6 +6325,14 @@ function RulesTab() {
     const conds = Array.isArray(rule.conditions) ? rule.conditions : [];
     if (!conds.length) return '—';
     return conds.slice(0, 2).map(c => {
+      if (isNativeLabelCondition(c)) {
+        const snapshot = useStore.getState().nativeLabelSnapshots[rule.account_id];
+        const live = snapshot?.storageGeneration === rule.storage_generation ? snapshot.labels.find(label => label.id === c.value) : null;
+        const ref = rule.nativeLabelReferences?.find(item => item.id === c.value);
+        const path = live?.path || live?.name || ref?.path;
+        return `${t(c.operator === 'not_has' ? 'nativeLabelRules.notHas' : 'nativeLabelRules.has')} ${path || (ref?.missing ? t('nativeLabelRules.missing') : c.value)}`;
+      }
+      if (c.semantics === 'search_v1') return exactRuleConditionSummary(c, t);
       if (c.field === 'has_attachment') return t('admin.rules.fieldHasAttachment');
       if (c.field === 'read_status') return c.value === 'read' ? t('admin.rules.readStatusRead') : t('admin.rules.readStatusUnread');
       return `${c.field} ${c.operator} "${c.value}"`;
@@ -6305,6 +6361,8 @@ function RulesTab() {
   }
 
   const FIELDS = [
+    { value: 'native_label', label: t('nativeLabelRules.condition') },
+    ...(formData?.conditions.some(condition => condition.field === 'is_read') ? [{ value: 'is_read', label: t('admin.rules.fieldReadStatus') }] : []),
     { value: 'from',           label: t('admin.rules.fieldFrom') },
     { value: 'to',             label: t('admin.rules.fieldTo') },
     { value: 'subject',        label: t('admin.rules.fieldSubject') },
@@ -6314,6 +6372,8 @@ function RulesTab() {
     { value: 'read_status',    label: t('admin.rules.fieldReadStatus') },
   ];
   const OPERATORS = [
+    { value: 'is', label: t('nativeLabelRules.convertedIs') },
+    { value: 'is_not', label: t('nativeLabelRules.convertedIsNot') },
     { value: 'contains',     label: t('admin.rules.opContains') },
     { value: 'not_contains', label: t('admin.rules.opNotContains') },
     { value: 'equals',       label: t('admin.rules.opEquals') },
@@ -6368,6 +6428,7 @@ function RulesTab() {
                 accountId: newAccountId,
                 expectedStorageGeneration: accounts.find(account => account.id === newAccountId)?.storage_generation || null,
                 actions: ruleActionsForAccount(p.actions, newAccountId),
+                conditions: ruleConditionsForAccount(p.conditions),
               };
             })}
           >
@@ -6400,6 +6461,7 @@ function RulesTab() {
                 <select
                   style={{ ...inputStyle, width: 'auto', flex: '0 0 auto' }}
                   value={cond.field}
+                  disabled={!!cond.semantics}
                   onChange={e => {
                     const newField = e.target.value;
                     setFormData(prev => {
@@ -6407,12 +6469,13 @@ function RulesTab() {
                         if (i !== idx) return c;
                         const next = { ...c, field: newField };
                         if (newField !== 'header') delete next.headerName;
-                        if (newField === 'has_attachment') { delete next.operator; delete next.value; }
+                        if (newField === 'native_label') { next.operator = 'has'; next.value = ''; }
+                        else if (newField === 'has_attachment') { delete next.operator; delete next.value; }
                         else if (newField === 'read_status') {
                           delete next.operator;
                           if (next.value !== 'read' && next.value !== 'unread') next.value = 'unread';
                         }
-                        else if (!next.operator) next.operator = 'contains';
+                        else if (!next.operator || ['has', 'not_has'].includes(next.operator)) { next.operator = 'contains'; next.value = ''; }
                         return next;
                       });
                       return { ...prev, conditions };
@@ -6421,19 +6484,27 @@ function RulesTab() {
                 >
                   {FIELDS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
                 </select>
-                {cond.field !== 'has_attachment' && cond.field !== 'read_status' && (
+                {isNativeLabelCondition(cond) && <>
+                  <select aria-label={t('nativeLabelRules.membership')} style={inputStyle} disabled={!!cond.semantics} value={cond.operator} onChange={event => setCondition(idx, 'operator', event.target.value)}>
+                    <option value="has">{t('nativeLabelRules.has')}</option><option value="not_has">{t('nativeLabelRules.notHas')}</option>
+                  </select>
+                  <NativeRuleLabelSelect expectedStorageGeneration={fd.expectedStorageGeneration} accountId={fd.accountId} value={cond.value} disabled={!!cond.semantics} label={t('nativeLabelRules.condition')} onChange={value => setCondition(idx, 'value', value)} style={inputStyle} />
+                </>}
+                {cond.field !== 'native_label' && cond.field !== 'has_attachment' && cond.field !== 'read_status' && (
                   <>
                     <select
                       style={{ ...inputStyle, width: 'auto', flex: '0 0 auto' }}
+                      disabled={!!cond.semantics}
                       value={cond.operator || 'contains'}
                       onChange={e => setCondition(idx, 'operator', e.target.value)}
                     >
-                      {(cond.field === 'header' ? HEADER_OPERATORS : OPERATORS).map(o => (
+                      {(cond.field === 'header' ? HEADER_OPERATORS : OPERATORS).filter(operator => cond.semantics || !['is', 'is_not'].includes(operator.value)).map(o => (
                         <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
                     <input
                       style={{ ...inputStyle, flex: 1 }}
+                      disabled={!!cond.semantics}
                       value={cond.value || ''}
                       onChange={e => setCondition(idx, 'value', e.target.value)}
                       placeholder="value"
@@ -6443,6 +6514,7 @@ function RulesTab() {
                 {cond.field === 'read_status' && (
                   <select
                     style={{ ...inputStyle, flex: 1 }}
+                    disabled={!!cond.semantics}
                     value={cond.value === 'read' ? 'read' : 'unread'}
                     onChange={e => setCondition(idx, 'value', e.target.value)}
                   >
@@ -6457,6 +6529,7 @@ function RulesTab() {
                   ×
                 </button>
               </div>
+              {cond.semantics && <p style={{ fontSize: 12 }}>{cond.field === 'has_attachment' && `${t(cond.operator === 'is_not' ? 'nativeLabelRules.convertedIsNot' : 'nativeLabelRules.convertedIs')} ${t(cond.value === 'true' ? 'nativeLabelRules.convertedTrue' : 'nativeLabelRules.convertedFalse')}. `}{t('nativeLabelRules.exactCondition')}</p>}
               {cond.field === 'header' && (
                 <input
                   style={{ ...inputStyle, marginTop: 4, marginLeft: 0, fontSize: 12 }}
@@ -6479,6 +6552,7 @@ function RulesTab() {
           ))}
           <button
             onClick={addCondition}
+            disabled={fd.conditions.length >= 50}
             style={{ marginTop: 4, fontSize: 12, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
           >
             + {t('admin.rules.addCondition')}
@@ -6619,12 +6693,13 @@ function RulesTab() {
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             onClick={handleRunRules}
-            disabled={runningRules}
+            disabled={runningRules || reordering || loading || rulesRefreshFailed}
             style={{ padding: '7px 14px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 7, fontWeight: 600, fontSize: 13, cursor: runningRules ? 'not-allowed' : 'pointer', color: 'var(--text-primary)', opacity: runningRules ? 0.6 : 1 }}
           >
             {runningRules ? t('admin.rules.running') : t('admin.rules.runButton')}
           </button>
           <button
+            disabled={reordering}
             onClick={() => openAdd({})}
             style={{ padding: '7px 14px', background: 'var(--accent)', color: 'var(--accent-text)', border: 'none', borderRadius: 7, fontWeight: 600, fontSize: 13, cursor: 'pointer' }}
           >
@@ -6644,20 +6719,21 @@ function RulesTab() {
         </div>
       )}
       {ruleError && <div role="alert" style={{ fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>{ruleError}</div>}
+      {rulesRefreshFailed && <button type="button" onClick={() => setRulesReload(value => value + 1)}>{t('common.retry')}</button>}
       {runError && (
         <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>{runError}</div>
       )}
 
       {loading && <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>{t('common.loading')}</div>}
 
-      {!loading && rules.length === 0 && (
+      {!loading && !rulesRefreshFailed && rules.length === 0 && (
         <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>{t('admin.rules.empty')}</div>
       )}
 
       {rules.map((rule, idx) => {
         const isDragging = ruleDragIdx === idx;
         const isDropTarget = ruleDropIdx === idx && ruleDragIdx !== null && ruleDragIdx !== idx;
-        const canDrag = rules.length > 1;
+        const canDrag = rules.length > 1 && !reordering;
 
         return (
           <div
@@ -6692,6 +6768,7 @@ function RulesTab() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 13, color: 'var(--text-primary)', flex: 1 }}>{t('admin.rules.deleteConfirm')}</span>
                 <button
+                  disabled={reordering}
                   onClick={() => handleDelete(rule.id)}
                   style={{ padding: '5px 12px', background: 'var(--red)', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
                 >
@@ -6720,7 +6797,7 @@ function RulesTab() {
                   </span>
                 )}
                 <label style={{ display: 'flex', alignItems: 'center', gap: 0, cursor: 'pointer', marginTop: 2, flexShrink: 0 }}>
-                  <input type="checkbox" checked={rule.enabled} onChange={() => handleToggle(rule)} />
+                  <input type="checkbox" disabled={reordering} checked={rule.enabled} onChange={() => handleToggle(rule)} />
                 </label>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{rule.name || '(unnamed)'}</div>
@@ -6731,12 +6808,14 @@ function RulesTab() {
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                   <button
+                    disabled={reordering}
                     onClick={() => openEdit(rule)}
                     style={{ padding: '4px 10px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}
                   >
                     {t('admin.rules.editButton')}
                   </button>
                   <button
+                    disabled={reordering}
                     onClick={() => setConfirmDelete(rule.id)}
                     style={{ padding: '4px 10px', background: 'none', border: '1px solid var(--red)', borderRadius: 6, fontSize: 12, cursor: 'pointer', color: 'var(--red)' }}
                   >

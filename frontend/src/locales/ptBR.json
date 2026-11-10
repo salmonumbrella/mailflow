@@ -597,7 +597,14 @@
     "categoryCountTitle": "Mensagens: {{total}} · Não lidas: {{unread}}",
     "emptyCategory": "Nada em {{category}}",
     "emptyCategoryOthers": "As outras categorias ainda têm e-mails.",
-    "emptyCategoryNone": "A caixa de entrada está vazia."
+    "emptyCategoryNone": "A caixa de entrada está vazia.",
+    "preparedAction": {
+      "changedScope": "A seleção de mensagens mudou. Selecione as mensagens novamente e tente outra vez.",
+      "unresolvedScope": "Não foi possível carregar todas as mensagens da conversa. Tente novamente.",
+      "changedQueued": "A caixa de correio mudou antes do envio da ação. Nenhuma mensagem foi alterada. Atualize a visualização e tente novamente.",
+      "deleteCount": "Mensagens selecionadas: {{count}}.",
+      "permanentDeleteWarning": "As mensagens que já estão na Lixeira ou em Rascunhos serão excluídas permanentemente após o prazo para desfazer a ação. Não será possível recuperá-las depois que a exclusão for enviada ao servidor."
+    }
   },
   "lockScreen": {
     "subtitle": "Digite seu PIN para desbloquear",
@@ -2444,7 +2451,7 @@
       "show": "Mostrar",
       "title": "Marcadores do MailFlow",
       "scope": "Estes marcadores são salvos no MailFlow para esta conta. Eles são separados das pastas IMAP e não são sincronizados com o Google ou outros aplicativos de e-mail.",
-      "cacheScope": "Aplique marcadores a mensagens individuais verificadas. As listas e contagens de marcadores abrangem apenas e-mails sincronizados, excluindo Spam e Lixeira. Pesquisa, regras de filtro e atribuições durante a redação ainda não são compatíveis.",
+      "cacheScope": "Aplique marcadores a mensagens individuais verificadas e use-os na pesquisa e nas regras do MailFlow. As listas e contagens de marcadores abrangem apenas e-mails sincronizados, excluindo Spam e Lixeira. A atribuição durante a redação e a preservação de marcadores entre rascunhos e mensagens enviadas não são aceitas.",
       "pending": "Uma solicitação de marcadores está pendente de verificação. Outras alterações de marcadores estão pausadas.",
       "retryMutation": "Tentar novamente a solicitação de marcadores pendente",
       "create": "Criar marcador do MailFlow",
@@ -2598,10 +2605,28 @@
     "unverified": "As identidades para os marcadores não foram verificadas. Recarregue os marcadores antes de salvar.",
     "conflicting": "Uma regra não pode aplicar e remover o mesmo marcador.",
     "coverageCount": "Identidades não verificadas: {{unavailable}} de {{total}} mensagens em cache.",
-    "emptyPartial": "Nenhuma correspondência nos dados indexados disponíveis. Mensagens com identidades não verificadas para os marcadores ainda podem corresponder."
+    "emptyPartial": "Nenhuma correspondência nos dados indexados disponíveis. Mensagens com identidades não verificadas para os marcadores ainda podem corresponder.",
+    "condition": "Associação ao marcador do MailFlow",
+    "membership": "Condição de associação",
+    "has": "Tem o marcador",
+    "notHas": "Não tem o marcador",
+    "exactCondition": "Esta condição preserva exatamente o significado da pesquisa salva. Para alterá-la, remova-a e adicione uma nova condição manual, ou crie um novo filtro a partir da pesquisa.",
+    "previewMismatch": "A prévia não corresponde a esta conta ou pesquisa. Revise-a novamente antes de salvar.",
+    "reviewRequired": "Revise o filtro atual antes de salvar. A pesquisa, as ações, a conta ou os marcadores mudaram.",
+    "review": "Revisar filtro",
+    "reviewing": "Revisando…",
+    "preview": "Prévia exata do filtro",
+    "exactHelp": "Os filtros aceitam condições sem aninhamento ligadas por AND para marcadores, remetente, assunto, anexos e estado de leitura. Grupos, OR e termos não aceitos são rejeitados por completo. A execução em mensagens existentes abrange apenas as mensagens atuais em cache da Caixa de entrada que não foram excluídas e executa somente este filtro. Os marcadores nativos são locais ao MailFlow e não são sincronizados com os marcadores do provedor.",
+    "narrowsAccount": "Escolher uma conta restringe esta pesquisa unificada. O filtro será aplicado apenas às mensagens da Caixa de entrada da conta escolhida.",
+    "unknownHelp": "A identidade não verificada de uma mensagem é desconhecida, não um conjunto vazio de marcadores. Ela não pode atender a uma condição de ausência de marcador.",
+    "convertedIs": "É",
+    "convertedIsNot": "Não é",
+    "convertedTrue": "Sim",
+    "convertedFalse": "Não",
+    "runCounts": "Processadas: {{processed}} · Correspondentes: {{matched}} · Falhas: {{failed}} · Desconhecidas: {{unknown}} · Pendentes: {{pending}}",
+    "runRevisionMissing": "O filtro foi salvo, mas não foi possível verificar sua revisão. Revise o filtro salvo nas regras do MailFlow antes de aplicá-lo às mensagens existentes na Caixa de entrada."
   },
   "gmailSearch": {
-    "supportedSearchOperatorsWithSize": "O MailFlow oferece suporte a from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: e in:. Também são aceitos OR, AND, parênteses, grupos entre chaves, filename:, category: e newer_than:/older_than: (d, m, y). As categorias usam os nomes do MailFlow. size: e larger: significam estritamente maior que; smaller: significa estritamente menor que. label: pesquisa marcadores nativos do MailFlow. A importância não é indexada. Os nomes dos arquivos anexos e o texto das mensagens dependem do conteúdo sincronizado.",
-    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "As execuções em mensagens existentes abrangem apenas a caixa de entrada e não executam seus outros filtros. As ações com marcadores nativos do MailFlow são específicas de cada conta e não sincronizam os marcadores do provedor. O mecanismo de regras do MailFlow não oferece suporte a condições de marcadores, importância nem à opção de nunca marcar como spam. O encaminhamento pode ser configurado nas regras do MailFlow."
+    "supportedSearchOperatorsWithSize": "O MailFlow oferece suporte a from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: e in:. Também são aceitos OR, AND, parênteses, grupos entre chaves, filename:, category: e newer_than:/older_than: (d, m, y). As categorias usam os nomes do MailFlow. size: e larger: significam estritamente maior que; smaller: significa estritamente menor que. label: pesquisa marcadores nativos do MailFlow. A importância não é indexada. Os nomes dos arquivos anexos e o texto das mensagens dependem do conteúdo sincronizado."
   }
 }

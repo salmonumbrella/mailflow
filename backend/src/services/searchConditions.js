@@ -1,3 +1,5 @@
+import { buildSearchRuleLeafSql } from './searchLeafSql.js';
+export { buildSearchRuleLeafSql } from './searchLeafSql.js';
 import { nativeLabelCondition } from './nativeLabelSearch.js';
 import { parseSearchExpression, SearchQueryError } from './searchExpression.js';
 
@@ -26,6 +28,7 @@ export function freeTextTermCondition(likeIdx, ftsIdx) {
 
 const escapeLike = value => value.replace(/[\\%_]/g, '\\$&');
 const negate = sql => `NOT COALESCE((${sql}), false)`;
+
 const CATEGORIES = new Set(['primary', 'newsletter', 'promotion', 'automated', 'social']);
 const SIZE_KEYS = new Set(['size', 'larger', 'smaller']);
 const hasMetadata = (node, keys) => !!node && (node.type === 'filter' ? keys.has(node.key) : node.type === 'not' ? hasMetadata(node.child, keys) : !!node.children?.some(child => hasMetadata(child, keys)));
@@ -103,16 +106,13 @@ export function buildSearchConditions(raw, { folder = '', firstParam = 2, now = 
     if (SIZE_KEYS.has(key)) return `m.rfc822_size_bytes ${key === 'smaller' ? '<' : '>'} ${bind(parseSearchSize(value))}::bigint`;
     if (key === 'label') return nativeLabelCondition(nativeLabels?.byValue.get(value), bind);
     if (key === 'bcc') throw new SearchQueryError(`${key}: is not available in MailFlow’s search index.`);
-    if (key === 'from') { const p = bind(`%${escapeLike(value)}%`); return `(m.from_email ILIKE ${p} OR m.from_name ILIKE ${p})`; }
-    if (key === 'subject') return `m.subject ILIKE ${bind(`%${escapeLike(value)}%`)}`;
+    const sharedLeaf = buildSearchRuleLeafSql(key, value, bind);
+    if (sharedLeaf !== null) return sharedLeaf;
     if (key === 'to' || key === 'cc') {
       const p = bind(`%${escapeLike(value)}%`);
       return key === 'cc' ? `m.cc_addresses::text ILIKE ${p}` : `(m.to_addresses::text ILIKE ${p} OR m.cc_addresses::text ILIKE ${p})`;
     }
-    if (key === 'has' && ['attachment', 'attachments'].includes(value)) return 'm.has_attachments = true';
     if (key === 'is') {
-      if (value === 'read') return 'm.is_read = true';
-      if (value === 'unread') return 'm.is_read = false';
       if (value === 'starred') return 'm.is_starred = true';
     }
     if (['after', 'before', 'newer', 'older'].includes(key)) return `m.date ${['after', 'newer'].includes(key) ? '>=' : '<'} ${bind(searchDate(value))}`;

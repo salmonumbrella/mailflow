@@ -597,7 +597,14 @@
     "categoryCountTitle": "Messaggi: {{total}} · Da leggere: {{unread}}",
     "emptyCategory": "Niente in {{category}}",
     "emptyCategoryOthers": "Le altre categorie contengono ancora messaggi.",
-    "emptyCategoryNone": "La posta in arrivo è vuota."
+    "emptyCategoryNone": "La posta in arrivo è vuota.",
+    "preparedAction": {
+      "changedScope": "La selezione dei messaggi è cambiata. Seleziona di nuovo i messaggi e riprova.",
+      "unresolvedScope": "Non è stato possibile caricare tutti i messaggi della conversazione. Riprova.",
+      "changedQueued": "La casella di posta è cambiata prima dell’invio dell’azione. Nessun messaggio è stato modificato. Aggiorna la vista e riprova.",
+      "deleteCount": "Messaggi selezionati: {{count}}.",
+      "permanentDeleteWarning": "I messaggi già presenti nel Cestino o nelle Bozze verranno eliminati definitivamente al termine del periodo per annullare l’azione. Non sarà possibile recuperarli dopo l’invio dell’eliminazione al server."
+    }
   },
   "lockScreen": {
     "subtitle": "Inserisci il PIN per sbloccare",
@@ -2444,7 +2451,7 @@
       "show": "Mostra",
       "title": "Etichette MailFlow",
       "scope": "Queste etichette vengono salvate in MailFlow per questo account. Sono separate dalle cartelle IMAP e non vengono sincronizzate con Google o altre app di posta.",
-      "cacheScope": "Applica le etichette a singoli messaggi verificati. Gli elenchi e i conteggi delle etichette riguardano solo la posta sincronizzata, esclusi Spam e Cestino. La ricerca, le regole di filtro e l’assegnazione durante la composizione non sono ancora supportate.",
+      "cacheScope": "Assegna etichette ai singoli messaggi verificati e usale nelle ricerche e nelle regole di MailFlow. Gli elenchi e i conteggi delle etichette comprendono solo la posta sincronizzata, esclusi Spam e Cestino. Non sono supportate l’assegnazione durante la composizione e la conservazione delle etichette tra bozze e messaggi inviati.",
       "pending": "Una richiesta relativa alle etichette è in attesa di verifica. Le altre modifiche alle etichette sono sospese.",
       "retryMutation": "Riprova la richiesta di etichette in sospeso",
       "create": "Crea etichetta MailFlow",
@@ -2598,10 +2605,28 @@
     "unverified": "Le identità per le etichette non sono verificate. Ricarica le etichette prima di salvare.",
     "conflicting": "Una regola non può applicare e rimuovere la stessa etichetta.",
     "coverageCount": "Identità non verificate: {{unavailable}} su {{total}} messaggi nella cache.",
-    "emptyPartial": "Nessuna corrispondenza nei dati indicizzati disponibili. I messaggi con identità non verificate per le etichette potrebbero comunque corrispondere."
+    "emptyPartial": "Nessuna corrispondenza nei dati indicizzati disponibili. I messaggi con identità non verificate per le etichette potrebbero comunque corrispondere.",
+    "condition": "Assegnazione di etichette MailFlow",
+    "membership": "Condizione di assegnazione",
+    "has": "Ha l’etichetta",
+    "notHas": "Non ha l’etichetta",
+    "exactCondition": "Questa condizione conserva esattamente il significato della ricerca salvata. Per modificarla, rimuovila e aggiungi una nuova condizione manuale, oppure crea un nuovo filtro dalla ricerca.",
+    "previewMismatch": "L’anteprima non corrisponde a questo account o a questa ricerca. Controllala di nuovo prima di salvare.",
+    "reviewRequired": "Controlla il filtro attuale prima di salvare. La ricerca, le azioni, l’account o le etichette sono cambiati.",
+    "review": "Controlla filtro",
+    "reviewing": "Controllo…",
+    "preview": "Anteprima esatta del filtro",
+    "exactHelp": "I filtri supportano condizioni non annidate unite con AND per etichette, mittente, oggetto, allegati e stato di lettura. I gruppi, OR e i termini non supportati vengono rifiutati interamente. L’esecuzione sui messaggi esistenti riguarda solo i messaggi attuali nella cache della Posta in arrivo che non sono stati eliminati ed esegue solo questo filtro. Le etichette native sono locali a MailFlow e non si sincronizzano con quelle del provider.",
+    "narrowsAccount": "La scelta di un account restringe questa ricerca unificata. Il filtro si applicherà solo ai messaggi della Posta in arrivo dell’account scelto.",
+    "unknownHelp": "L’identità non verificata di un messaggio è sconosciuta, non un insieme vuoto di etichette. Non può soddisfare una condizione negativa su un’etichetta.",
+    "convertedIs": "È",
+    "convertedIsNot": "Non è",
+    "convertedTrue": "Sì",
+    "convertedFalse": "No",
+    "runCounts": "Elaborati: {{processed}} · Corrispondenze: {{matched}} · Non riusciti: {{failed}} · Sconosciuti: {{unknown}} · In attesa: {{pending}}",
+    "runRevisionMissing": "Il filtro è stato salvato, ma non è stato possibile verificarne la revisione. Controlla il filtro salvato nelle regole di MailFlow prima di applicarlo ai messaggi esistenti nella Posta in arrivo."
   },
   "gmailSearch": {
-    "supportedSearchOperatorsWithSize": "MailFlow supporta from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: e in:. Sono supportati OR, AND, parentesi, gruppi tra parentesi graffe, filename:, category: e newer_than:/older_than: (d, m, y). Le categorie usano i nomi di MailFlow. size: e larger: significano strettamente maggiore di; smaller: significa strettamente minore di. label: cerca le etichette native di MailFlow. L’importanza non è indicizzata. I nomi dei file allegati e il testo dei messaggi dipendono dal contenuto sincronizzato.",
-    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Le esecuzioni sui messaggi esistenti riguardano solo la posta in arrivo e non eseguono gli altri filtri. Le azioni sulle etichette native di MailFlow sono specifiche per account e non sincronizzano le etichette del provider. Il motore di regole di MailFlow non supporta le condizioni sulle etichette, l’importanza e l’opzione di non contrassegnare mai come spam. L’inoltro può essere configurato nelle regole di MailFlow."
+    "supportedSearchOperatorsWithSize": "MailFlow supporta from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: e in:. Sono supportati OR, AND, parentesi, gruppi tra parentesi graffe, filename:, category: e newer_than:/older_than: (d, m, y). Le categorie usano i nomi di MailFlow. size: e larger: significano strettamente maggiore di; smaller: significa strettamente minore di. label: cerca le etichette native di MailFlow. L’importanza non è indicizzata. I nomi dei file allegati e il testo dei messaggi dipendono dal contenuto sincronizzato."
   }
 }

@@ -81,7 +81,9 @@ export function searchFieldsToQuery(fields, t = defaultTranslate) {
   return tokens.join(' ');
 }
 
-// Never silently broaden a saved rule by throwing away unsupported criteria.
+// Legacy client draft preview only. Never persist these conditions: GmailSearch
+// uses the authoritative raw-query server conversion, including exact text/NULL
+// semantics. This conservative helper is not proof of equivalence.
 // MailFlow's rule matcher searches To but search also includes Cc, so that operator
 // cannot safely be converted until the engine has the same recipient semantics.
 export function searchQueryToRule(query) {

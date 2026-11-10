@@ -483,7 +483,14 @@
     "categoryCountTitle": "Zprávy: {{total}} · Nepřečtené: {{unread}}",
     "emptyCategory": "V kategorii {{category}} nic není",
     "emptyCategoryOthers": "V ostatních kategoriích pošta je.",
-    "emptyCategoryNone": "Doručená pošta je prázdná."
+    "emptyCategoryNone": "Doručená pošta je prázdná.",
+    "preparedAction": {
+      "changedScope": "Výběr zpráv se změnil. Vyberte zprávy znovu a akci opakujte.",
+      "unresolvedScope": "Nepodařilo se načíst všechny zprávy konverzace. Zkuste to znovu.",
+      "changedQueued": "Poštovní schránka se změnila před odesláním akce. Žádné zprávy nebyly změněny. Obnovte zobrazení a zkuste to znovu.",
+      "deleteCount": "Počet vybraných zpráv: {{count}}.",
+      "permanentDeleteWarning": "Zprávy, které už jsou v Koši nebo Konceptech, budou po uplynutí lhůty pro vrácení akce trvale smazány. Po odeslání požadavku na smazání na server je nelze obnovit."
+    }
   },
   "message": {
     "find": {
@@ -2463,7 +2470,7 @@
       "show": "Zobrazit",
       "title": "Štítky MailFlow",
       "scope": "Tyto štítky jsou pro tento účet uloženy v MailFlow. Jsou oddělené od složek IMAP a nesynchronizují se s Googlem ani jinými poštovními aplikacemi.",
-      "cacheScope": "Štítky přiřazujte jednotlivým ověřeným zprávám. Seznamy a počty štítků zahrnují pouze synchronizovanou poštu bez spamu a koše. Vyhledávání, pravidla filtrů a přiřazování při psaní zpráv zatím nejsou podporovány.",
+      "cacheScope": "Štítky přiřazujte jednotlivým ověřeným zprávám a používejte je ve vyhledávání a pravidlech MailFlow. Seznamy a počty štítků zahrnují pouze synchronizovanou poštu bez spamu a koše. Přiřazování při psaní zpráv a zachování štítků mezi koncepty a odeslanými zprávami nejsou podporovány.",
       "pending": "Požadavek na změnu štítků čeká na ověření. Ostatní změny štítků jsou pozastaveny.",
       "retryMutation": "Zopakovat čekající požadavek na změnu štítků",
       "create": "Vytvořit štítek MailFlow",
@@ -2617,10 +2624,28 @@
     "unverified": "Identity pro štítky nejsou ověřeny. Před uložením znovu načtěte štítky.",
     "conflicting": "Pravidlo nemůže současně přiřadit a odebrat stejný štítek.",
     "coverageCount": "Neověřené identity: {{unavailable}} z {{total}} zpráv v mezipaměti.",
-    "emptyPartial": "V dostupných indexovaných datech nejsou žádné shody. Zprávy s neověřenými identitami pro štítky přesto mohou odpovídat."
+    "emptyPartial": "V dostupných indexovaných datech nejsou žádné shody. Zprávy s neověřenými identitami pro štítky přesto mohou odpovídat.",
+    "condition": "Přiřazení ke štítku MailFlow",
+    "membership": "Podmínka přiřazení ke štítku",
+    "has": "Má štítek",
+    "notHas": "Nemá štítek",
+    "exactCondition": "Tato podmínka přesně zachovává význam uloženého vyhledávání. Chcete-li ji změnit, odeberte ji a přidejte novou ruční podmínku, nebo vytvořte nový filtr z vyhledávání.",
+    "previewMismatch": "Náhled neodpovídá tomuto účtu nebo vyhledávání. Před uložením jej znovu zkontrolujte.",
+    "reviewRequired": "Před uložením zkontrolujte aktuální filtr. Vyhledávání, akce, účet nebo štítky se změnily.",
+    "review": "Zkontrolovat filtr",
+    "reviewing": "Kontrola…",
+    "preview": "Přesný náhled filtru",
+    "exactHelp": "Filtry podporují nevnořené podmínky spojené pomocí AND pro štítky, odesílatele, předmět, přílohy a stav přečtení. Skupiny, OR a nepodporované výrazy se odmítají jako celek. Spuštění na existujících zprávách zahrnuje pouze aktuální nesmazané zprávy v mezipaměti ve složce Doručená pošta a pouze tento filtr. Vlastní štítky jsou místní pro MailFlow a nesynchronizují se se štítky poskytovatele.",
+    "narrowsAccount": "Výběr jednoho účtu zúží toto sjednocené vyhledávání. Filtr se použije pouze na zprávy ve složce Doručená pošta vybraného účtu.",
+    "unknownHelp": "Neověřená identita zprávy je neznámá, nikoli prázdná sada štítků. Nemůže splnit zápornou podmínku štítku.",
+    "convertedIs": "Je",
+    "convertedIsNot": "Není",
+    "convertedTrue": "Ano",
+    "convertedFalse": "Ne",
+    "runCounts": "Zpracováno: {{processed}} · Shody: {{matched}} · Selhání: {{failed}} · Neznámé: {{unknown}} · Čekající: {{pending}}",
+    "runRevisionMissing": "Filtr byl uložen, ale jeho revizi se nepodařilo ověřit. Než jej použijete na existující zprávy ve složce Doručená pošta, zkontrolujte uložený filtr v pravidlech MailFlow."
   },
   "gmailSearch": {
-    "supportedSearchOperatorsWithSize": "MailFlow podporuje from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: a in:. Podporovány jsou také OR, AND, závorky, skupiny ve složených závorkách, filename:, category: a newer_than:/older_than: (d, m, y). Kategorie používají názvy z MailFlow. size: a larger: znamenají ostře větší než; smaller: znamená ostře menší než. label: vyhledává vlastní štítky MailFlow. Důležitost se neindexuje. Názvy souborů příloh a text zpráv závisí na synchronizovaném obsahu.",
-    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Spuštění na existujících zprávách zahrnuje pouze doručenou poštu a nespouští ostatní filtry. Akce s vlastními štítky MailFlow jsou vázané na konkrétní účet a nesynchronizují štítky poskytovatele. Podmínky podle štítků, důležitost a volbu nikdy neoznačovat jako spam pravidla MailFlow nepodporují. Přeposílání lze nastavit v pravidlech MailFlow."
+    "supportedSearchOperatorsWithSize": "MailFlow podporuje from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: a in:. Podporovány jsou také OR, AND, závorky, skupiny ve složených závorkách, filename:, category: a newer_than:/older_than: (d, m, y). Kategorie používají názvy z MailFlow. size: a larger: znamenají ostře větší než; smaller: znamená ostře menší než. label: vyhledává vlastní štítky MailFlow. Důležitost se neindexuje. Názvy souborů příloh a text zpráv závisí na synchronizovaném obsahu."
   }
 }

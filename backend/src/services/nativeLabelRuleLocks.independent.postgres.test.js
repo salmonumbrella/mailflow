@@ -22,7 +22,7 @@ import { createDefinition, deleteDefinition, previewDeletion } from './nativeLab
 import { saveNativeLabelRule } from './nativeLabelRulePersistence.js';
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const settle = promise => promise.then(result => ({ result }), error => ({ error }));
-describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('independent native rule activation/deletion PostgreSQL lock order', () => {
+describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL).each(['action','has','not_has'])('independent native %s rule activation/deletion PostgreSQL lock order', kind => {
   const name = `mailflow_rule_lock_review_${randomBytes(5).toString('hex')}`;
   let admin, user, account, label, saved, body;
   beforeAll(async () => {
@@ -39,6 +39,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('independent native rul
     account = (await h.pool.query("INSERT INTO email_accounts(user_id,name,email_address) VALUES ($1,'Review','review@example.test') RETURNING *", [user])).rows[0];
     label = (await createDefinition(user, { accountId: account.id, mutationId: randomUUID(), name: 'Protected' })).result.label;
     body = { accountId: account.id, expectedStorageGeneration: account.storage_generation, enabled: false, conditionLogic: 'AND', conditions: [{ field: 'subject', operator: 'contains', value: 'invoice' }], actions: [{ type: 'apply_native_label', value: label.id }] };
+    if (kind !== 'action') { body.conditions = [{field:'native_label',operator:kind,value:label.id}]; body.actions = [{type:'star'}]; }
     saved = await saveNativeLabelRule(user, null, body);
   });
   async function race(firstAction, secondAction) {
@@ -59,7 +60,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('independent native rul
     expect(waiting, 'second real transaction waited behind the account lock').toBe(true);
     return results;
   }
-  const enable = () => saveNativeLabelRule(user, saved.id, { ...body, enabled: true });
+  const enable = () => saveNativeLabelRule(user, saved.id, { ...body, expectedRuleRevision: saved.rule_revision, enabled: true });
   const deletion = async () => {
     const preview = await previewDeletion(user, label.id, { accountId: account.id });
     return () => deleteDefinition(user, label.id, { accountId: account.id, expectedTreeRevision: preview.treeRevision, mutationId: randomUUID(), confirmSubtree: true });
@@ -68,8 +69,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('independent native rul
     const remove = await deletion();
     const [deleted, enabled] = await race(remove, enable);
     expect(deleted.error).toBeUndefined(); expect(enabled.error).toMatchObject({ code: 'missing_label_reference' });
-    const current = (await h.pool.query('SELECT enabled,actions FROM inbox_rules WHERE id=$1', [saved.id])).rows[0];
-    expect(current.enabled).toBe(false); expect(current.actions[0].value).toBe(label.id);
+    const current = (await h.pool.query('SELECT enabled,actions,conditions FROM inbox_rules WHERE id=$1', [saved.id])).rows[0];
+    expect(current.enabled).toBe(false); expect((kind==='action'?current.actions:current.conditions)[0].value).toBe(label.id);
     expect((await h.pool.query('SELECT id FROM mail_labels WHERE id=$1', [label.id])).rows).toHaveLength(0);
   });
   it('enable winning the account lock blocks queued deletion, including a valid earlier deletion preview', async () => {

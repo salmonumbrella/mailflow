@@ -2,10 +2,11 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { useNativeLabels } from '../hooks/useNativeLabels.js';
 import NativeRuleLabelSelect from './NativeRuleLabelSelect.jsx';
-import { nativeRuleActionError } from '../utils/ruleActions.js';
+import { exactRuleConditionSummary, nativeRuleActionError } from '../utils/ruleActions.js';
 import { GMAIL_SENDER_FILTER_EVENT, gmailSenderFilterDetails } from '../utils/gmailSenderFilter.js';
-import { quoteSearch, refineSearchQuery, hasSearchRefinement, rememberSearch, searchFieldsToQuery, searchQueryToFields, searchQueryToRule } from '../utils/gmailSearch.js';
+import { quoteSearch, refineSearchQuery, hasSearchRefinement, rememberSearch, searchFieldsToQuery, searchQueryToFields } from '../utils/gmailSearch.js';
 
 function SearchAddressInput({ value, onChange, inputRef, ...props }) {
   const id = useId();
@@ -33,6 +34,7 @@ export default function GmailSearch({ query, onChange, inputRef }) {
   const id = useId();
   const userId = useStore(s => s.user?.id);
   const accountId = useStore(s => s.selectedAccountId);
+  const selectedFolder = useStore(s => s.selectedFolder);
   const folders = useStore(s => s.folders);
   const accounts = useStore(s => s.accounts);
   const historyKey = `mailflow:gmail-search-history:${userId || 'anonymous'}`;
@@ -51,8 +53,13 @@ export default function GmailSearch({ query, onChange, inputRef }) {
   const [filterGeneration, setFilterGeneration] = useState(null);
   const [applyExisting, setApplyExisting] = useState(false);
   const [savedRuleId, setSavedRuleId] = useState(null);
+  const [savedRuleRevision, setSavedRuleRevision] = useState(null);
   const [filterScope, setFilterScope] = useState({ accounts: [], scopeAccountId: null });
   const [filterAccountId, setFilterAccountId] = useState('');
+  const { snapshot: filterLabels } = useNativeLabels(open === 'filter' ? filterAccountId : null);
+  const [preview, setPreview] = useState(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const previewSequence = useRef(0);
   const [run, setRun] = useState(null);
   const runAttempt = useRef(null);
   const runStorageKey = `mailflow:filter-run:${userId || 'anonymous'}`;
@@ -82,6 +89,28 @@ export default function GmailSearch({ query, onChange, inputRef }) {
   };
   const [actions, setActions] = useState({ archive: false, mark_read: false, star: false, delete: false, category: '', move: '', apply_native_label: '', remove_native_label: '' });
   const [name, setName] = useState('');
+  const previewKey = JSON.stringify([filterQuery, filterAccountId, filterGeneration, filterLabels?.treeRevision, actions, filterScope, accountId, selectedFolder, query, accounts, userId]);
+  const livePreviewKey = useRef(previewKey);
+  livePreviewKey.current = previewKey;
+  const reviewed = preview?.key === previewKey;
+  useEffect(() => { previewSequence.current++; setPreview(null); setPreviewBusy(false); }, [previewKey, open]);
+  const reviewFilter = async () => {
+    if (filterAccountId && useStore.getState().accounts.find(account => account.id === filterAccountId)?.storage_generation !== filterGeneration) { setNotice(t('nativeLabelRules.accountChanged')); return; }
+    if (!filterAccountId || !filterLabels || filterLabels.storageGeneration !== filterGeneration) { setNotice(t('nativeLabelRules.unverified')); return; }
+    const sequence = ++previewSequence.current;
+    const key = previewKey;
+    const sourceSearch = { query: filterQuery, accountId: filterAccountId, expectedStorageGeneration: filterGeneration, expectedTreeRevision: filterLabels.treeRevision };
+    const displayedScope = { accountId: filterScope.scopeAccountId, folder: filterScope.folder };
+    setPreview(null); setPreviewBusy(true); setNotice('');
+    try {
+      const result = await api.previewSearchRule({ sourceSearch, displayedScope });
+      if (sequence !== previewSequence.current || key !== livePreviewKey.current) return;
+      if (result.accountId !== filterAccountId || result.expectedStorageGeneration !== filterGeneration || !Array.isArray(result.conditions) || !result.conditions.length || result.conditions.length > 50 || result.conditionLogic !== 'AND'
+        || !result.sourceSearch || Object.keys(sourceSearch).some(key => result.sourceSearch[key] !== sourceSearch[key])) throw new Error(t('nativeLabelRules.previewMismatch'));
+      setPreview({ key, result, sourceSearch, displayedScope });
+    } catch (error) { if (sequence === previewSequence.current && key === livePreviewKey.current) setNotice(error.message); }
+    finally { if (sequence === previewSequence.current) setPreviewBusy(false); }
+  };
   const suggestions = [
     ...history.filter(item => !query || item.toLowerCase().includes(query.toLowerCase())).map(value => ({ value, history: true })),
     ...contacts.map(contact => ({ value: `${query.toLowerCase().startsWith('to:') ? 'to' : 'from'}:${quoteSearch(contact.email || contact.address)}`, label: contact.name ? `${contact.name} <${contact.email || contact.address}>` : contact.email || contact.address })),
@@ -136,16 +165,15 @@ export default function GmailSearch({ query, onChange, inputRef }) {
     const value = builtQuery();
     if (!value) return;
     try {
-      searchQueryToRule(value);
       const scopeAccountId = senderScope?.accountId || accountId || null;
       const displayed = accounts.filter(account => account.enabled !== false && (scopeAccountId ? account.id === scopeAccountId : account.include_in_unified_inbox !== false));
       if ((senderScope && senderScope.userId !== userId) || (scopeAccountId && !displayed.length)) throw new Error('The filter account is no longer available in this scope.');
-      setFilterScope({ accounts: displayed, scopeAccountId, userId });
+      setFilterScope({ accounts: displayed, scopeAccountId, userId, folder: senderScope ? 'INBOX' : (useStore.getState().selectedFolder || '') });
       setFilterAccountId(scopeAccountId || (displayed.length === 1 ? displayed[0].id : ''));
       setFilterGeneration(displayed.find(account => account.id === (scopeAccountId || (displayed.length === 1 ? displayed[0].id : '')))?.storage_generation || null);
       setSaveUncertain(false);
       runAttempt.current = null;
-      setFilterQuery(value); setName(value); setApplyExisting(false); setSavedRuleId(null); setActions({ archive: false, mark_read: false, star: false, delete: false, category: '', move: '', apply_native_label: '', remove_native_label: '' }); setNotice(''); setOpen('filter'); }
+      setFilterQuery(value); setName(value); setApplyExisting(false); setSavedRuleId(null); setSavedRuleRevision(null); setActions({ archive: false, mark_read: false, star: false, delete: false, category: '', move: '', apply_native_label: '', remove_native_label: '' }); setNotice(''); setOpen('filter'); }
     catch (error) { setNotice(error.message); }
   };
   const saveFilter = async event => {
@@ -166,25 +194,29 @@ export default function GmailSearch({ query, onChange, inputRef }) {
       || (filterScope.scopeAccountId ? filterScope.scopeAccountId !== filterAccountId : liveAccount.include_in_unified_inbox === false)) {
       setNotice('The filter account is no longer available in this scope.'); return;
     }
-    const nativeError = nativeRuleActionError({ actions: selected, accountId: filterAccountId, expectedStorageGeneration: filterGeneration, accounts: current.accounts, snapshots: current.nativeLabelSnapshots });
+    if (!savedRuleId && !reviewed) { setNotice(t('nativeLabelRules.reviewRequired')); return; }
+    const nativeError = nativeRuleActionError({ actions: selected, conditions: preview?.result.conditions || [], accountId: filterAccountId, expectedStorageGeneration: filterGeneration, accounts: current.accounts, snapshots: current.nativeLabelSnapshots });
     if (nativeError) { setNotice(t(nativeError)); return; }
     if (!selected.length) { setNotice('Select at least one filter action.'); return; }
     saving.current = true; setBusy(true); setNotice('');
     try {
       let ruleId = savedRuleId;
+      let ruleRevision = savedRuleRevision;
       if (!ruleId) {
-        const rule = await api.createRule({ name: name.trim() || filterQuery, accountId: filterAccountId, expectedStorageGeneration: filterGeneration, searchScope: { accountIds: [filterAccountId], scopeAccountId: filterScope.scopeAccountId }, conditionLogic: 'AND', conditions: searchQueryToRule(filterQuery), actions: selected, enabled: true, stopProcessing: false });
+        const rule = await api.createRule({ name: name.trim() || filterQuery, accountId: filterAccountId, expectedStorageGeneration: filterGeneration, sourceSearch: preview.sourceSearch, displayedScope: preview.displayedScope, searchScope: { accountIds: [filterAccountId], scopeAccountId: filterScope.scopeAccountId }, actions: selected, enabled: true, stopProcessing: false });
         ruleId = rule.id;
-        setSavedRuleId(ruleId);
+        ruleRevision = rule.rule_revision;
+        setSavedRuleId(ruleId); setSavedRuleRevision(ruleRevision);
       }
       if (applyExisting) {
+        if (!ruleRevision) { setNotice(t('nativeLabelRules.runRevisionMissing')); return; }
         const bytes = crypto.getRandomValues(new Uint8Array(16));
         bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
         const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
         const runId = runAttempt.current || `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
         runAttempt.current = runId;
         try {
-          const status = await api.runRule(ruleId, { accountIds: [filterAccountId], scopeAccountId: filterScope.scopeAccountId, runId });
+          const status = await api.runRule(ruleId, { accountIds: [filterAccountId], scopeAccountId: filterScope.scopeAccountId, expectedRuleRevision: ruleRevision, runId });
           rememberRun(status);
         } catch (error) {
           if (error.status >= 400 && error.status < 500 && error.status !== 408) {
@@ -199,6 +231,7 @@ export default function GmailSearch({ query, onChange, inputRef }) {
       useStore.getState().addNotification({ title: 'Filter saved', body: applyExisting ? 'It will apply to new mail. The existing Inbox run has started; its result will appear when finished.' : 'It will apply to new incoming mail.' });
       close();
     } catch (error) {
+      setPreview(null);
       const uncertain = !savedRuleId && !(error.status >= 400 && error.status < 500 && error.status !== 408);
       if (uncertain) setSaveUncertain(true);
       setNotice(uncertain ? `${error.message || ''} ${t('nativeLabelRules.saveUncertain', { defaultValue: 'The save result is unknown. Check saved filters before creating another; no save or run was restarted.' })}` : error.message);
@@ -227,6 +260,7 @@ export default function GmailSearch({ query, onChange, inputRef }) {
     <button type="button" className="gmail-search-options" aria-label={t("gmailSearch.advancedSearchOptions", { defaultValue: "Advanced search options" })} aria-expanded={open === 'advanced'} onClick={open === 'advanced' ? close : advanced}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="8" cy="6" r="2" fill="var(--bg-secondary)"/><circle cx="16" cy="12" r="2" fill="var(--bg-secondary)"/><circle cx="9" cy="18" r="2" fill="var(--bg-secondary)"/></svg></button>
     {run && !open && <div className="gmail-filter-run-status" role="status">
       <span>{run.status === 'running' ? 'Applying filter to existing Inbox messages…' : run.status === 'cancelling' ? 'Stopping after the current action…' : run.status === 'cancelled' ? 'Filter run stopped. Completed actions were not undone.' : run.status === 'completed' ? `Filter run finished: ${run.matched || 0} matched.` : run.status === 'pending_recovery' ? `Filter run ended with mailbox recovery pending: ${run.pendingCount || 1} messages. Some actions may already have completed. Do not rerun it until recovery is resolved.` : run.status === 'failed' ? 'Filter run had errors. Some actions may have completed.' : 'Filter run status is unavailable. No run was restarted.'}</span>
+      <span>{t('nativeLabelRules.runCounts', { processed: run.processed ?? 0, matched: run.matched ?? 0, failed: run.failed ?? 0, unknown: run.unknown ?? 0, pending: run.pendingCount ?? 0 })}</span>
       {run.identityPending && run.status !== 'pending_recovery' && <span>Mailbox recovery is still pending for {run.pendingCount || 1} messages. Do not rerun completed actions.</span>}
       {['running', 'cancelling', 'unknown'].includes(run.status) && <button type="button" disabled={run.status === 'cancelling'} onClick={stopRun}>{t("gmailSearch.stopRun", { defaultValue: "Stop run" })}</button>}
       <button type="button" onClick={() => checkRun(run)}>{t("gmailSearch.checkStatus", { defaultValue: "Check status" })}</button>
@@ -267,15 +301,27 @@ export default function GmailSearch({ query, onChange, inputRef }) {
       {[['archive', 'Skip the Inbox (Archive it)'], ['mark_read', 'Mark as read'], ['star', 'Star it'], ['delete', 'Delete it']].map(([key, label]) => <label className="gmail-search-check" key={key}><input type="checkbox" checked={actions[key]} onChange={event => setActions(current => ({ ...current, [key]: event.target.checked, ...(event.target.checked && ['archive', 'delete'].includes(key) ? { [key === 'archive' ? 'delete' : 'archive']: false, move: '' } : {}) }))}/>{label}</label>)}
       <label>{t("gmailSearch.moveToFolder", { defaultValue: "Move to folder" })}<select aria-label={t("gmailSearch.filterDestination", { defaultValue: "Filter destination" })} disabled={!filterAccountId} value={actions.move} onChange={event => setActions(current => ({ ...current, move: event.target.value, archive: false, delete: false }))}><option value="">{t("gmailSearch.chooseFolder", { defaultValue: "Choose folder…" })}</option>{(folders[filterAccountId] || []).filter(folder => !folder.no_select).map(folder => <option key={folder.path} value={folder.path}>{folder.path}</option>)}</select></label>
       {!filterAccountId && <p className="gmail-search-note">{t("gmailSearch.selectAnAccountToMoveIncomingMailToAFolder", { defaultValue: "Select an account to move incoming mail to a folder." })}</p>}
-      {['apply_native_label', 'remove_native_label'].map(type => <label key={type}><span>{type === 'apply_native_label' ? t('nativeLabelRules.apply', { defaultValue: 'Apply MailFlow label' }) : t('nativeLabelRules.remove', { defaultValue: 'Remove MailFlow label' })}</span><NativeRuleLabelSelect accountId={filterAccountId} value={actions[type]} label={type === 'apply_native_label' ? t('nativeLabelRules.apply', { defaultValue: 'Apply MailFlow label' }) : t('nativeLabelRules.remove', { defaultValue: 'Remove MailFlow label' })} onChange={value => setActions(current => ({ ...current, [type]: value }))} /></label>)}
+      {['apply_native_label', 'remove_native_label'].map(type => <label key={type}><span>{type === 'apply_native_label' ? t('nativeLabelRules.apply', { defaultValue: 'Apply MailFlow label' }) : t('nativeLabelRules.remove', { defaultValue: 'Remove MailFlow label' })}</span><NativeRuleLabelSelect expectedStorageGeneration={filterGeneration} accountId={filterAccountId} value={actions[type]} label={type === 'apply_native_label' ? t('nativeLabelRules.apply', { defaultValue: 'Apply MailFlow label' }) : t('nativeLabelRules.remove', { defaultValue: 'Remove MailFlow label' })} onChange={value => setActions(current => ({ ...current, [type]: value }))} /></label>)}
       <label>{t("gmailSearch.categorizeAs", { defaultValue: "Categorize as" })}<select aria-label={t("gmailSearch.filterCategory", { defaultValue: "Filter category" })} value={actions.category} onChange={event => setActions(current => ({ ...current, category: event.target.value }))}><option value="">{t("gmailSearch.chooseCategory", { defaultValue: "Choose category…" })}</option>{['primary', 'newsletter', 'promotion', 'automated', 'social'].map(category => <option key={category} value={category}>{category}</option>)}</select></label>
       <label className="gmail-search-check"><input type="checkbox" checked={applyExisting} onChange={event => setApplyExisting(event.target.checked)}/>{t("gmailSearch.alsoApplyOnlyThisFilterToExistingMatchingInboxMessages", { defaultValue: "Also apply only this filter to existing matching Inbox messages" })}</label>
       </fieldset>
       <button type="button" disabled={busy} onClick={() => { close(); useStore.getState().setAdminTab('rules'); useStore.getState().setShowAdmin(true); }}>{t("gmailSearch.manageSavedFiltersInMailFlowRules", { defaultValue: "Manage saved filters in MailFlow Rules" })}</button>
-      <p className="gmail-search-note">{t("gmailSearch.existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules", { defaultValue: "Existing-message runs cover the Inbox only and do not run your other filters. Native MailFlow label actions are account-specific and do not sync provider labels. Label conditions, importance and never-spam are not supported by MailFlow’s rules engine. Forwarding can be configured in MailFlow Rules." })}</p>
+      <p className="gmail-search-note">{t('nativeLabelRules.exactHelp')}</p>
+      {!filterScope.scopeAccountId && <p role="note">{t('nativeLabelRules.narrowsAccount')}</p>}
+      {!savedRuleId && <button type="button" disabled={busy || previewBusy || saveUncertain || !filterAccountId} onClick={reviewFilter}>{t(previewBusy ? 'nativeLabelRules.reviewing' : 'nativeLabelRules.review')}</button>}
+      {reviewed && <section aria-label={t('nativeLabelRules.preview')}>
+        <p>{t('nativeLabelRules.unknownHelp')}</p>
+        <ul>{preview.result.conditions.map((condition, index) => {
+          const reference = preview.result.resolvedReferences?.find(ref => ref.id === condition.value || ref.labelId === condition.value);
+          const account = filterScope.accounts.find(item => item.id === filterAccountId);
+          return <li key={index}>{condition.field === 'native_label'
+            ? `${t(condition.operator === 'not_has' ? 'nativeLabelRules.notHas' : 'nativeLabelRules.has')} ${account?.email_address || account?.name || filterAccountId} · ${reference?.path || filterLabels?.labels.find(item => item.id === condition.value)?.path || condition.value}`
+            : exactRuleConditionSummary(condition, t)}</li>;
+        })}</ul>
+      </section>}
       {notice && <p role="alert">{notice}</p>}
       {run && run.runId === runAttempt.current && <div className="gmail-search-actions"><button type="button" onClick={() => checkRun(run)}>{t("gmailSearch.checkRunStatus", { defaultValue: "Check run status" })}</button>{['running', 'cancelling', 'unknown'].includes(run.status) && <button type="button" disabled={run.status === 'cancelling'} onClick={stopRun}>{t("gmailSearch.stopRun", { defaultValue: "Stop run" })}</button>}</div>}
-      <div className="gmail-search-actions"><button type="button" disabled={busy} onClick={close}>{t("gmailSearch.cancel", { defaultValue: "Cancel" })}</button><button type="submit" className="gmail-search-primary" disabled={busy || saveUncertain || (!!runAttempt.current && run?.runId === runAttempt.current)}>{busy ? 'Saving…' : savedRuleId ? 'Retry applying filter' : 'Create filter'}</button></div>
+      <div className="gmail-search-actions"><button type="button" disabled={busy} onClick={close}>{t("gmailSearch.cancel", { defaultValue: "Cancel" })}</button><button type="submit" className="gmail-search-primary" disabled={busy || saveUncertain || (!savedRuleId && !reviewed) || (!!runAttempt.current && run?.runId === runAttempt.current)}>{busy ? 'Saving…' : savedRuleId ? 'Retry applying filter' : 'Create filter'}</button></div>
     </form>}
   </div>;
 }

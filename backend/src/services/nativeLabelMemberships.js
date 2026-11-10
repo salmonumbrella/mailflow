@@ -96,28 +96,30 @@ export async function mutateMemberships(userId, raw) {
 }
 
 // HTTP and internal rule decisions use one membership writer and one durable journal.
-async function applyMembershipMutation(userId, input, hash, verify = null) {
+async function applyMembershipMutation(userId, input, hash, verify = null, decision = null, prepare = null) {
   return withTransaction(async client => {
     const account = await lockOwnedAccount(client, userId, input);
     const replay = await replayMutation(client, input, hash);
     if (replay) return replay;
     currentGeneration(account, input);
-    if (verify) await verify(client);
+    if (prepare) await prepare(client);
     const labelIds = [...input.addLabelIds, ...input.removeLabelIds];
-    await lockLabels(client, input, labelIds);
     const resolved = await resolveTargets(client, input, true);
     const entityIds = [...resolved.unique.keys()];
     const before = await resultFor(client, input, resolved);
+    const verified = verify ? await verify(client, { resolved, before }) : null;
+    await lockLabels(client, input, labelIds);
     await advanceVersions(client, input, resolved);
     await client.query(`DELETE FROM native_label_memberships WHERE account_id=$1 AND storage_generation=$2
       AND entity_id=ANY($3::uuid[]) AND label_id=ANY($4::uuid[])`, [input.accountId, input.storageGeneration, entityIds, input.removeLabelIds]);
     await client.query(`INSERT INTO native_label_memberships(account_id,storage_generation,entity_id,label_id)
       SELECT $1,$2,e,l FROM unnest($3::uuid[]) e CROSS JOIN unnest($4::uuid[]) l ON CONFLICT DO NOTHING`,
     [input.accountId, input.storageGeneration, entityIds, input.addLabelIds]);
-    const result = { ...await resultFor(client, input, resolved), mutationId: input.mutationId, undoSupported: true };
+    const result = { ...await resultFor(client, input, resolved), mutationId: input.mutationId, undoSupported: !decision?.empty };
+    if (decision) result.receipt = decision.receipt({ verified, before, result });
     const undoState = { labelIds, targets: before.targets.map(target => ({ ...target,
       metadataVersion: resolved.unique.get(target.entityId).metadata_version })) };
-    await recordMutation(client, input, hash, result, undoState);
+    await recordMutation(client, input, hash, result, decision?.empty ? null : undoState, decision?.empty ? 'rule_decision' : 'apply');
     return { result, changed: true };
   });
 }
@@ -164,7 +166,9 @@ export async function captureRuleMembershipSourceInTransaction(client, userId, r
   source.canonicalEntityId = await verifySource(client, input, source);
   const resolved = await resolveTargets(client, { ...input, targets: [{ entityId: source.entity_id }] }, false);
   const result = (await resultFor(client, input, resolved)).targets[0];
-  return { source, expectedMetadataVersion: result.metadataVersion, labelIds: result.labelIds };
+  if (!result.available) fail(409, 'identity_unavailable', 'A complete current identity is required');
+  const { rows: [rawFields] } = await client.query('SELECT from_email,from_name,subject,is_read,has_attachments FROM messages WHERE id=$1', [source.id]);
+  return { source, expectedMetadataVersion: result.metadataVersion, labelIds: result.labelIds, availability: 'known', rawFields };
 }
 export async function captureRuleMembershipSource(userId, raw) {
   return withTransaction(client => captureRuleMembershipSourceInTransaction(client, userId, raw));
@@ -182,10 +186,9 @@ export async function mutateRuleMemberships(userId, raw, { verifyRule, broadcast
   if (source.account_id !== input.accountId || source.storage_generation !== input.storageGeneration) invalid('Source scope does not match request');
   const context = { ...input, ruleId, ruleRevision: raw.ruleRevision, source, expectedMetadataVersion: input.targets[0].expectedMetadataVersion };
   const hash = createHash('sha256').update(JSON.stringify({ operation: 'rule', ...context })).digest('hex');
-  const outcome = await applyMembershipMutation(userId, input, hash, async client => {
-    await verifySource(client, input, source);
-    await verifyRule(client, { userId, input: context, source });
-  });
+  const outcome = await applyMembershipMutation(userId, input, hash, async (client, { resolved, before }) => {
+    await verifyRule(client, { userId, input: context, source, resolved, before });
+  }, null, client => verifySource(client, input, source));
   // A failed push is not a failed mutation. Replaying the durable request cannot
   // apply it again or duplicate notifications. No provider or legacy-label writes.
   if (outcome.changed && broadcast) {
@@ -281,4 +284,99 @@ export async function undoMemberships(userId, raw) {
     await recordMutation(client, input, hash, result, null, 'undo');
     return { result, changed: true };
   });
+}
+
+// Internal decision entry point. It deliberately does not widen the public validator.
+export async function reserveRuleMembershipDecision(userId, raw, { verifyDecision, receipt } = {}) {
+  const source = sourceTuple(raw.source, true);
+  uuid(raw.ruleId, 'ruleId');
+  if (typeof raw.ruleRevision !== 'string' || !raw.ruleRevision.length || raw.ruleRevision.length > 128) invalid('A captured rule revision is required');
+  if (!Array.isArray(raw.addLabelIds) || !Array.isArray(raw.removeLabelIds)) invalid('Label decisions must be arrays');
+  const empty = !raw.addLabelIds.length && !raw.removeLabelIds.length;
+  // Validate every public field, with a sentinel only for the internal empty delta.
+  const input = validateMembershipRequest({ accountId: raw.accountId, storageGeneration: raw.storageGeneration,
+    mutationId: raw.mutationId, targets: [{ entityId: source.entity_id, expectedMetadataVersion: raw.expectedMetadataVersion }],
+    addLabelIds: empty ? [source.entity_id] : raw.addLabelIds, removeLabelIds: raw.removeLabelIds }, true);
+  if (empty) input.addLabelIds = [];
+  if (typeof verifyDecision !== 'function' || typeof receipt !== 'function') invalid('Decision transaction verifier required');
+  const hash = createHash('sha256').update(JSON.stringify({ operation: 'rule_decision', ...raw })).digest('hex');
+  return applyMembershipMutation(userId, input, hash, async (client, { resolved, before }) => {
+    if (raw.availability !== 'known' || !Array.isArray(raw.labelIds)) fail(409, 'identity_unavailable', 'A complete membership snapshot is required');
+    if (JSON.stringify([...new Set(raw.labelIds)].sort()) !== JSON.stringify(before.targets[0].labelIds)) fail(409, 'rule_evidence_changed', 'Captured membership evidence changed');
+    return verifyDecision(client, { userId, input: raw, source, resolved, before });
+  }, { empty, receipt }, client => verifySource(client, input, source));
+}
+
+// Revalidates a held proof under account/entity/cache locks, without advancing it.
+// The callback is database-only. Provider/resource work MUST happen after return.
+export async function guardRuleMembershipSource(userId, proof, callback) {
+  return withTransaction(async client => {
+    const source = sourceTuple(proof.source, true);
+    const input = { accountId: source.account_id, storageGeneration: source.storage_generation,
+      targets: [{ entityId: source.entity_id, expectedMetadataVersion: version(proof.expectedMetadataVersion) }] };
+    currentGeneration(await lockOwnedAccount(client, userId, input), input);
+    await verifySource(client, input, source);
+    const resolved = await resolveTargets(client, input, true);
+    const before = await resultFor(client, input, resolved);
+    if (proof.availability !== 'known' || !Array.isArray(proof.labelIds) || JSON.stringify([...proof.labelIds].sort()) !== JSON.stringify(before.targets[0].labelIds)) {
+      fail(409, 'rule_evidence_changed', 'Captured membership evidence changed');
+    }
+    return callback(client, { source, input, resolved, before });
+  });
+}
+
+// Account locks serialize sanctioned identity and metadata writers. Cache rows are
+// held too because disposable cache deletion need not take an identity lock.
+export async function captureRuleMembershipBatchInTransaction(client, userId, tuples) {
+  if (!Array.isArray(tuples) || tuples.length > 200) invalid('At most 200 snapshots may be captured');
+  if (new Set(tuples.map(row => row.id)).size !== tuples.length) invalid('Duplicate captured cache rows');
+  const accounts = [...new Set(tuples.map(row => uuid(row.account_id, 'account_id')))].sort();
+  for (const accountId of accounts) await lockOwnedAccount(client, userId, { accountId });
+  const sources = tuples.map(row => ['entity_id','storage_generation','uid_validity'].some(key => row[key] == null) ? null : sourceTuple(row));
+  const valid = sources.filter(Boolean);
+  const cached = await client.query('SELECT id,from_email,from_name,subject,is_read,has_attachments FROM messages WHERE account_id=ANY($1::uuid[]) AND id=ANY($2::uuid[]) ORDER BY id FOR SHARE',
+    [accounts, tuples.map(row => uuid(row.id, 'id'))]);
+  const { rows } = await client.query(`WITH RECURSIVE requested AS (
+    SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(id uuid,account_id uuid,entity_id uuid,storage_generation uuid,folder text,uid_validity bigint,uid bigint)
+  ), verified AS (
+    SELECT m.* FROM requested r JOIN messages m ON m.id=r.id AND m.account_id=r.account_id
+      AND m.entity_id=r.entity_id AND m.storage_generation=r.storage_generation AND m.folder=r.folder
+      AND m.uid_validity=r.uid_validity AND m.uid=r.uid
+    JOIN email_accounts a ON a.id=m.account_id AND a.storage_generation=m.storage_generation
+    JOIN entity_locations l ON l.account_id=m.account_id AND l.storage_generation=m.storage_generation
+      AND l.entity_id=m.entity_id AND l.folder_path=m.folder AND l.uid_validity=m.uid_validity AND l.uid=m.uid
+    JOIN mailbox_identity_epochs ep ON ep.account_id=l.account_id AND ep.storage_generation=l.storage_generation
+      AND ep.folder_path=l.folder_path AND ep.uid_validity=l.uid_validity
+    WHERE NOT m.is_deleted AND l.status='present'
+  ), chain AS (
+    SELECT m.id AS message_id,e.id,e.canonical_entity_id,e.account_id,e.storage_generation,e.metadata_version,ARRAY[e.id] AS visited
+      FROM verified m JOIN message_entities e ON e.account_id=m.account_id AND e.storage_generation=m.storage_generation AND e.id=m.entity_id
+    UNION ALL
+    SELECT c.message_id,e.id,e.canonical_entity_id,e.account_id,e.storage_generation,e.metadata_version,c.visited||e.id
+      FROM chain c JOIN message_entities e ON e.account_id=c.account_id AND e.storage_generation=c.storage_generation AND e.id=c.canonical_entity_id
+      WHERE cardinality(c.visited)<32 AND NOT e.id=ANY(c.visited)
+  ) SELECT c.message_id,c.id AS canonical_entity_id,c.metadata_version::text,
+      jsonb_build_object('from_email',m.from_email,'from_name',m.from_name,'subject',m.subject,'is_read',m.is_read,'has_attachments',m.has_attachments) AS raw_fields,
+      ARRAY(SELECT n.label_id FROM native_label_memberships n WHERE n.account_id=c.account_id AND n.storage_generation=c.storage_generation AND n.entity_id=c.id ORDER BY n.label_id) AS label_ids
+    FROM chain c JOIN verified m ON m.id=c.message_id
+    WHERE c.canonical_entity_id IS NULL AND EXISTS (
+      SELECT 1 FROM messages live JOIN entity_locations l ON l.account_id=live.account_id AND l.storage_generation=live.storage_generation
+        AND l.entity_id=live.entity_id AND l.folder_path=live.folder AND l.uid_validity=live.uid_validity AND l.uid=live.uid
+      JOIN mailbox_identity_epochs ep ON ep.account_id=l.account_id AND ep.storage_generation=l.storage_generation
+        AND ep.folder_path=l.folder_path AND ep.uid_validity=l.uid_validity
+      WHERE live.account_id=c.account_id AND live.storage_generation=c.storage_generation AND live.entity_id=c.id AND NOT live.is_deleted AND l.status='present'
+    )`, [JSON.stringify(valid)]);
+  return sources.map((source, i) => {
+    const row = source && rows.find(result => result.message_id === source.id);
+    if (!row) {
+      const cachedRow = cached.rows.find(item => item.id === tuples[i].id);
+      const rawFields = cachedRow ? Object.fromEntries(Object.entries(cachedRow).filter(([key]) => key !== 'id')) : null;
+      return { availability: 'unknown', source: structuredClone(tuples[i]), expectedMetadataVersion: null, labelIds: null, rawFields };
+    }
+    return { availability: 'known', source: { ...source, canonicalEntityId: row.canonical_entity_id },
+      expectedMetadataVersion: row.metadata_version, labelIds: row.label_ids, rawFields: row.raw_fields };
+  });
+}
+export async function captureRuleMembershipBatch(userId, tuples) {
+  return withTransaction(client => captureRuleMembershipBatchInTransaction(client, userId, tuples));
 }
