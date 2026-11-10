@@ -49,7 +49,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('RFC822.SIZE storage li
   afterAll(async () => { await database?.end(); });
   beforeEach(async () => {
     await database.query('TRUNCATE messages');
-    query.mockReset().mockImplementation((sql, values) => {
+    query.mockReset().mockImplementation(async (sql, values) => {
       if (sql.includes('INSERT INTO messages')) return database.query(sql, values);
       if (sql.includes('COUNT(*) FILTER (WHERE is_read = false)')) return { rows: [{ n: 0 }] };
       if (sql.includes('COALESCE(MAX(uid), 0)')) return { rows: [{ max_uid: 0 }] };

@@ -236,7 +236,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('sent Watch through rea
         spam_details jsonb, spam_user_override text, category text, list_unsubscribe text,
         list_unsubscribe_post text, unsubscribed_at timestamptz, delivery_addresses jsonb,
         sender_name text, sender_email text, forwarded_from_name text, forwarded_from_email text,
-        forwarded_via text, provider_msgid text, plugin_annotations jsonb DEFAULT '{"gtd":{"gist":"Synthetic waiting"}}',
+        forwarded_via text, provider_msgid text, rfc822_size_bytes bigint, plugin_annotations jsonb DEFAULT '{"gtd":{"gist":"Synthetic waiting"}}',
         UNIQUE(account_id,uid,folder));
       CREATE TEMP TABLE address_books (id uuid DEFAULT gen_random_uuid(), user_id text, name text,
         updated_at timestamptz, sync_token text, UNIQUE(user_id,name));
