@@ -1,5 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { draftRowFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { setImmediate } from 'node:timers';
@@ -28,8 +29,8 @@ const { api } = await import('../utils/api.js');
 api.savePreferences = async () => ({ ok: true });
 const Observer = (await import('./InboxReplyDraftObserver.js')).default;
 const { openReplyDraft } = await import('../utils/openReplyDraft.js');
-const row = id => ({ id, account_id: 'acct', folder: 'INBOX', message_id: `<${id}@example.test>` });
-const draft = id => ({ id: `draft-${id}`, account_id: 'acct', folder: 'Drafts', uid: 5,
+const row = id => ({ id, account_id: '20000000-0000-4000-8000-000000000001', folder: 'INBOX', message_id: `<${id}@example.test>` });
+const draft = id => ({ ...draftRowFixture('20000000-0000-4000-8000-000000000001', 5, `draft-${id}`),
   message_id: `<draft-${id}@example.test>`, in_reply_to: `<${id}@example.test>`, attachments_complete: true,
   from_email: 'me@example.test', to_addresses: ['recipient@example.test'] });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
@@ -122,7 +123,7 @@ test('explicit opening owns a manual session and retains From provenance', async
   await reset(); await select('0');
   assert.equal(await openReplyDraft('0'), true);
   assert.equal(useStore.getState().composeData.source, 'manualReplyDraft');
-  assert.equal(useStore.getState().composeData.accountId, 'acct');
+  assert.equal(useStore.getState().composeData.accountId, '20000000-0000-4000-8000-000000000001');
 });
 
 test('an explicit opening survives refresh invalidation during a delayed live lookup', async () => {

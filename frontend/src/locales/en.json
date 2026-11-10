@@ -94,6 +94,11 @@
     "hidePassword": "Hide password"
   },
   "compose": {
+    "draftSourceUnavailable": "This draft could not be verified. Keep your text, then refresh Drafts and review the saved copies before saving or removing it.",
+    "draftRetainedTitle": "Original draft kept",
+    "draftRetainedBody": "The original draft could not be safely removed. Refresh Drafts and review the saved copies.",
+    "draftSeparateConfirm": "Save the current text as a separate draft? Existing saved copies will be kept. Review Drafts afterwards.",
+    "draftSeparateCopy": "Save as separate draft",
     "unsupportedDraftFrom": "Choose a configured sender before saving or sending this draft.",
     "newMessage": "New Message",
     "reply": "Reply",

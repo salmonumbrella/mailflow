@@ -31,10 +31,11 @@ import { deleteSentDraft } from '../services/draftCopies.js';
 
 const account = { id: 'a1', email_address: 'me@example.com', name: 'Me', oauth_provider: 'google' };
 const sendMail = vi.fn();
-let server, base;
+let server, base, lastRequestDraft;
 beforeAll(async () => {
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => { lastRequestDraft = req.body?.draft; next(); });
   app.use('/api/mail', routes);
   await new Promise(resolve => { server = app.listen(0, resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
@@ -206,7 +207,9 @@ describe('send with an undo window', () => {
   });
 
   describe('the draft the message was written in', () => {
-    const draft = { uid: 7, folder: 'Drafts', accountId: 'a1' };
+    const draft = { uid: 7, folder: 'Drafts', accountId: 'a1', source: { messageId: '11111111-1111-4111-8111-111111111111',
+      accountId: 'a1', storageGeneration: '33333333-3333-4333-8333-333333333333', entityId: '44444444-4444-4444-8444-444444444444',
+      folder: 'Drafts', uid: '7', uidValidity: '9' } };
     const settle = () => new Promise(resolve => setImmediate(resolve));
 
     it('is deleted once the message is delivered, not before', async () => {
@@ -216,6 +219,31 @@ describe('send with an undo window', () => {
       await flushHeldSends();
       await settle();
       expect(deleteSentDraft).toHaveBeenCalledWith('u1', account, draft);
+    });
+
+    it('keeps the original physical proof while a send is queued', async () => {
+      await send({ undoSeconds: 10, draft });
+      lastRequestDraft.source.messageId = '99999999-9999-4999-8999-999999999999';
+      lastRequestDraft.source.uidValidity = '99'; lastRequestDraft.accountId = 'another-account';
+      await flushHeldSends(); await settle();
+      expect(deleteSentDraft).toHaveBeenCalledExactlyOnceWith('u1', account, draft);
+    });
+
+    it.each([0, 10])('returns retained cleanup without inviting a duplicate send (undoSeconds %s)', async undoSeconds => {
+      deleteSentDraft.mockResolvedValueOnce(false);
+      const response = await send({ undoSeconds, draft });
+      const answer = await response.json();
+      let result = answer;
+      if (undoSeconds) {
+        await flushHeldSends(); await settle();
+        const completed = await status(answer.pendingId);
+        expect(completed.status).toBe('sent'); result = completed.result;
+      }
+      expect(result).toEqual({ ok: true, cleanup: { status: 'retained', code: 'draft_source_changed' } });
+      expect(deleteSentDraft).toHaveBeenCalledExactlyOnceWith('u1', account, draft);
+      expect(sendMail).toHaveBeenCalledOnce();
+      const repeated = await send({ undoSeconds, draft });
+      expect(await repeated.json()).toEqual(result); expect(sendMail).toHaveBeenCalledOnce();
     });
 
     it('survives an undo', async () => {

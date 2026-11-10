@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { draftSourceFixture, savedDraftFixture, composeDraftFixture, draftRowFixture, signatureLibraryFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { setImmediate } from 'node:timers';
@@ -48,14 +49,16 @@ globalThis.cancelAnimationFrame = id => clearTimeout(id);
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
+const { api: composeApi } = await import('../utils/api.js');
+composeApi.getSignatureLibrary = async accountId => signatureLibraryFixture(useStore.getState().accounts.find(account => account.id === accountId));
 const ComposeModal = (await import('./ComposeModal.jsx')).default;
 
 for (const mobile of [false, true]) test(`an unsigned plain-text external draft has no empty signature label (${mobile ? 'mobile' : 'desktop'})`, async () => {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = () => ({ matches: mobile, addEventListener() {}, removeEventListener() {} });
   globalThis.matchMedia = window.matchMedia;
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [], signature: '<p>Account default</p>' }],
-    composing: true, plaintextEmail: true, composeData: { accountId: 'account-1', body: 'External reply', signature: '' } });
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [], signature: '<p>Account default</p>' }],
+    composing: true, plaintextEmail: true, composeData: { accountId: '20000000-0000-4000-8000-000000000003', body: 'External reply', signature: '' } });
   const root = createRoot(document.getElementById('root'));
   try {
     await React.act(async () => root.render(React.createElement(ComposeModal)));
@@ -69,16 +72,16 @@ for (const mobile of [false, true]) test(`an unsigned plain-text external draft 
 for (const imageOnly of [false, true]) test(`choosing a sender after an unsigned rich draft mounts its editable ${imageOnly ? 'image' : 'text'} signature`, async () => {
   const signatureHtml = imageOnly ? '<img src="https://example.test/signature.png">' : '<p>New sender signature</p>';
   useStore.setState({ accounts: [
-    { id: 'account-1', email_address: 'me@example.test', aliases: [], signature: '<p>Original default</p>' },
-    { id: 'account-2', email_address: 'other@example.test', aliases: [], signature: signatureHtml },
-  ], composing: true, plaintextEmail: false, composeData: { accountId: 'account-1', body: '<p>Reply</p>', bodyIsHtml: true, signature: '' } });
+    { id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [], signature: '<p>Original default</p>' },
+    { id: '20000000-0000-4000-8000-000000000004', email_address: 'other@example.test', aliases: [], signature: signatureHtml },
+  ], composing: true, plaintextEmail: false, composeData: { accountId: '20000000-0000-4000-8000-000000000003', body: '<p>Reply</p>', bodyIsHtml: true, signature: '' } });
   const root = createRoot(document.getElementById('root'));
   try {
     await React.act(async () => root.render(React.createElement(ComposeModal)));
     assert.equal(document.getElementById('root').textContent.includes('-- signature'), false);
     const from = document.querySelector('select');
     await React.act(async () => {
-      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set.call(from, 'account:account-2');
+      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set.call(from, 'account:20000000-0000-4000-8000-000000000004');
       from.dispatchEvent(new window.Event('change', { bubbles: true }));
     });
     const signature = [...document.querySelectorAll('[contenteditable]')].find(el => el.innerHTML === signatureHtml);
@@ -92,15 +95,14 @@ test('a mounted external reply sends headers and updates the UID used by its nex
   globalThis.fetch = async (url, options) => {
     if (String(url).endsWith('/mail/draft')) {
       requests.push(JSON.parse(options.body));
-      return { ok: true, status: 200, json: async () => ({ uid: requests.length + 5, folder: 'Drafts' }) };
+      return { ok: true, status: 200, json: async () => savedDraftFixture('20000000-0000-4000-8000-000000000003', requests.length + 5) };
     }
     if (String(url).endsWith('/mail/send')) sent.push(JSON.parse(options.body));
     return { ok: true, status: 200, json: async () => ({}) };
   };
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     selectedAccountId: null, plaintextEmail: true, composing: true,
-    composeData: { accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
-      persistedKey: 'account-1:Drafts:5',
+    composeData: { accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5),
       source: 'inboxReplyDraft', to: ['to@example.test'], subject: 'Re: old', body: 'reply',
       signature: '', inReplyTo: '<parent@example.test>',
       references: '<root@example.test> <parent@example.test>' } });
@@ -119,7 +121,8 @@ test('a mounted external reply sends headers and updates the UID used by its nex
     assert.equal(requests[0].inReplyTo, '<parent@example.test>');
     assert.equal(requests[0].references, '<root@example.test> <parent@example.test>');
     assert.equal(requests[0].existingUid, 5);
-    assert.equal(useStore.getState().composeData.persistedKey, 'account-1:Drafts:6::');
+    assert.deepEqual(requests[0].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000003', 5));
+    assert.equal(useStore.getState().composeData.persistedKey, JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000003', 6)));
     await React.act(async () => {
       Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(subject, 'Re: edited again');
       subject.dispatchEvent(new window.Event('input', { bubbles: true }));
@@ -127,12 +130,14 @@ test('a mounted external reply sends headers and updates the UID used by its nex
     await React.act(async () => assert.equal(await useStore.getState().prepareComposeSwitch(), true));
     assert.equal(requests.length, 2);
     assert.equal(requests[1].existingUid, 6);
+    assert.deepEqual(requests[1].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000003', 6));
     assert.equal(requests[1].inReplyTo, '<parent@example.test>');
     assert.equal(requests[1].references, '<root@example.test> <parent@example.test>');
     const send = [...document.querySelectorAll('button')].find(button => button.textContent === 'compose.send');
     await React.act(async () => send.click());
     assert.equal(sent.length, 1);
     assert.equal(sent[0].draft.uid, 7);
+    assert.deepEqual(sent[0].draft.source, draftSourceFixture('20000000-0000-4000-8000-000000000003', 7));
     assert.equal(sent[0].inReplyTo, '<parent@example.test>');
     assert.equal(sent[0].references, '<root@example.test> <parent@example.test>');
   } finally {
@@ -145,13 +150,13 @@ test('text-only save keeps the existing attachment warning while switching remai
   globalThis.fetch = async (url, options) => {
     if (String(url).endsWith('/mail/draft')) {
       requests.push(JSON.parse(options.body));
-      return { ok: true, status: 200, json: async () => ({ uid: 7, folder: 'Drafts' }) };
+      return { ok: true, status: 200, json: async () => savedDraftFixture('20000000-0000-4000-8000-000000000003', 7) };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   };
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, composing: true,
-    composeData: { accountId: 'account-1', to: ['to@example.test'], body: 'text to keep',
+    composeData: { accountId: '20000000-0000-4000-8000-000000000003', to: ['to@example.test'], body: 'text to keep',
       forwardedAttachments: [{ messageId: '11111111-1111-4111-8111-111111111111', part: '2', filename: 'report.txt' }] } });
   const root = createRoot(document.getElementById('root'));
   try {
@@ -175,9 +180,9 @@ test('text-only save keeps the existing attachment warning while switching remai
 test('mobile close keeps a composer with unsaved forwarded attachments open', async () => {
   const width = window.innerWidth;
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, composing: true,
-    composeData: { accountId: 'account-1', to: ['to@example.test'], body: 'text',
+    composeData: { accountId: '20000000-0000-4000-8000-000000000003', to: ['to@example.test'], body: 'text',
       forwardedAttachments: [{ messageId: '11111111-1111-4111-8111-111111111111', part: '2', filename: 'report.txt' }] } });
   const root = createRoot(document.getElementById('root'));
   try {
@@ -198,11 +203,11 @@ test('editing an externally attached draft cannot replace it with an attachment-
   let writes = 0;
   globalThis.fetch = async (url) => {
     if (String(url).endsWith('/mail/draft')) writes++;
-    return { ok: true, status: 200, json: async () => ({ uid: 7, folder: 'Drafts' }) };
+    return { ok: true, status: 200, json: async () => savedDraftFixture('20000000-0000-4000-8000-000000000003', 7) };
   };
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, composing: true,
-    composeData: { accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
+    composeData: { accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5),
       to: ['to@example.test'], subject: 'Re: old', body: 'reply',
       externalAttachments: [{ part: '2' }],
       forwardedAttachments: [{ messageId: '11111111-1111-4111-8111-111111111111', part: '2', filename: 'report.txt' }] } });
@@ -225,11 +230,11 @@ test('an untouched rich-text draft stays clean after its editor initializes', as
   let writes = 0;
   globalThis.fetch = async (url) => {
     if (String(url).endsWith('/mail/draft')) writes++;
-    return { ok: true, status: 200, json: async () => ({ uid: 7, folder: 'Drafts' }) };
+    return { ok: true, status: 200, json: async () => savedDraftFixture('20000000-0000-4000-8000-000000000003', 7) };
   };
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: false, composing: true,
-    composeData: { accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
+    composeData: { accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5),
       to: ['to@example.test'], subject: 'Re: old', body: '<p>reply text</p>', signature: '' } });
   const root = createRoot(document.getElementById('root'));
   try {
@@ -250,13 +255,13 @@ test('signature edits made during save are sent again before a switch', async ()
     if (String(url).endsWith('/mail/draft')) {
       requests.push(JSON.parse(options.body));
       if (requests.length === 1) await new Promise(resolve => { finishFirst = resolve; });
-      return { ok: true, status: 200, json: async () => ({ uid: requests.length + 5, folder: 'Drafts' }) };
+      return { ok: true, status: 200, json: async () => savedDraftFixture('20000000-0000-4000-8000-000000000003', requests.length + 5) };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   };
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [], signature: '<p>Old</p>' }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [], signature: '<p>Old</p>' }],
     plaintextEmail: true, composing: true,
-    composeData: { accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
+    composeData: { accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5),
       to: ['to@example.test'], subject: 'Re: old', body: 'reply', signature: '<p>Old</p>' } });
   const root = createRoot(document.getElementById('root'));
   try {
@@ -275,6 +280,7 @@ test('signature edits made during save are sent again before a switch', async ()
     await React.act(async () => { finishFirst(); assert.equal(await preparing, true); });
     assert.deepEqual(requests.map(r => r.editedSignature), ['First edit', 'Second edit']);
     assert.equal(requests[1].existingUid, 6);
+    assert.deepEqual(requests[1].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000003', 6));
   } finally {
     await React.act(async () => root.unmount());
   }
@@ -282,9 +288,9 @@ test('signature edits made during save are sent again before a switch', async ()
 
 test('an imported draft shows its saved signature even without an account default', async () => {
   globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({}) });
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [], signature: null }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [], signature: null }],
     plaintextEmail: true, composing: true,
-    composeData: { accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
+    composeData: { accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5),
       to: ['to@example.test'], body: 'reply', signature: '<p>Saved signature</p>' } });
   const root = createRoot(document.getElementById('root'));
   try {
@@ -303,14 +309,14 @@ test('a send waiting for draft save stops a concurrent selection handoff', async
     if (path.endsWith('/mail/draft')) {
       requests.push('draft');
       await new Promise(resolve => { finishSave = resolve; });
-      return { ok: true, status: 200, json: async () => ({ uid: 6, folder: 'Drafts' }) };
+      return { ok: true, status: 200, json: async () => savedDraftFixture('20000000-0000-4000-8000-000000000003', 6) };
     }
     if (path.endsWith('/mail/send')) requests.push('send');
     return { ok: true, status: 200, json: async () => ({ sentFolder: 'Sent' }) };
   };
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, composing: true,
-    composeData: { accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
+    composeData: { accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5),
       source: 'inboxReplyDraft',
       to: ['to@example.test'], subject: 'Re: old', body: 'reply' } });
   const root = createRoot(document.getElementById('root'));
@@ -342,14 +348,13 @@ test('reopening the same draft keeps its mounted save handoff', async () => {
   globalThis.fetch = async (url, options) => {
     if (String(url).endsWith('/mail/draft')) {
       requests.push(JSON.parse(options.body));
-      return { ok: true, status: 200, json: async () => ({ uid: 6, folder: 'Drafts' }) };
+      return { ok: true, status: 200, json: async () => savedDraftFixture('20000000-0000-4000-8000-000000000003', 6) };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   };
-  const opening = { accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
-    persistedKey: 'account-1:Drafts:5',
+  const opening = { accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5),
     source: 'inboxReplyDraft', to: ['to@example.test'], subject: 'Re: old', body: 'reply' };
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, composing: true, composeData: opening });
   const root = createRoot(document.getElementById('root'));
   try {
@@ -376,9 +381,9 @@ test('an unsupported saved sender requires an explicit configured From choice', 
     if (String(url).endsWith('/mail/send')) sent.push(JSON.parse(options.body));
     return { ok: true, status: 200, json: async () => ({}) };
   };
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, composing: true,
-    composeData: { accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
+    composeData: { accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5),
       to: ['recipient@example.test'], subject: 'Reply', body: 'Reply', signature: '',
       unsupportedFrom: 'external@example.test', references: '<parent@example.test>' } });
   const root = createRoot(document.getElementById('root'));
@@ -387,7 +392,7 @@ test('an unsupported saved sender requires an explicit configured From choice', 
     const from = document.querySelector('select');
     assert.equal(from.value, '', 'the configured identity must not be silently preselected');
     await React.act(async () => {
-      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set.call(from, 'account:account-1');
+      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set.call(from, 'account:20000000-0000-4000-8000-000000000003');
       from.dispatchEvent(new window.Event('change', { bubbles: true }));
     });
     const send = [...document.querySelectorAll('button')].find(el => el.textContent === 'compose.send');
@@ -405,9 +410,9 @@ for (const action of ['save and close', 'send']) test(`an earlier ${action} cann
     if (String(url).endsWith(action === 'send' ? '/mail/send' : '/mail/draft')) return pending;
     return { ok: true, status: 200, json: async () => ({}) };
   };
-  useStore.setState({ accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, composing: false, composeData: null });
-  useStore.getState().openCompose({ accountId: 'account-1', to: ['recipient@example.test'], subject: 'Old', body: 'Reply', signature: '' });
+  useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000003', to: ['recipient@example.test'], subject: 'Old', body: 'Reply', signature: '' });
   const root = createRoot(document.getElementById('root'));
   try {
     await React.act(async () => root.render(React.createElement(ComposeModal)));
@@ -428,7 +433,7 @@ for (const action of ['save and close', 'send']) test(`an earlier ${action} cann
     // is pending; ordinary Compose clicks now wait for the current writer.
     await React.act(async () => { useStore.getState().closeCompose(); useStore.getState().openCompose({ subject: 'New manual', body: 'New edits' }); });
     await React.act(async () => {
-      finish({ ok: true, status: 200, json: async () => ({ uid: 6, folder: 'Drafts' }) });
+      finish({ ok: true, status: 200, json: async () => savedDraftFixture('20000000-0000-4000-8000-000000000003', 6) });
       await new Promise(resolve => setImmediate(resolve));
     });
     assert.equal(useStore.getState().composing, true);
@@ -440,16 +445,16 @@ for (const action of ['save and close', 'send']) test(`an earlier ${action} cann
 test('replacing an open editor advances numeric ownership; duplicate persisted drafts keep edits', async () => {
   useStore.setState({ composing: false, composeData: null, prepareComposeSwitch: null });
   const store = useStore.getState();
-  store.openCompose({ persistedKey: 'a:Drafts:5', subject: 'Original' });
+  store.openCompose({ persistedKey: JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000003', 5)), subject: 'Original' });
   const first = useStore.getState().composeSession;
-  store.openCompose({ persistedKey: 'a:Drafts:5', subject: 'Stale copy' });
+  store.openCompose({ persistedKey: JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000003', 5)), subject: 'Stale copy' });
   assert.equal(useStore.getState().composeSession, first);
   assert.equal(useStore.getState().composeData.subject, 'Original');
   useStore.setState({ prepareComposeSwitch: async () => true });
-  await store.openCompose({ persistedKey: 'a:Drafts:6', subject: 'Other' });
+  await store.openCompose({ persistedKey: JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000003', 6)), subject: 'Other' });
   assert.equal(useStore.getState().composeSession, first + 1);
   store.updateComposePersistedKey(first, 'stale');
-  assert.equal(useStore.getState().composeData.persistedKey, 'a:Drafts:6');
+  assert.equal(useStore.getState().composeData.persistedKey, JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000003', 6)));
 });
 
 for (const withAttachment of [false, true]) test(`Undo-restored automatic reply ${withAttachment ? 'with attachments refuses' : 'saves before'} another reply handoff`, async () => {
@@ -460,11 +465,10 @@ for (const withAttachment of [false, true]) test(`Undo-restored automatic reply 
   api.post = async () => ({ pending: true, pendingId: `restore-${++pending}`, remainingMs: 10000 });
   api.cancelSend = async () => ({ cancelled: true });
   api.getSendStatus = async () => ({ status: 'pending' });
-  api.saveDraft = async value => { writes.push(value); return { uid: 23, folder: 'Drafts' }; };
-  useStore.setState({ user: { id: 'undo-owner' }, accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  api.saveDraft = async value => { writes.push(value); return savedDraftFixture('20000000-0000-4000-8000-000000000003', 23); };
+  useStore.setState({ user: { id: 'undo-owner' }, accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, notifications: [], composing: false, composeData: null });
-  const first = { accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts', draftAccountId: 'account-1',
-    persistedKey: 'account-1:Drafts:5', source: 'automaticReplyDraft', to: ['to@example.test'],
+  const first = { accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5), source: 'automaticReplyDraft', to: ['to@example.test'],
     cc: ['cc@example.test'], bcc: ['bcc@example.test'], subject: 'First reply', body: 'Edited after last save',
     signature: '<p>Saved signature</p>', inReplyTo: '<parent@example.test>', references: '<root@example.test> <parent@example.test>',
     ...(withAttachment ? { attachments: [{ name: 'note.txt', size: 3, type: 'text/plain', data: 'YWJj' }] } : {}) };
@@ -480,7 +484,7 @@ for (const withAttachment of [false, true]) test(`Undo-restored automatic reply 
     await React.act(async () => root.render(React.createElement(Host)));
     await send();
     const undo = useStore.getState().notifications.find(n => n.onUndo);
-    await React.act(async () => useStore.getState().openCompose({ ...first, persistedKey: 'account-1:Drafts:6', draftUid: 6, subject: 'Second reply', attachments: [] }));
+    await React.act(async () => useStore.getState().openCompose({ ...first, ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 6), subject: 'Second reply', attachments: [] }));
     await React.act(async () => undo.onUndo());
     assert.equal(document.querySelector('input[placeholder="compose.subject"]').value, 'Second reply');
     await send();
@@ -496,8 +500,9 @@ for (const withAttachment of [false, true]) test(`Undo-restored automatic reply 
     assert.equal(writes.length, withAttachment ? 0 : 1);
     if (!withAttachment) {
       assert.equal(writes[0].existingUid, 5);
+    assert.deepEqual(writes[0].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000003', 5));
       assert.equal(writes[0].body, 'Edited after last save');
-      assert.equal(useStore.getState().composeData.persistedKey, 'account-1:Drafts:23::');
+      assert.equal(useStore.getState().composeData.persistedKey, JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000003', 23)));
     } else assert.match(document.body.textContent, /note\.txt/);
   } finally {
     await React.act(async () => { useStore.setState({ user: null }); root.unmount(); });
@@ -511,15 +516,14 @@ test('explicit draft handoff adopts the revision from its real mounted save befo
   const { openReplyDraft } = await import('../utils/openReplyDraft.js');
   const original = { saveDraft: api.saveDraft, getReplyDraft: api.getReplyDraft };
   const saved = []; let lookups = 0;
-  api.saveDraft = async value => { saved.push(value); return { uid: 6, folder: 'Drafts' }; };
-  api.getReplyDraft = async () => { lookups++; return { draft: { id: 'new-draft', account_id: 'account-1', folder: 'Drafts', uid: 9,
+  api.saveDraft = async value => { saved.push(value); return savedDraftFixture('20000000-0000-4000-8000-000000000003', 6); };
+  api.getReplyDraft = async () => { lookups++; return { draft: { ...draftRowFixture('20000000-0000-4000-8000-000000000003', 9),
     message_id: '<other-reply@example.test>', in_reply_to: '<other-parent@example.test>', attachments_complete: true },
     body: { text: 'Other reply', attachments: [] } }; };
-  useStore.setState({ user: { id: 'save-owner' }, accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ user: { id: 'save-owner' }, accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, selectedFolder: 'INBOX', selectedMessageId: 'other', selectedAccountId: null,
     composing: false, composeData: null, replyDraftRevision: 0 });
-  useStore.getState().openCompose({ accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
-    persistedKey: 'account-1:Drafts:5', source: 'automaticReplyDraft', subject: 'Old', to: ['to@example.test'], body: 'Reply', signature: '' });
+  useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5), source: 'automaticReplyDraft', subject: 'Old', to: ['to@example.test'], body: 'Reply', signature: '' });
   const Host = () => {
     const composing = useStore(s => s.composing); const session = useStore(s => s.composeSession);
     return composing ? React.createElement(ComposeModal, { key: session }) : null;
@@ -548,17 +552,16 @@ test('an automatic handoff save does not start a second observer lookup for its 
   const { api } = await import('../utils/api.js');
   const original = { saveDraft: api.saveDraft, getReplyDraft: api.getReplyDraft, getReplyDraftIndicators: api.getReplyDraftIndicators };
   let calls = 0, release;
-  const result = { draft: { id: 'new-draft', account_id: 'account-1', folder: 'Drafts', uid: 9,
+  const result = { draft: { ...draftRowFixture('20000000-0000-4000-8000-000000000003', 9),
     message_id: '<other-reply@example.test>', attachments_complete: true }, body: { text: 'Other reply', attachments: [] } };
-  api.saveDraft = async () => ({ uid: 6, folder: 'Drafts' });
+  api.saveDraft = async () => savedDraftFixture('20000000-0000-4000-8000-000000000003', 6);
   api.getReplyDraftIndicators = async ids => ({ indicators: Object.fromEntries(ids.map(id => [id, { exists: true }])) });
   api.getReplyDraft = async () => { calls++; return calls === 2 ? new Promise(resolve => { release = () => resolve(result); }) : result; };
-  useStore.setState({ user: { id: 'auto-save-owner' }, accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ user: { id: 'auto-save-owner' }, accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, selectedFolder: 'INBOX', selectedMessageId: null, selectedAccountId: null,
-    messages: [{ id: 'other', account_id: 'account-1', folder: 'INBOX' }], threadMessages: {}, searchQuery: '', conversationMode: 'off',
+    messages: [{ id: 'other', account_id: '20000000-0000-4000-8000-000000000003', folder: 'INBOX' }], threadMessages: {}, searchQuery: '', conversationMode: 'off',
     autoOpenReplyDrafts: false, composing: false, composeData: null, replyDraftRevision: 0, replyDrafts: {} });
-  useStore.getState().openCompose({ accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
-    persistedKey: 'account-1:Drafts:5', source: 'automaticReplyDraft', subject: 'Old', to: ['to@example.test'], body: 'Reply', signature: '' });
+  useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5), source: 'automaticReplyDraft', subject: 'Old', to: ['to@example.test'], body: 'Reply', signature: '' });
   const Host = () => {
     const composing = useStore(s => s.composing); const session = useStore(s => s.composeSession);
     return React.createElement(React.Fragment, null, React.createElement(Observer, { lookupDelayMs: 0 }),
@@ -586,17 +589,16 @@ test('a mounted draft save response cannot update a different signed-in owner', 
   const original = api.saveDraft;
   let finish;
   api.saveDraft = () => new Promise(resolve => { finish = resolve; });
-  useStore.setState({ user: { id: 'save-owner' }, accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  useStore.setState({ user: { id: 'save-owner' }, accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, composing: false, composeData: null, replyDraftRevision: 0 });
-  useStore.getState().openCompose({ accountId: 'account-1', draftUid: 5, draftFolder: 'Drafts',
-    persistedKey: 'account-1:Drafts:5', subject: 'Old', to: ['to@example.test'], body: 'Reply', signature: '', restored: true });
+  useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000003', ...composeDraftFixture('20000000-0000-4000-8000-000000000003', 5), subject: 'Old', to: ['to@example.test'], body: 'Reply', signature: '', restored: true });
   const root = createRoot(document.getElementById('root'));
   try {
     await React.act(async () => root.render(React.createElement(ComposeModal)));
     let saving;
     await React.act(async () => { saving = useStore.getState().prepareComposeSwitch(); await Promise.resolve(); });
     await React.act(async () => useStore.getState().setUser({ id: 'new-owner' }));
-    await React.act(async () => { finish({ uid: 6, folder: 'Drafts' }); assert.equal(await saving, false); });
+    await React.act(async () => { finish(savedDraftFixture('20000000-0000-4000-8000-000000000003', 6)); assert.equal(await saving, false); });
     // The identity change closed the old owner's composer (store setUser); the late save must
     // neither reopen nor update it.
     assert.equal(useStore.getState().composeData, null);
@@ -608,14 +610,14 @@ for (const action of ['save', 'resend']) test(`Undo-restored reply retains the o
   const { api } = await import('../utils/api.js');
   const original = { saveDraft: api.saveDraft, post: api.post };
   const writes = [];
-  api.saveDraft = async value => { writes.push(value); return { uid: 6, folder: 'Drafts' }; };
+  api.saveDraft = async value => { writes.push(value); return savedDraftFixture('20000000-0000-4000-8000-000000000006', 6); };
   api.post = async (_path, value) => { writes.push(value); return {}; };
   useStore.setState({ user: { id: 'undo-owner' }, accounts: [
-    { id: 'old-account', email_address: 'old@example.test', aliases: [] },
-    { id: 'send-account', email_address: 'send@example.test', aliases: [] },
+    { id: '20000000-0000-4000-8000-000000000005', email_address: 'old@example.test', aliases: [] },
+    { id: '20000000-0000-4000-8000-000000000006', email_address: 'send@example.test', aliases: [] },
   ], plaintextEmail: true, composing: false, composeData: null, notifications: [] });
-  useStore.getState().openCompose({ accountId: 'send-account', draftAccountId: 'old-account',
-    draftUid: 5, draftFolder: 'Drafts', persistedKey: 'old-account:Drafts:5',
+  useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000006', draftAccountId: '20000000-0000-4000-8000-000000000005',
+    ...composeDraftFixture('20000000-0000-4000-8000-000000000005', 5),
     to: ['to@example.test'], subject: 'Restored reply', body: 'Reply', signature: '', restored: true });
   const root = createRoot(document.getElementById('root'));
   try {
@@ -623,11 +625,12 @@ for (const action of ['save', 'resend']) test(`Undo-restored reply retains the o
     if (action === 'save') await React.act(async () => assert.equal(await useStore.getState().prepareComposeSwitch(), true));
     else await React.act(async () => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'compose.send').click());
     assert.equal(writes.length, 1);
-    assert.equal(writes[0].accountId, 'send-account');
+    assert.equal(writes[0].accountId, '20000000-0000-4000-8000-000000000006');
     if (action === 'save') {
-      assert.equal(writes[0].existingAccountId, 'old-account');
+      assert.equal(writes[0].existingAccountId, '20000000-0000-4000-8000-000000000005');
       assert.equal(writes[0].existingUid, 5);
-    } else assert.deepEqual(writes[0].draft, { accountId: 'old-account', uid: 5, folder: 'Drafts' });
+    assert.deepEqual(writes[0].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000005', 5));
+    } else assert.deepEqual(writes[0].draft, { accountId: '20000000-0000-4000-8000-000000000005', uid: 5, folder: 'Drafts', source: draftSourceFixture('20000000-0000-4000-8000-000000000005', 5) });
   } finally { await React.act(async () => root.unmount()); Object.assign(api, original); }
 });
 
@@ -636,10 +639,10 @@ for (const outcome of ['saved', 'failed', 'unsupported']) test(`ordinary compose
   const original = api.saveDraft;
   const writes = [];
   let finish;
-  api.saveDraft = value => { writes.push(value); return new Promise((resolve, reject) => { finish = () => outcome === 'failed' ? reject(new Error('Save failed')) : resolve({ uid: 9, folder: 'Drafts' }); }); };
-  useStore.setState({ user: { id: 'manual-owner' }, accounts: [{ id: 'account-1', email_address: 'me@example.test', aliases: [] }],
+  api.saveDraft = value => { writes.push(value); return new Promise((resolve, reject) => { finish = () => outcome === 'failed' ? reject(new Error('Save failed')) : resolve(savedDraftFixture('20000000-0000-4000-8000-000000000003', 9)); }); };
+  useStore.setState({ user: { id: 'manual-owner' }, accounts: [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'me@example.test', aliases: [] }],
     plaintextEmail: true, composing: false, composeData: null, prepareComposeSwitch: null });
-  useStore.getState().openCompose({ accountId: 'account-1', to: ['to@example.test'], subject: 'Current', body: 'Reply', signature: '',
+  useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000003', to: ['to@example.test'], subject: 'Current', body: 'Reply', signature: '',
     ...(outcome === 'unsupported' ? { unsupportedFrom: 'other@example.test' } : {}) });
   const session = useStore.getState().composeSession;
   const Host = () => {
@@ -656,7 +659,7 @@ for (const outcome of ['saved', 'failed', 'unsupported']) test(`ordinary compose
       subject.dispatchEvent(new window.Event('input', { bubbles: true }));
     });
     let opening;
-    await React.act(async () => { opening = useStore.getState().openCompose({ accountId: 'account-1', subject: 'New manual' }); await Promise.resolve(); });
+    await React.act(async () => { opening = useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000003', subject: 'New manual' }); await Promise.resolve(); });
     assert.equal(useStore.getState().composeSession, session);
     assert.equal(document.querySelector('input[placeholder="compose.subject"]').value, 'Unsaved edits');
     if (outcome === 'unsupported') assert.equal(writes.length, 0);

@@ -27,6 +27,7 @@ import { resolveThreadMessages } from '../utils/threadActions.js';
 import { conversationSpamTargets, keepDraftsApart } from '../utils/conversationActions.js';
 import { unreadDeltaByAccount } from '../utils/countSnapshots.js';
 import { splitDraftSignature } from '../utils/draftSignature.js';
+import { draftSourceFromRow, draftPointerData } from '../utils/draftSource.js';
 import { draftAttachmentFields } from '../utils/openSavedDraft.js';
 import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import { useHoverPrefetch } from '../hooks/useHoverPrefetch.js';
@@ -3081,8 +3082,22 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     }).filter(Boolean);
   };
 
+  const draftOpenSequenceRef = useRef(0);
+  useEffect(() => () => { draftOpenSequenceRef.current++; }, []);
   const handleSelect = async (message) => {
+    const sequence = ++draftOpenSequenceRef.current;
     if (isDraftsFolder) {
+      const source = draftSourceFromRow(message);
+      const initial = useStore.getState();
+      if (initial.isLocked || initial.composeSignOutPending) return;
+      let invalidated = false;
+      const unsubscribe = useStore.subscribe((state, previous) => {
+        for (const value of [previous, state]) if (value && (value.user?.id !== initial.user?.id || value.isLocked !== initial.isLocked
+          || value.composeSignOutPending || value.composeAuthEpoch !== initial.composeAuthEpoch
+          || value.selectedAccountId !== initial.selectedAccountId || value.selectedFolder !== initial.selectedFolder
+          || value.selectedMessageId !== initial.selectedMessageId || value.composeSession !== initial.composeSession
+          || value.composing !== initial.composing)) invalidated = true;
+      });
       try {
         const [bodyData, bcc] = await Promise.all([
           // Images unblocked, through MailFlow's proxy: a draft opened with them blocked was
@@ -3094,6 +3109,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
             return null;
           }),
         ]);
+        if (invalidated || sequence !== draftOpenSequenceRef.current) return;
         // The Bcc exists only in the draft itself, and saving the reopened draft replaces that
         // copy. Opening it for editing with an empty Bcc is what used to erase it, so when the Bcc
         // cannot be read the draft opens read-only instead.
@@ -3112,8 +3128,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           : { body: raw, signature: null, inline: false };
         openCompose({
           accountId: message.account_id,
-          draftUid: message.uid,
-          draftFolder: message.folder,
+          ...draftPointerData({ accountId: message.account_id, uid: message.uid, folder: message.folder, source }),
           to: formatAddressArray(message.to_addresses),
           cc: formatAddressArray(message.cc_addresses),
           // { name, email } objects rather than formatted strings, so compose quotes a display
@@ -3130,9 +3145,11 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
           ...draftAttachmentFields(message, bodyData),
         });
       } catch (err) {
-        console.error('Failed to open draft:', err.message);
-        selectListedMessage(useStore, message.id);
-      }
+        if (!invalidated && sequence === draftOpenSequenceRef.current) {
+          console.error('Failed to open draft:', err.message);
+          selectListedMessage(useStore, message.id);
+        }
+      } finally { unsubscribe(); }
       return;
     }
     recentMessageOpenUntilRef.current = Date.now() + 1500;

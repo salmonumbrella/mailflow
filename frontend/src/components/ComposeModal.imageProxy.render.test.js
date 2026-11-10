@@ -5,6 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { savedDraftFixture, composeDraftFixture, signatureLibraryFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { setImmediate } from 'node:timers';
@@ -53,17 +54,19 @@ globalThis.cancelAnimationFrame = id => clearTimeout(id);
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
+const { api } = await import('../utils/api.js');
+api.getSignatureLibrary = async accountId => signatureLibraryFixture(useStore.getState().accounts.find(account => account.id === accountId));
 const ComposeModal = (await import('./ComposeModal.jsx')).default;
 
 
 const requests = [];
 globalThis.fetch = async (url, options) => {
   const path = String(url);
-  if (path.endsWith('/mail/draft')) { requests.push(['draft', JSON.parse(options.body)]); return { ok: true, status: 200, json: async () => ({ uid: 40 + requests.length, folder: 'Drafts' }) }; }
+  if (path.endsWith('/mail/draft')) { requests.push(['draft', JSON.parse(options.body)]); return { ok: true, status: 200, json: async () => savedDraftFixture(JSON.parse(options.body).accountId, 40 + requests.length) }; }
   if (path.endsWith('/mail/send')) { requests.push(['send', JSON.parse(options.body)]); return { ok: true, status: 200, json: async () => ({ messageId: '<x@y>' }) }; }
   return { ok: true, status: 200, json: async () => ({}) };
 };
-const ACCOUNTS = [{ id: 'acct', email_address: 'me@example.test', aliases: [], signature: '', signature_enabled: true }];
+const ACCOUNTS = [{ id: '20000000-0000-4000-8000-000000000001', email_address: 'me@example.test', aliases: [], signature: '', signature_enabled: true }];
 
 const proxyOf = (id, raw) => `/api/mail/messages/${id}/image?u=${encodeURIComponent(raw)}`;
 const QUOTED_RAW = 'https://img.example/logo.png?x=1&amp;y=2';
@@ -97,11 +100,11 @@ const edit = () => React.act(async () => { document.querySelector('.ProseMirror'
 const shownImages = () => [...document.querySelectorAll('img')].map(img => img.getAttribute('src'));
 
 const reply = {
-  accountId: 'acct', to: ['ann@example.test'], subject: 'Re: Hi', body: '', isReply: true,
+  accountId: '20000000-0000-4000-8000-000000000001', to: ['ann@example.test'], subject: 'Re: Hi', body: '', isReply: true,
   quotedBody: '\n\n> hi', quotedBodyHtml: quoted,
 };
 const draft = {
-  accountId: 'acct', draftUid: 7, draftFolder: 'Drafts', to: ['ann@example.test'], subject: 'Re: Hi', bodyIsHtml: true,
+  accountId: '20000000-0000-4000-8000-000000000001', ...composeDraftFixture('20000000-0000-4000-8000-000000000001', 7), to: ['ann@example.test'], subject: 'Re: Hi', bodyIsHtml: true,
   body: `<p>Draft</p><p><img src="${proxyOf(DRAFT, BODY_RAW)}"></p>`,
   signature: `<p>Me</p><img src="${proxyOf(DRAFT, SIG_RAW)}">`,
 };

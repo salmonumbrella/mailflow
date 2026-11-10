@@ -333,12 +333,22 @@ describe('deliverAndRecord', () => {
     const onResult = vi.fn();
     const msg = await message({ sentDraft: { uid: 3, folder: 'Drafts', accountId: 'a1' } });
     const result = await deliverAndRecord(msg, { onResult });
-    expect(result).toEqual({ ok: true, sentFolder: 'Sent', messageId: msg.delivery.mailOptions.messageId });
+    expect(result).toEqual({ ok: true, sentFolder: 'Sent', messageId: msg.delivery.mailOptions.messageId, cleanup: { status: 'deleted' } });
     expect(onResult).toHaveBeenCalledWith(result);
     expect(sendMail).toHaveBeenCalledWith(msg.delivery.mailOptions);
     expect(deleteSentDraft).toHaveBeenCalledWith('u1', account, { uid: 3, folder: 'Drafts', accountId: 'a1' });
     expect(imapManager.appendToSent).toHaveBeenCalledOnce();
     expect(imapManager.appendToSent).toHaveBeenCalledWith(account, 'Sent', msg.delivery.rawMessage);
+  });
+
+  it('reports retained draft cleanup without failing or retrying delivered mail', async () => {
+    deleteSentDraft.mockResolvedValueOnce(false);
+    const sentDraft = { uid: 7, folder: 'Drafts', accountId: account.id, source: null };
+    const result = await deliverAndRecord(await message({ sentDraft }));
+    expect(result).toMatchObject({ ok: true, cleanup: { status: 'retained', code: 'draft_source_changed' } });
+    expect(sendMail).toHaveBeenCalledOnce();
+    expect(deleteSentDraft).toHaveBeenCalledExactlyOnceWith('u1', account, sentDraft);
+    expect(imapManager.appendToSent).toHaveBeenCalledOnce();
   });
 
   // A Sent APPEND still uploading when the 20 s wait ran out (a large attachment, a slow link) could

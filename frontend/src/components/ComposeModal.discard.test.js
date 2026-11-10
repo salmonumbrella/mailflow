@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { draftSourceFixture, savedDraftFixture, composeDraftFixture, signatureLibraryFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { setImmediate } from 'node:timers';
@@ -48,6 +49,8 @@ globalThis.cancelAnimationFrame = id => clearTimeout(id);
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
+const { api } = await import('../utils/api.js');
+api.getSignatureLibrary = async accountId => signatureLibraryFixture(useStore.getState().accounts.find(account => account.id === accountId));
 const ComposeModal = (await import('./ComposeModal.jsx')).default;
 
 
@@ -65,16 +68,16 @@ globalThis.fetch = async (url, options = {}) => {
     requests.push(['draft', JSON.parse(options.body)]);
     const uid = 40 + requests.filter(([k]) => k === 'draft').length;
     if (draftResponder) await new Promise(resolve => { draftResponder = resolve; });
-    return { ok: true, status: 200, json: async () => ({ uid, folder: 'Drafts' }) };
+    return { ok: true, status: 200, json: async () => savedDraftFixture('20000000-0000-4000-8000-000000000011', uid) };
   }
   if (method === 'DELETE' && path.includes('/mail/draft/')) {
-    requests.push(['delete', path.slice(path.indexOf('/mail/draft/'))]);
+    requests.push(['delete', path.slice(path.indexOf('/mail/draft/')), options.headers]);
     if (deleteGate) await new Promise(resolve => { deleteGate = resolve; });
-    return { ok: deleteStatus === 200, status: deleteStatus, json: async () => (deleteStatus === 200 ? { ok: true } : { error: 'IMAP down' }) };
+    return { ok: deleteStatus === 200, status: deleteStatus, json: async () => (deleteStatus === 200 ? { ok: true, cleanup: { status: 'deleted' } } : { error: 'IMAP down' }) };
   }
   return { ok: true, status: 200, json: async () => ({}) };
 };
-const ACCOUNTS = [{ id: 'on', email_address: 'on@example.test', aliases: [], signature: '', signature_enabled: false }];
+const ACCOUNTS = [{ id: '20000000-0000-4000-8000-000000000011', email_address: 'on@example.test', aliases: [], signature: '', signature_enabled: false }];
 const click = el => React.act(async () => { el.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); });
 const settle = () => React.act(async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); });
 const buttons = () => [...document.querySelectorAll('button')];
@@ -100,7 +103,7 @@ const edit = (value = 'typed') => React.act(async () => {
 const save = async () => { await edit(); await React.act(async () => { await useStore.getState().prepareComposeSwitch(); }); };
 
 test('an empty composer with nothing saved closes on Discard without asking', async () => {
-  const root = await mount({ accountId: 'on' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011' });
   try {
     await click(discardButton());
     await settle();
@@ -110,7 +113,7 @@ test('an empty composer with nothing saved closes on Discard without asking', as
 });
 
 test('Discard after an autosave confirms, deletes that draft and closes', async () => {
-  const root = await mount({ accountId: 'on', to: ['to@example.test'], subject: 's', body: 'hi' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', to: ['to@example.test'], subject: 's', body: 'hi' });
   try {
     await save();
     assert.equal(drafts().length, 1);
@@ -120,13 +123,15 @@ test('Discard after an autosave confirms, deletes that draft and closes', async 
     assert.equal(useStore.getState().composing, true);
     await click(byText('compose.discardDraft.discard'));
     await settle();
-    assert.deepEqual(deletes(), ['/mail/draft/41?accountId=on&folder=Drafts']);
+    assert.deepEqual(deletes(), ['/mail/draft/41?accountId=20000000-0000-4000-8000-000000000011&folder=Drafts']);
+    assert.equal(requests.find(([kind]) => kind === 'delete')[2]['X-Mailflow-Message-Source'],
+      encodeURIComponent(JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000011', 41))));
     assert.equal(useStore.getState().composing, false);
   } finally { await unmount(root); }
 });
 
 test('Keep editing leaves the draft and the composer alone', async () => {
-  const root = await mount({ accountId: 'on', to: ['to@example.test'], subject: 's', body: 'hi' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', to: ['to@example.test'], subject: 's', body: 'hi' });
   try {
     await save();
     await click(discardButton());
@@ -138,7 +143,7 @@ test('Keep editing leaves the draft and the composer alone', async () => {
 });
 
 test('a save still running when Discard is confirmed is waited for, and its draft is the one deleted', async () => {
-  const root = await mount({ accountId: 'on', to: ['to@example.test'], subject: 's', body: 'hi' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', to: ['to@example.test'], subject: 's', body: 'hi' });
   try {
     draftResponder = true;
     let saving;
@@ -150,14 +155,16 @@ test('a save still running when Discard is confirmed is waited for, and its draf
     assert.deepEqual(deletes(), [], 'no delete before the running save has answered');
     await React.act(async () => { draftResponder(); await saving; });
     await settle();
-    assert.deepEqual(deletes(), ['/mail/draft/41?accountId=on&folder=Drafts']);
+    assert.deepEqual(deletes(), ['/mail/draft/41?accountId=20000000-0000-4000-8000-000000000011&folder=Drafts']);
+    assert.equal(requests.find(([kind]) => kind === 'delete')[2]['X-Mailflow-Message-Source'],
+      encodeURIComponent(JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000011', 41))));
     assert.equal(drafts().length, 1, 'no save after Discard started');
     assert.equal(useStore.getState().composing, false);
   } finally { await unmount(root); }
 });
 
 test('a failed delete keeps the composer open with an error, and Discard can be retried', async () => {
-  const root = await mount({ accountId: 'on', to: ['to@example.test'], subject: 's', body: 'hi' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', to: ['to@example.test'], subject: 's', body: 'hi' });
   try {
     await save();
     deleteStatus = 500;
@@ -176,18 +183,20 @@ test('a failed delete keeps the composer open with an error, and Discard can be 
 });
 
 test('a draft opened from Drafts is the one Discard deletes', async () => {
-  const root = await mount({ accountId: 'on', draftUid: 12, draftFolder: 'Drafts', draftAccountId: 'on',
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', ...composeDraftFixture('20000000-0000-4000-8000-000000000011', 12), draftAccountId: '20000000-0000-4000-8000-000000000011',
     to: ['to@example.test'], subject: 's', body: 'hi' });
   try {
     await click(discardButton());
     await click(byText('compose.discardDraft.discard'));
     await settle();
-    assert.deepEqual(deletes(), ['/mail/draft/12?accountId=on&folder=Drafts']);
+    assert.deepEqual(deletes(), ['/mail/draft/12?accountId=20000000-0000-4000-8000-000000000011&folder=Drafts']);
+    assert.equal(requests.find(([kind]) => kind === 'delete')[2]['X-Mailflow-Message-Source'],
+      encodeURIComponent(JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000011', 12))));
   } finally { await unmount(root); }
 });
 
 test('closing with unsaved edits still offers Save, and its Discard closes without a delete when nothing was saved', async () => {
-  const root = await mount({ accountId: 'on' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011' });
   try {
     await edit();
     await click(buttons().find(b => b.getAttribute('title') === 'compose.toolbar.close'));
@@ -202,20 +211,22 @@ test('closing with unsaved edits still offers Save, and its Discard closes witho
 test('on mobile the header Discard uses the bottom sheet and deletes the saved draft', async () => {
   const width = window.innerWidth;
   window.innerWidth = 390;
-  const root = await mount({ accountId: 'on', to: ['to@example.test'], subject: 's', body: 'hi' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', to: ['to@example.test'], subject: 's', body: 'hi' });
   try {
     await save();
     await click(discardButton());
     assert.ok(document.body.textContent.includes('compose.discardDraft.title'));
     await click(byText('compose.discardDraft.discard'));
     await settle();
-    assert.deepEqual(deletes(), ['/mail/draft/41?accountId=on&folder=Drafts']);
+    assert.deepEqual(deletes(), ['/mail/draft/41?accountId=20000000-0000-4000-8000-000000000011&folder=Drafts']);
+    assert.equal(requests.find(([kind]) => kind === 'delete')[2]['X-Mailflow-Message-Source'],
+      encodeURIComponent(JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000011', 41))));
     assert.equal(useStore.getState().composing, false);
   } finally { await unmount(root); window.innerWidth = width; }
 });
 
 test('no save runs once Discard has started, even while the delete is still on its way', async () => {
-  const root = await mount({ accountId: 'on', to: ['to@example.test'], subject: 's', body: 'hi' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', to: ['to@example.test'], subject: 's', body: 'hi' });
   try {
     await save();
     deleteGate = true;
@@ -233,7 +244,7 @@ test('no save runs once Discard has started, even while the delete is still on i
 });
 
 test('the Discard confirmation never offers Save, even with unsaved edits', async () => {
-  const root = await mount({ accountId: 'on' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011' });
   try {
     await edit();
     await click(discardButton());

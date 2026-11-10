@@ -94,6 +94,11 @@
     "hidePassword": "Ukryj hasło"
   },
   "compose": {
+    "draftSourceUnavailable": "Nie udało się zweryfikować tej wersji roboczej. Zachowaj swój tekst, a następnie odśwież folder Szkice i przejrzyj zapisane kopie, zanim ją zapiszesz lub usuniesz.",
+    "draftRetainedTitle": "Oryginalna wersja robocza zachowana",
+    "draftRetainedBody": "Nie udało się bezpiecznie usunąć oryginalnej wersji roboczej. Odśwież folder Szkice i przejrzyj zapisane kopie.",
+    "draftSeparateConfirm": "Zapisać bieżący tekst jako osobną wersję roboczą? Istniejące zapisane kopie zostaną zachowane. Następnie sprawdź folder Szkice.",
+    "draftSeparateCopy": "Zapisz jako osobną wersję roboczą",
     "unsupportedDraftFrom": "Wybierz skonfigurowanego nadawcę przed zapisaniem lub wysłaniem tego szkicu.",
     "newMessage": "Nowa wiadomość",
     "reply": "Odpowiedz",

@@ -6772,7 +6772,7 @@ export class ImapManager {
     const write = identityContext
       ? callback => writeObservedMessage(identityContext, { uid }, callback)
       : callback => writeUnverifiedMessage(account, folder, uid, callback);
-    await write(tx => tx.query(`
+    const result = await write(tx => tx.query(`
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
@@ -6807,6 +6807,7 @@ export class ImapManager {
         body_text = COALESCE(EXCLUDED.body_text, messages.body_text),
         -- No keep-old guard like to/cc: sync never writes Bcc, so this save is its only source.
         bcc_addresses = EXCLUDED.bcc_addresses
+      RETURNING id, account_id, folder, uid
     `, [
       account.id, uid, folder, msgId,
       sanitizeStr(subject || '(no subject)'),
@@ -6822,6 +6823,7 @@ export class ImapManager {
       Boolean(hasAttachments),
       providerProfile(account).labelStore ? providerMsgid : null,
     ]));
+    return identityContext ? result?.rows?.[0] || null : null;
   }
 
   async findReplyDrafts(account, paths, messageIds) {
@@ -6963,7 +6965,8 @@ export class ImapManager {
       uidValidity, validIdentity, identityContext.providerNamespace ? parsed.providerMsgid || null : null,
       parsed.rfc822SizeBytes ?? null]));
     if (!rows.length) throw new Error('Draft ingestion did not persist a row');
-    return { id: rows[0].id, account_id: account.id, uid, folder, message_id: parsed.messageId,
+    return { id: rows[0].id, entity_id: rows[0].entity_id, storage_generation: rows[0].storage_generation,
+      account_id: account.id, uid, folder, message_id: parsed.messageId,
       subject: parsed.subject || '', from_email: parsed.fromEmail, from_name: parsed.fromName,
       to_addresses: parsed.to || [], cc_addresses: parsed.cc || [], bcc_addresses: bcc,
       in_reply_to: parsed.inReplyTo, thread_references: parsed.references, thread_id: rows[0].thread_id,
@@ -8094,18 +8097,38 @@ export class ImapManager {
   // so one read from a stale row, or looked up in the wrong account, would otherwise expunge
   // whatever sits there. Resolves false, having deleted nothing, when it does not match, and true
   // when nothing holds the uid any more, which is where a delete would have left it.
-  async permanentDeleteMessage(account, uid, folder, { expectMessageId, expectRow, expectedSource } = {}) {
+  async permanentDeleteMessage(account, uid, folder, { expectMessageId, expectRow, expectedSource, expectedOwnerId } = {}) {
+    account = Object.freeze({ ...account, ...(expectedOwnerId ? { expectedOwnerId } : {}) });
+    expectedSource = expectedSource ? Object.freeze({ ...expectedSource }) : undefined;
+    if (expectedSource && (expectedSource.account_id !== account.id || String(expectedSource.uid) !== String(uid)
+      || expectedSource.folder !== folder || expectedSource.storage_generation !== account.storage_generation)) {
+      throw Object.assign(new Error('The draft source changed'), { status: 409, code: 'identity_source_changed' });
+    }
+    const snapshot = expectedSource ? await readMailboxIdentity(account, folder) : null;
+    if (expectedSource) await assertExpectedSource(snapshot, expectedSource);
     const expected = expectRow ?? (expectMessageId === undefined ? undefined : { message_id: expectMessageId });
     return withFreshClient(account, async (client) => {
-      const snapshot = expectedSource ? await readMailboxIdentity(account, folder) : null;
       const selectedBefore = client.mailbox;
       let identityContext = null;
+      const assertSelectedSource = () => {
+        assertSelectedMailboxIdentity(identityContext, client);
+        if (providerIdentityNamespace(client) !== identityContext.providerNamespace) {
+          throw Object.assign(new Error('Provider identity capability changed during deletion'), { code: 'identity_namespace_changed' });
+        }
+      };
+      const validateSource = async () => {
+        await assertOperationIdentity(identityContext, client);
+        await assertExpectedSource(identityContext, expectedSource);
+        // The database check itself can wait while the selected session changes.
+        assertSelectedSource();
+      };
       const lock = await client.getMailboxLock(folder);
       try {
         if (expectedSource) {
           if (selectedBefore && client.mailbox === selectedBefore) await refreshSelectedMailbox(client);
           identityContext = await observeMailboxIdentity(snapshot, client);
           await assertExpectedSource(identityContext, expectedSource);
+          assertSelectedSource();
         }
         if (expected) {
           let copy = null;
@@ -8117,14 +8140,8 @@ export class ImapManager {
           if (!isRowsMessage(expected, copy)) return false;
           if (!bareMessageId(expected.message_id) && await hasOtherMatch(client, expected, uid)) return false;
         }
-        if (identityContext) {
-          await assertOperationIdentity(identityContext, client);
-          await assertExpectedSource(identityContext, expectedSource);
-        }
-        if (!(await expungeUids(client, String(uid), identityContext ? async () => {
-          await assertOperationIdentity(identityContext, client);
-          await assertExpectedSource(identityContext, expectedSource);
-        } : null))) throw new Error('messageDelete returned false — server did not confirm deletion');
+        if (identityContext) await validateSource();
+        if (!(await expungeUids(client, String(uid), identityContext ? validateSource : null))) throw new Error('messageDelete returned false — server did not confirm deletion');
         return true;
       } finally {
         lock.release();

@@ -34,14 +34,15 @@ export function sendErrorText(err, t) {
 // two messages. A wait is dropped if the user signs out meanwhile: the message is theirs, not
 // the next user's. Returns whether it opened now.
 export function reopenCompose(store, data) {
-  if (!store.getState().composing) {
-    store.getState().openCompose(data);
-    return true;
-  }
-  const owner = store.getState().user?.id;
-  const unsubscribe = store.subscribe(state => {
-    if (state.user?.id !== owner) { unsubscribe(); return; }
-    if (state.composing) return;
+  const initial = store.getState();
+  if (initial.composeSignOutPending) return false;
+  const owner = initial.user?.id;
+  const epoch = initial.composeAuthEpoch;
+  const owns = state => state.user?.id === owner && state.composeAuthEpoch === epoch && !state.composeSignOutPending;
+  if (!initial.composing && !initial.isLocked) return initial.openCompose(data) !== false;
+  const unsubscribe = store.subscribe((state, previous) => {
+    if (!owns(state) || (previous && !owns(previous))) { unsubscribe(); return; }
+    if (state.composing || state.isLocked) return;
     unsubscribe();
     state.openCompose(data);
   });

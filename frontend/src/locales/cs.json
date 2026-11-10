@@ -637,6 +637,11 @@
     }
   },
   "compose": {
+    "draftSourceUnavailable": "Tento koncept se nepodařilo ověřit. Ponechte si text, pak obnovte složku Koncepty a před uložením nebo odstraněním konceptu zkontrolujte uložené kopie.",
+    "draftRetainedTitle": "Původní koncept zachován",
+    "draftRetainedBody": "Původní koncept se nepodařilo bezpečně odstranit. Obnovte složku Koncepty a zkontrolujte uložené kopie.",
+    "draftSeparateConfirm": "Uložit aktuální text jako samostatný koncept? Stávající uložené kopie zůstanou zachovány. Poté zkontrolujte složku Koncepty.",
+    "draftSeparateCopy": "Uložit jako samostatný koncept",
     "unsupportedDraftFrom": "Před uložením nebo odesláním tohoto konceptu vyberte nastaveného odesílatele.",
     "newMessage": "Nová zpráva",
     "reply": "Odpovědět",

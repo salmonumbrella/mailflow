@@ -94,6 +94,11 @@
     "hidePassword": "Masquer le mot de passe"
   },
   "compose": {
+    "draftSourceUnavailable": "Ce brouillon n’a pas pu être vérifié. Conservez votre texte, puis actualisez le dossier Brouillons et vérifiez les copies enregistrées avant de l’enregistrer ou de le supprimer.",
+    "draftRetainedTitle": "Brouillon d’origine conservé",
+    "draftRetainedBody": "Le brouillon d’origine n’a pas pu être supprimé en toute sécurité. Actualisez le dossier Brouillons et vérifiez les copies enregistrées.",
+    "draftSeparateConfirm": "Enregistrer le texte actuel dans un brouillon distinct ? Les copies déjà enregistrées seront conservées. Vérifiez ensuite le dossier Brouillons.",
+    "draftSeparateCopy": "Enregistrer comme brouillon distinct",
     "unsupportedDraftFrom": "Choisissez un expéditeur configuré avant d’enregistrer ou d’envoyer ce brouillon.",
     "newMessage": "Nouveau message",
     "reply": "Répondre",

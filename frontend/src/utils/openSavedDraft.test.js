@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { draftRowFixture, draftSourceFixture } from '../test/draftSourceFixture.js';
 import { savedDraftToComposeData } from './openSavedDraft.js';
 
 const draft = {
-  id: 'draft-1', account_id: 'account-1', uid: 73, folder: 'Drafts',
+  ...draftRowFixture('20000000-0000-4000-8000-000000000003', 73),
   subject: 'Re: report', in_reply_to: '<root@example.test>',
   thread_references: '<root@example.test> <sent@example.test>',
   thread_id: '<root@example.test>',
@@ -25,7 +26,7 @@ test('maps a saved HTML reply with signature, recipients, headers and persisted 
   assert.equal(data.inReplyTo, draft.in_reply_to);
   assert.equal(data.references, draft.thread_references);
   assert.equal(data.threadId, draft.thread_id);
-  assert.equal(data.persistedKey, 'account-1:Drafts:73:<draft@example.test>:');
+  assert.equal(data.persistedKey, JSON.stringify(draftSourceFixture('20000000-0000-4000-8000-000000000003', 73)));
 });
 
 test('keeps comma display names as objects and suppresses an unmarked external signature', () => {
@@ -43,18 +44,18 @@ test('marks unsupported From and incomplete attachment metadata so destructive a
 });
 
 test('maps plain text and flags external attachments for safe handling', () => {
-  const data = savedDraftToComposeData({ ...draft, id: 'external', has_attachments: true }, {
+  const data = savedDraftToComposeData({ ...draft, ...draftRowFixture('20000000-0000-4000-8000-000000000003', 74), has_attachments: true }, {
     text: 'plain reply', attachments: [{ part: '2', filename: 'file.txt', size: 12 }],
   });
   assert.equal(data.body, 'plain reply');
   assert.equal(data.bodyIsHtml, false);
   assert.equal(data.externalAttachments.length, 1);
-  assert.deepEqual(data.forwardedAttachments, [{ messageId: 'external', part: '2', filename: 'file.txt', size: 12 }]);
+  assert.deepEqual(data.forwardedAttachments, [{ messageId: draftRowFixture('20000000-0000-4000-8000-000000000003', 74).id, part: '2', filename: 'file.txt', size: 12 }]);
 });
 
 test('reopens a draft from a configured alias with that same sender', () => {
   const data = savedDraftToComposeData({ ...draft, from_email: 'alias@example.test' },
-    { text: 'reply' }, [{ id: 'account-1', email_address: 'main@example.test',
+    { text: 'reply' }, [{ id: '20000000-0000-4000-8000-000000000003', email_address: 'main@example.test',
       aliases: [{ id: 'alias-1', email: 'alias@example.test' }] }]);
   assert.equal(data.aliasId, 'alias-1');
 });
@@ -62,19 +63,19 @@ test('reopens a draft from a configured alias with that same sender', () => {
 // #640: a draft from another client whose HTML shows an attached photo keeps it in that HTML.
 test('does not attach again a photo the reopened draft\'s HTML shows', () => {
   const photo = { part: '2', filename: 'photo.jpg', size: 10, shownInline: true };
-  const data = savedDraftToComposeData({ ...draft, id: 'external', has_attachments: true }, {
+  const data = savedDraftToComposeData({ ...draft, ...draftRowFixture('20000000-0000-4000-8000-000000000003', 74), has_attachments: true }, {
     html: '<p>Reply<img src="data:image/jpeg;base64,AA"></p>', attachments: [photo, { part: '3', filename: 'a.pdf', size: 5 }],
   });
-  assert.deepEqual(data.forwardedAttachments, [{ messageId: 'external', part: '3', filename: 'a.pdf', size: 5 }]);
+  assert.deepEqual(data.forwardedAttachments, [{ messageId: draftRowFixture('20000000-0000-4000-8000-000000000003', 74).id, part: '3', filename: 'a.pdf', size: 5 }]);
   assert.equal(data.unresolvedExternalAttachments, false);
 
-  const only = savedDraftToComposeData({ ...draft, id: 'external', has_attachments: true }, {
+  const only = savedDraftToComposeData({ ...draft, ...draftRowFixture('20000000-0000-4000-8000-000000000003', 74), has_attachments: true }, {
     html: '<p>Reply<img src="data:image/jpeg;base64,AA"></p>', attachments: [photo],
   });
   assert.deepEqual(only.forwardedAttachments, []);
   assert.deepEqual(only.externalAttachments, []);
   assert.equal(only.unresolvedExternalAttachments, false);
 
-  const text = savedDraftToComposeData({ ...draft, id: 'external', has_attachments: true }, { text: 'Reply', attachments: [photo] });
-  assert.deepEqual(text.forwardedAttachments, [{ messageId: 'external', part: '2', filename: 'photo.jpg', size: 10 }]);
+  const text = savedDraftToComposeData({ ...draft, ...draftRowFixture('20000000-0000-4000-8000-000000000003', 74), has_attachments: true }, { text: 'Reply', attachments: [photo] });
+  assert.deepEqual(text.forwardedAttachments, [{ messageId: draftRowFixture('20000000-0000-4000-8000-000000000003', 74).id, part: '2', filename: 'photo.jpg', size: 10 }]);
 });

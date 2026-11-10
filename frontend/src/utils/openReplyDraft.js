@@ -8,13 +8,12 @@ let requestSequence = 0;
 let manualRequest = 0;
 export const replyDraftScope = state => ({ accountId: state.selectedAccountId || undefined,
   threaded: groupsMessageList(state.conversationMode) && !state.searchQuery });
-const identity = draft => JSON.stringify([draft.account_id, draft.folder, draft.uid,
-  draft.message_id, draft.uid_validity]);
+const identity = draft => JSON.stringify([draft.id, draft.account_id, draft.storage_generation, draft.entity_id, draft.folder, draft.uid, draft.uid_validity]);
 
 export async function openReplyDraft(messageId, { automatic = false, liveResult, liveScope, liveRevision } = {}) {
   if (automatic && manualRequest) return false;
   const initial = useStore.getState();
-  if (automatic && !initial.autoOpenReplyDrafts) return false;
+  if (initial.isLocked || initial.composeSignOutPending || (automatic && !initial.autoOpenReplyDrafts)) return false;
   if (automatic && (initial.selectedMessageId !== messageId || initial.selectedFolder?.toUpperCase() !== 'INBOX')) return false;
   if (automatic && initial.composing && initial.composeData?.source !== 'automaticReplyDraft') return false;
   const scope = replyDraftScope(initial);
@@ -24,13 +23,22 @@ export async function openReplyDraft(messageId, { automatic = false, liveResult,
   if (!automatic) manualRequest = sequence;
   let revision = initial.replyDraftRevision;
   let ownerChanged = false;
+  let contextChanged = false;
   let invalidated = false;
-  const unsubscribe = useStore.subscribe(state => {
-    if (state.user?.id !== initial.user?.id) ownerChanged = true;
+  const unsubscribe = useStore.subscribe((state, previous) => {
+    for (const value of [previous, state]) {
+      if (!value) continue;
+      if (value.user?.id !== initial.user?.id || value.isLocked !== initial.isLocked
+        || value.composeSignOutPending || value.composeAuthEpoch !== initial.composeAuthEpoch) ownerChanged = true;
+      if (value.selectedFolder !== initial.selectedFolder || value.selectedAccountId !== initial.selectedAccountId
+        || value.selectedMessageId !== initial.selectedMessageId || value.conversationMode !== initial.conversationMode
+        || value.searchQuery !== initial.searchQuery || value.composing !== initial.composing
+        || value.composeSession !== initial.composeSession || (automatic && !value.autoOpenReplyDrafts)) contextChanged = true;
+    }
   });
   const ownsContext = () => {
     const state = useStore.getState();
-    return !ownerChanged && state.user?.id === initial.user?.id
+    return !ownerChanged && !contextChanged && state.user?.id === initial.user?.id
       && (!automatic || state.autoOpenReplyDrafts)
       && sequence === requestSequence && state.selectedFolder === initial.selectedFolder
       && state.selectedAccountId === initial.selectedAccountId && state.selectedMessageId === initial.selectedMessageId
@@ -63,7 +71,7 @@ export async function openReplyDraft(messageId, { automatic = false, liveResult,
     if (!current()) return cancelled();
     if (!result.draft) { useStore.getState().setReplyDraftStatus(messageId, { exists: false }, 'live', useStore.getState().replyDraftRevision); notice(i18n.t('messageList.replyDraftUnavailable')); return false; }
     let data = savedDraftToComposeData(result.draft, result.body, useStore.getState().accounts);
-    if (initial.composing && initial.composeData?.persistedKey === data.persistedKey) {
+    if (initial.composing && data.persistedKey && initial.composeData?.persistedKey === data.persistedKey) {
       if (!automatic) useStore.setState({ composeData: { ...useStore.getState().composeData, source: 'manualReplyDraft' } });
       return true;
     }

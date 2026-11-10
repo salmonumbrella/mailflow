@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, forwardRef, lazy, Suspense } from 'react';
 import { createPortal, flushSync } from 'react-dom';
+import { draftPointerFromCompose, draftPointerFromReceipt, draftPointerData, draftSourceForPointer } from '../utils/draftSource.js';
 import { createComposeSwitch } from '../utils/composeSwitch.js';
 import { shouldAutosave, isAutosaveDue } from '../utils/draftAutosave.js';
 import { useTranslation } from 'react-i18next';
@@ -226,6 +227,23 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const richModeSnapshotRef = useRef(null);
   const composeSession = useRef(useStore.getState().composeSession).current;
   const composeOwner = useRef(useStore.getState().user?.id).current;
+  const composeAuthEpoch = useRef(useStore.getState().composeAuthEpoch).current;
+  const composeLifetimeRef = useRef(true);
+  const ownsCompose = () => {
+    const state = useStore.getState();
+    return composeLifetimeRef.current && state.user?.id === composeOwner && !state.isLocked
+      && !state.composeSignOutPending && state.composeAuthEpoch === composeAuthEpoch
+      && state.composing && state.composeSession === composeSession;
+  };
+  useLayoutEffect(() => {
+    composeLifetimeRef.current = true;
+    const unsubscribe = useStore.subscribe((state, previous) => {
+      for (const value of [previous, state]) if (value && (value.user?.id !== composeOwner || value.isLocked
+        || value.composeSignOutPending || value.composeAuthEpoch !== composeAuthEpoch
+        || !value.composing || value.composeSession !== composeSession)) composeLifetimeRef.current = false;
+    });
+    return () => { composeLifetimeRef.current = false; unsubscribe(); };
+  }, [composeOwner, composeSession, composeAuthEpoch]);
   const isMobile = useMobile();
   const uiScale = useUiScale();
 
@@ -248,8 +266,12 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   });
   const [fromValue, setFromValue] = useState(initialFromValue);
   const unsupportedSenderRef = useRef(Boolean(composeData?.unsupportedFrom));
+  const senderRevisionRef = useRef(0);
+  const currentFromRef = useRef(fromValue);
+  if (currentFromRef.current !== fromValue) { currentFromRef.current = fromValue; senderRevisionRef.current++; }
   const chooseFrom = value => {
     if (value !== fromValue && signatureManuallyEditedRef.current && !window.confirm(t('signatureLibrary.changeSender', 'Change sender and replace this message’s edited signature? The message body will be kept.'))) return;
+    if (currentFromRef.current !== value) { currentFromRef.current = value; senderRevisionRef.current++; }
     unsupportedSenderRef.current = false; setFromValue(value);
   };
 
@@ -502,7 +524,31 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const lastEditAtRef = useRef(Date.now());
   const lastSaveAtRef = useRef(Date.now());
   const bodyEditedRef = useRef(false);
-  const draftPointerRef = useRef({ uid: composeData?.draftUid ?? null, folder: composeData?.draftFolder ?? null, accountId: composeData?.draftAccountId ?? composeData?.accountId ?? null });
+  const draftPointerRef = useRef(draftPointerFromCompose(composeData));
+  const draftSaveUncertainRef = useRef(Boolean(composeData?.draftSaveUncertain));
+  const saveAsCopyRef = useRef(false);
+  const draftContextRevisionRef = useRef(0);
+  useLayoutEffect(() => {
+    const context = state => {
+      const sender = resolveFrom(currentFromRef.current).accountId;
+      const pointer = draftPointerFromCompose(state.composeData);
+      return JSON.stringify([pointer, [sender, pointer.accountId].map(id => {
+        const account = state.accounts.find(item => item.id === id);
+        return account ? [account.id, account.email_address, account.storage_generation, account.enabled, account.user_id,
+          account.aliases?.map(alias => [alias.id, alias.email])] : null;
+      })]);
+    };
+    let previous = context(useStore.getState());
+    return useStore.subscribe((state, before) => {
+      const next = context(state);
+      if (next !== previous || (before && context(before) !== previous)) draftContextRevisionRef.current++;
+      previous = next;
+    });
+  }, [fromValue]);
+  const draftSourceError = () => t('compose.draftSourceUnavailable', { defaultValue: 'This draft could not be verified. Keep your text, then refresh Drafts and review the saved copies before saving or removing it.' });
+  const reportRetainedDraft = () => addNotification({ type: 'error', persistent: true, allowWrap: true,
+    title: t('compose.draftRetainedTitle', { defaultValue: 'Original draft kept' }),
+    body: t('compose.draftRetainedBody', { defaultValue: 'The original draft could not be safely removed. Refresh Drafts and review the saved copies.' }) });
   // Set once Discard starts (#573): saves refuse to run, so none can recreate the draft being deleted.
   const discardedRef = useRef(false);
   const [discarding, setDiscarding] = useState(false);
@@ -1163,15 +1209,17 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   // the message cannot go yet. `resume(opts)` carries on later: once a draft save in progress is
   // done, or from a warning's "Send anyway".
   const readyToSubmit = async ({ skipSubjectWarn = false, skipAttachWarn = false } = {}, resume, { scheduling = false } = {}) => {
-    if (useStore.getState().user?.id !== composeOwner) return null;
+    if (!ownsCompose()) return null;
+    if (draftSaveUncertainRef.current) { setError(draftSourceError()); return null; }
     if (signatureDefaultsPending) { setError(signatureLibraryError || t('signatureLibrary.wait', 'Wait for signatures to load, or retry from the signature menu.')); return null; }
     if (sending || sendingRef.current || sendWaitingRef.current) return null;
     if (composeSwitchRef.current?.isSaving()) {
       sendWaitingRef.current = true;
-      try { await composeSwitchRef.current.waitForIdle(); }
+      let saved;
+      try { saved = await composeSwitchRef.current.waitForIdle(); }
       finally { sendWaitingRef.current = false; }
       const active = useStore.getState();
-      if (active.composing && active.composeSession === composeSession) resume({ skipSubjectWarn, skipAttachWarn });
+      if (saved && ownsCompose() && active.composing && active.composeSession === composeSession) resume({ skipSubjectWarn, skipAttachWarn });
       return null;
     }
     if (unsupportedSenderRef.current) { setError(t('compose.unsupportedDraftFrom', { defaultValue: 'Choose a configured sender before saving or sending this draft.' })); return null; }
@@ -1222,7 +1270,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       ? (quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedBodyHtml)
       : null;
     const sentQuotedBody = !plaintextEmail && sentQuotedHtml != null ? composerHtmlToText(sentQuotedHtml) : quotedBody;
-    const savedDraft = draftPointerRef.current;
+    const savedDraft = Object.freeze({ ...draftPointerRef.current, source: draftSourceForPointer(draftPointerRef.current) });
     const hasDraft = savedDraft.uid != null && savedDraft.folder != null && savedDraft.accountId;
     const payload = {
       accountId,
@@ -1273,9 +1321,8 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     unsupportedFrom: unsupportedSenderRef.current ? composeData?.unsupportedFrom : undefined,
     accountId,
     aliasId: aliasId || undefined,
-    draftUid: hasDraft ? savedDraft.uid : null,
-    draftFolder: hasDraft ? savedDraft.folder : null,
-    draftAccountId: hasDraft ? savedDraft.accountId : null,
+    ...draftPointerData(hasDraft ? savedDraft : null),
+    draftSaveUncertain: draftSaveUncertainRef.current,
     to: toFinal,
     cc: ccFinal,
     bcc: bccFinal,
@@ -1309,7 +1356,8 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   keepForLockRef.current = () => {
     if (scheduledEdit || sendingRef.current) return;
     const { accountId, aliasId } = resolveFrom(fromValue);
-    useStore.getState().keepComposeForLock(composeSession, buildRestoreData(buildSendPayload(accountId, aliasId)));
+    useStore.getState().keepComposeForLock(composeSession, { ...buildRestoreData(buildSendPayload(accountId, aliasId)),
+      draftSaveUncertain: draftSaveUncertainRef.current || composeSwitchRef.current?.isSaving() });
   };
   useEffect(() => {
     const keep = () => keepForLockRef.current?.();
@@ -1321,7 +1369,8 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     // A scheduled message being edited is saved, not sent (Ctrl+Enter is Update there).
     if (scheduledEdit) return updateRef.current(opts);
     const from = await readyToSubmit(opts, o => sendRef.current(o));
-    if (!from) return;
+    if (!from || !ownsCompose() || from.accountId !== resolveFrom(currentFromRef.current).accountId
+      || from.aliasId !== resolveFrom(currentFromRef.current).aliasId) return;
     const { accountId, aliasId } = from;
 
     localStorage.setItem('mailflow_last_from_account', accountId);
@@ -1340,7 +1389,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         // The server holds the message this long so it can still be undone, and deletes the
         // draft only once the message is delivered.
         undoSeconds: UNDO_SEND_SECONDS,
-        ...(hasDraft ? { draft: { uid: savedDraft.uid, folder: savedDraft.folder, accountId: savedDraft.accountId } } : {}),
+        ...(hasDraft ? { draft: { uid: savedDraft.uid, folder: savedDraft.folder, accountId: savedDraft.accountId, source: savedDraft.source } } : {}),
       }, { 'X-Idempotency-Key': idempotencyKeyRef.current });
       // Send confirmed — clear the key so a subsequent send from a reused modal gets a fresh one.
       idempotencyKeyRef.current = null;
@@ -1348,6 +1397,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       // Runs after this composer has closed (and for a held send, up to minutes later), so it
       // uses only the store and values captured here.
       const reportSent = (result) => {
+        if (hasDraft && result?.cleanup?.status !== 'deleted') reportRetainedDraft();
         // Prefer the Sent folder the backend actually resolved to; fall back to the account's
         // mapping only if the response didn't carry one. Avoids navigating "View" to a stale
         // mapping (e.g. a non-selectable "[Gmail]" parent) that the send path bypassed (#386).
@@ -1391,7 +1441,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         }
       };
       const active = useStore.getState();
-      if (active.user?.id !== composeOwner) return;
+      if (!ownsCompose()) return;
       if (active.composing && active.composeSession === composeSession) closeCompose();
 
       if (sendResult?.pending) {
@@ -1419,7 +1469,10 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
             },
             onOwnerChange: (stop) => {
               const owner = useStore.getState().user?.id;
-              return useStore.subscribe(state => { if (state.user?.id !== owner) stop(); });
+              return useStore.subscribe((state, previous) => {
+                for (const value of [previous, state]) if (value && (value.user?.id !== owner
+                  || value.composeSignOutPending || value.composeAuthEpoch !== composeAuthEpoch)) stop();
+              });
             },
             t,
           },
@@ -1429,12 +1482,11 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         return;
       }
 
-      // Delivered straight away, by a server without undo send: the browser deletes the draft.
-      if (hasDraft) {
-        api.deleteDraft(savedDraft.accountId, savedDraft.uid, savedDraft.folder).catch(() => {});
-      }
+      // Cleanup belongs to the server that delivered this send. An old server cannot prove it
+      // understood the source, so never follow a successful send with a browser UID-only delete.
       reportSent(sendResult);
     } catch (err) {
+      if (!ownsCompose()) return;
       setError(sendErrorText(err, t));
       sendingRef.current = false;
       setSending(false);
@@ -1469,24 +1521,31 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         // Another action on this message in the Scheduled view dismisses this Undo (UNDO_FOR).
         [UNDO_FOR]: undo.id,
         // Once only: a second click while the toast fades out must not reopen it twice.
-        onUndo: once(() => {
-          if (useStore.getState().user?.id !== owner) return;
-          return undoSchedule(undo, {
-            cancel: api.scheduled.cancel,
-            reopen: data => reopenCompose(useStore, data),
-            notify: n => useStore.getState().addNotification(n),
-            // Open goes to the message there, highlighted: a deleted one can be restored for minutes.
-            openView: () => openScheduledView(useStore, undo.id),
-            t,
-            loadAttachments: data => withScheduledAttachments(data, undo.id, api.scheduled),
+        onUndo: once(async () => {
+          const owns = state => state.user?.id === owner && state.composeAuthEpoch === composeAuthEpoch && !state.composeSignOutPending;
+          if (!owns(useStore.getState())) return;
+          let current = true;
+          const unsubscribe = useStore.subscribe((state, previous) => {
+            if (!owns(state) || (previous && !owns(previous))) current = false;
           });
+          try {
+            return await undoSchedule(undo, {
+              cancel: api.scheduled.cancel,
+              reopen: data => current && reopenCompose(useStore, data),
+              notify: n => { if (current) useStore.getState().addNotification(n); },
+              // Open goes to the message there, highlighted: a deleted one can be restored for minutes.
+              openView: () => { if (current) openScheduledView(useStore, undo.id); },
+              t,
+              loadAttachments: data => current ? withScheduledAttachments(data, undo.id, api.scheduled) : data,
+            });
+          } finally { unsubscribe(); }
         }),
       } : {}),
     });
   };
   const closeIfStillOpen = () => {
     const active = useStore.getState();
-    if (active.user?.id !== composeOwner) return false;
+    if (!ownsCompose()) return false;
     if (active.composing && active.composeSession === composeSession) closeCompose();
     return true;
   };
@@ -1496,7 +1555,8 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const handleSchedule = async (sendAt, opts = {}) => {
     if (scheduledEdit) return updateRef.current({ ...opts, sendAt });
     const from = await readyToSubmit(opts, o => scheduleRef.current(sendAt, o), { scheduling: true });
-    if (!from) return;
+    if (!from || !ownsCompose() || from.accountId !== resolveFrom(currentFromRef.current).accountId
+      || from.aliasId !== resolveFrom(currentFromRef.current).aliasId) return;
     const { accountId, aliasId } = from;
 
     localStorage.setItem('mailflow_last_from_account', accountId);
@@ -1514,15 +1574,17 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         ...(timeZone ? { timeZone } : {}),
         clientKey: clientKeyRef.current,
         compose: composeContext(),
-        ...(hasDraft ? { draft: { uid: savedDraft.uid, folder: savedDraft.folder, accountId: savedDraft.accountId } } : {}),
+        ...(hasDraft ? { draft: { uid: savedDraft.uid, folder: savedDraft.folder, accountId: savedDraft.accountId, source: savedDraft.source } } : {}),
       });
       if (!closeIfStillOpen()) return;
       if (hasDraft) useStore.getState().invalidateReplyDrafts();
-      // The server deleted the draft, so the message comes back without one, and autosave makes
-      // a new one.
-      const restoreData = { ...buildRestoreData({ ...built, hasDraft: false }), draftWasPreExisting: false };
+      const removed = result?.cleanup?.status === 'deleted';
+      if (hasDraft && !removed) reportRetainedDraft();
+      const restoreData = { ...buildRestoreData({ ...built, hasDraft: hasDraft && !removed }),
+        draftWasPreExisting: hasDraft && !removed ? draftWasPreExisting.current : false };
       reportScheduled(result?.sendAt || sendAt, { id: result.id, restoreData });
     } catch (err) {
+      if (!ownsCompose()) return;
       setError(scheduleErrorText(err, t));
       sendingRef.current = false;
       setSending(false);
@@ -1538,7 +1600,8 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   const saveScheduled = async ({ at, sendNow = false, confirm, skipSubjectWarn, skipAttachWarn, resume, retry, scheduling = true }) => {
     const hold = holdRef.current;
     const from = await readyToSubmit({ skipSubjectWarn, skipAttachWarn }, resume, { scheduling });
-    if (!from) return null;
+    if (!from || !ownsCompose() || from.accountId !== resolveFrom(currentFromRef.current).accountId
+      || from.aliasId !== resolveFrom(currentFromRef.current).aliasId) return null;
     const { accountId, aliasId } = from;
 
     sendingRef.current = true;
@@ -1816,11 +1879,16 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
       ? { editedSignature: value.bodyIsHtml ? unproxyImages(value.editedSignature) : value.editedSignature } : {}),
   });
   saveRef.current = async value => {
-    if (useStore.getState().user?.id !== composeOwner) return false;
+    if (!ownsCompose()) return false;
     // A scheduled message being edited is never copied to Drafts (design 2.3); Unschedule is the
     // one way there.
     if (scheduledEdit) return false;
     if (discardedRef.current) return false;
+    const asCopy = saveAsCopyRef.current;
+    saveAsCopyRef.current = false;
+    if (!asCopy && (draftSaveUncertainRef.current || (draftPointerRef.current.uid != null && !draftSourceForPointer(draftPointerRef.current)))) {
+      setError(draftSourceError()); return false;
+    }
     if (signatureDefaultsPending) { setError(signatureLibraryError || t('signatureLibrary.wait', 'Wait for signatures to load, or retry from the signature menu.')); return false; }
     const { accountId, aliasId } = resolveFrom(value.fromValue || fromValue);
     if (unsupportedSenderRef.current) { setError(t("compose.unsupportedDraftFrom", { defaultValue: "Choose a configured sender before saving or sending this draft.", email: composeData?.unsupportedFrom })); return false; }
@@ -1829,20 +1897,31 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     setError('');
     try {
       const pointer = draftPointerRef.current;
+      const senderRevision = senderRevisionRef.current;
+      const contextRevision = draftContextRevisionRef.current;
       const result = await api.saveDraft({
         accountId,
         includeIdentity: true,
         ...(aliasId ? { aliasId } : {}),
         ...draftFields(value),
-        ...(pointer.uid != null && pointer.folder != null ? { existingUid: pointer.uid, existingFolder: pointer.folder, existingAccountId: pointer.accountId } : {}),
+        ...(!asCopy && pointer.uid != null && pointer.folder != null ? { existingUid: pointer.uid, existingFolder: pointer.folder, existingAccountId: pointer.accountId, existingSource: pointer.source } : {}),
       });
-      if (useStore.getState().user?.id !== composeOwner) return false;
-      if (result.uid != null) {
-        draftPointerRef.current = { uid: result.uid, folder: result.folder, accountId };
-        setDraftUid(result.uid);
-        updateComposePersistedKey(composeSession, `${accountId}:${result.folder}:${result.uid}:${result.messageId || ""}:${composeData?.draftUidValidity || ""}`,
-          useStore.getState().composeData?.restored ? { draftUid: result.uid, draftFolder: result.folder, draftAccountId: accountId } : {});
+      if (!ownsCompose()) return false;
+      const nextPointer = draftPointerFromReceipt(result, accountId);
+      if (senderRevision !== senderRevisionRef.current || contextRevision !== draftContextRevisionRef.current || pointer !== draftPointerRef.current || !nextPointer) {
+        // APPEND may already have succeeded. Do not automatically repeat it or authorize a
+        // cleanup with the old locator after an unverified or out-of-date receipt.
+        draftSaveUncertainRef.current = true;
+        setError(draftSourceError());
+        return false;
       }
+      draftPointerRef.current = nextPointer;
+      draftSaveUncertainRef.current = false;
+      if (asCopy) draftWasPreExisting.current = false;
+      setDraftUid(nextPointer.uid);
+      const data = draftPointerData(nextPointer);
+      updateComposePersistedKey(composeSession, data.persistedKey, { ...data, draftSaveUncertain: false });
+      if (!asCopy && pointer.uid != null && result?.cleanup?.status !== 'deleted') reportRetainedDraft();
       richModeSnapshotRef.current = null;
       unsavedRestoreRef.current = false;
       const before = useStore.getState().replyDraftRevision;
@@ -1851,11 +1930,15 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         onDraftSaved({ before, after: useStore.getState().replyDraftRevision, session: composeSession });
       return true;
     } catch (err) {
-      setError(err.message);
+      if (!ownsCompose()) return false;
+      if (!err.status || err.status >= 500) {
+        draftSaveUncertainRef.current = true;
+        setError(draftSourceError());
+      } else setError(err.message);
       console.error('Save draft failed:', err.message);
       return false;
     } finally {
-      setSavingDraft(false);
+      if (ownsCompose()) setSavingDraft(false);
     }
   };
 
@@ -1939,6 +2022,23 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
     else if (!silent) addNotification({ title: t('compose.draftSaved'), body: subject || t('common.noSubject') });
     return true;
   };
+
+  const draftNeedsReview = draftSaveUncertainRef.current
+    || (draftPointerRef.current.uid != null && !draftSourceForPointer(draftPointerRef.current));
+  const saveSeparateDraft = async () => {
+    if (!ownsCompose() || savingDraft || sendingRef.current || discardedRef.current || composeSwitchRef.current.isSaving()) return;
+    if (attachments.length || fwdAttachments.length || composeData?.unresolvedExternalAttachments) {
+      setError(t('compose.draftHasAttachments')); return;
+    }
+    if (!window.confirm(t('compose.draftSeparateConfirm', { defaultValue: 'Save the current text as a separate draft? Existing saved copies will be kept. Review Drafts afterwards.' }))) return;
+    saveAsCopyRef.current = true;
+    try { await doSaveDraft(); } finally { saveAsCopyRef.current = false; }
+  };
+  const draftRecovery = draftNeedsReview ? <button type="button" onClick={saveSeparateDraft}
+    disabled={savingDraft || sending || discarding}
+    style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 5, padding: '4px 8px', color: 'var(--accent)', cursor: 'pointer' }}>
+    {t('compose.draftSeparateCopy', { defaultValue: 'Save as separate draft' })}
+  </button> : null;
 
   // ── Draft safety net (#413) ──────────────────────────────────────────────────────────
   // Compose state is component-local and the modal is mounted conditionally, so a refresh
@@ -2122,15 +2222,22 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
   // refused first and the running one is awaited; the newest pointer then names the draft. A
   // failed delete keeps the composer open with an error rather than closing as if it worked.
   const discardDraft = async () => {
-    if (discardedRef.current) return;
+    if (!ownsCompose() || discardedRef.current) return;
     discardedRef.current = true;
     setDiscarding(true);
     await composeSwitchRef.current?.waitForIdle?.();
-    const { uid, folder, accountId } = draftPointerRef.current;
+    if (!ownsCompose()) return;
+    const { uid, folder, accountId, source } = draftPointerRef.current;
+    if (draftSaveUncertainRef.current || (uid != null && !draftSourceForPointer(draftPointerRef.current))) {
+      discardedRef.current = false; setDiscarding(false); setError(draftSourceError()); return;
+    }
     if (uid != null && folder != null && accountId) {
       try {
-        await api.deleteDraft(accountId, uid, folder);
+        const result = await api.deleteDraft(accountId, uid, folder, source);
+        if (!ownsCompose()) return;
+        if (result?.cleanup?.status !== 'deleted') throw new Error('Draft cleanup was not confirmed');
       } catch {
+        if (!ownsCompose()) return;
         discardedRef.current = false;
         setDiscarding(false);
         setError(t('compose.discardFailed'));
@@ -2862,6 +2969,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
           {scheduledChips}
 
           {/* Error */}
+          {draftRecovery}
           {error && (
             <div style={{
               padding: '10px 16px', flexShrink: 0,
@@ -3592,6 +3700,7 @@ export default function ComposeModal({ gmailReplyTarget = null } = {}) {
         {plaintextEmail && renderSignatureToggle()}
         {renderGmailMore()}
 
+        {draftRecovery}
         {error && <span style={{ fontSize: 12, color: 'var(--red)', flex: 1 }}>{error}</span>}
 
         <select

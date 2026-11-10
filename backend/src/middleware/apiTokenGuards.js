@@ -115,7 +115,7 @@ const HEADER_BREAK = /[\r\n\0]/;
 function draft(req) {
   const body = req.body ?? {};
   // Replacing a draft permanently expunges the copy it replaces.
-  if (!absent(body.existingUid) || !absent(body.existingFolder) || !absent(body.existingAccountId)) {
+  if (!absent(body.existingUid) || !absent(body.existingFolder) || !absent(body.existingAccountId) || !absent(body.existingSource)) {
     return { status: 403, error: 'API tokens can only create new drafts' };
   }
   // draft.js deletes the scheduled message a draft was made from (fromScheduled). A token may

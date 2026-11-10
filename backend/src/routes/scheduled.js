@@ -295,6 +295,8 @@ async function update(userId, id, from, sets, params = [], extra = '') {
 router.post('/scheduled', async (req, res) => {
   const userId = req.session.userId;
   const body = req.body || {};
+  const draft = body.draft && typeof body.draft === 'object' && !Array.isArray(body.draft)
+    ? { uid: body.draft.uid, folder: body.draft.folder, accountId: body.draft.accountId, source: body.draft.source && typeof body.draft.source === 'object' ? Object.freeze({ ...body.draft.source }) : null } : null;
   const missing = missingSendFields(body);
   if (missing) return fail(res, 400, missing);
   if (typeof body.clientKey !== 'string' || !UUID_RE.test(body.clientKey)) return fail(res, 400, 'clientKey must be a UUID');
@@ -340,11 +342,10 @@ router.post('/scheduled', async (req, res) => {
   }
 
   // Only now is the scheduled row the copy: the draft it was written in goes (design 2.2).
-  const draft = body.draft && typeof body.draft === 'object' && !Array.isArray(body.draft)
-    ? { uid: body.draft.uid, folder: body.draft.folder, accountId: body.draft.accountId } : null;
-  if (draft) await deleteSentDraft(userId, spec.account, draft);
+  const cleanup = draft ? (await deleteSentDraft(userId, spec.account, draft)
+    ? { status: 'deleted' } : { status: 'retained', code: 'draft_source_changed' }) : null;
   changed(userId, id, 'scheduled');
-  res.status(201).json({ id, sendAt: sendAt.toISOString(), status: 'scheduled' });
+  res.status(201).json({ id, sendAt: sendAt.toISOString(), status: 'scheduled', ...(cleanup ? { cleanup } : {}) });
 });
 
 // --- Read --------------------------------------------------------------------------------------

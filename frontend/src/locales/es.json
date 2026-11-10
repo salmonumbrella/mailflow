@@ -94,6 +94,11 @@
     "hidePassword": "Ocultar contraseña"
   },
   "compose": {
+    "draftSourceUnavailable": "No se pudo verificar este borrador. Conserva tu texto y luego actualiza Borradores y revisa las copias guardadas antes de guardarlo o eliminarlo.",
+    "draftRetainedTitle": "Borrador original conservado",
+    "draftRetainedBody": "No se pudo eliminar el borrador original de forma segura. Actualiza Borradores y revisa las copias guardadas.",
+    "draftSeparateConfirm": "¿Guardar el texto actual como un borrador aparte? Las copias ya guardadas se conservarán. Después, revisa Borradores.",
+    "draftSeparateCopy": "Guardar como borrador aparte",
     "unsupportedDraftFrom": "Elige un remitente configurado antes de guardar o enviar este borrador.",
     "newMessage": "Nuevo mensaje",
     "reply": "Responder",

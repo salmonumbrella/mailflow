@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { randomBytes } from 'crypto';
 import { Router } from 'express';
 import { query } from '../services/db.js';
+import { protocolNumber } from '../services/messageIdentity.js';
 import { findOwnedAccount } from '../services/ownership.js';
 import { requireAuth } from '../middleware/auth.js';
 import { sanitizeSignature, sanitizeComposeBody, sanitizeEmail, composeHtmlToText, proxyRemoteImages } from '../services/emailSanitizer.js';
@@ -9,7 +10,7 @@ import { imageProxyPath } from '../services/imageProxy.js';
 import { storeFetchedBody } from '../services/messageBodyStore.js';
 import { embedInlineDataImages } from '../utils/inlineImages.js';
 import { imapManager } from '../index.js';
-import { noteDraftsChanged, resolveDraftsFolder, isDraftsPath, findReplacedDraft } from '../services/draftCopies.js';
+import { noteDraftsChanged, resolveDraftsFolder, isDraftsPath, findReplacedDraft, deleteDraftCopy, draftSourceOf, draftSourceFromHeader } from '../services/draftCopies.js';
 import { draftFolderPaths, createReplyGraph, replyChainIdsFor, indexReplyDrafts, createReplyDraftIndex, headerIds } from '../services/replyDraftLookup.js';
 
 // deleteSentDraft lived here before it moved to services/draftCopies.js.
@@ -270,15 +271,12 @@ function textToHtml(text) {
     .join('');
 }
 
-async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, plaintextEmail, quotedBody, quotedBodyHtml, editedSignature, inReplyTo, references, attachments = [] }) {
+async function buildRawDraft({ accountId, userId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, plaintextEmail, quotedBody, quotedBodyHtml, editedSignature, inReplyTo, references, attachments = [] }) {
   const replyToId = replyHeader(inReplyTo, true);
   const referenceIds = replyHeader(references) || replyToId;
-  const acctResult = await query(
-    'SELECT * FROM email_accounts WHERE id = $1',
-    [accountId]
-  );
-  if (!acctResult.rows.length) throw Object.assign(new Error('Account not found'), { status: 404 });
-  const account = acctResult.rows[0];
+  const ownedAccount = await findOwnedAccount(userId, accountId, { enabled: true });
+  if (!ownedAccount) throw Object.assign(new Error('Account not found'), { status: 404 });
+  const account = Object.freeze({ ...ownedAccount, expectedOwnerId: userId });
 
   let fromName = account.sender_name || account.name;
   let fromEmail = account.email_address;
@@ -362,7 +360,9 @@ async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, b
 }
 
 router.post('/draft', async (req, res) => {
-  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, plaintextEmail, quotedBody, quotedBodyHtml, editedSignature, existingUid, existingFolder, existingAccountId, inReplyTo, references, attachments: rawAttachments } = req.body;
+  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, plaintextEmail, quotedBody, quotedBodyHtml, editedSignature, existingUid, existingFolder, existingAccountId, existingSource: rawExistingSource, inReplyTo, references, attachments: rawAttachments } = req.body;
+  const existingSource = rawExistingSource && typeof rawExistingSource === 'object' && !Array.isArray(rawExistingSource)
+    ? Object.freeze({ ...rawExistingSource }) : null;
   if (!accountId) return res.status(400).json({ error: 'accountId required' });
   if (plaintextEmail !== undefined && typeof plaintextEmail !== 'boolean') {
     return res.status(400).json({ error: 'plaintextEmail must be a boolean' });
@@ -374,7 +374,7 @@ router.post('/draft', async (req, res) => {
   try { attachments = normalizeDraftAttachments(rawAttachments); } catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
 
   try {
-    const { rawMessage, account, meta } = await buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, plaintextEmail, quotedBody, quotedBodyHtml, editedSignature, inReplyTo, references, attachments });
+    const { rawMessage, account, meta } = await buildRawDraft({ accountId, userId: req.session.userId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, plaintextEmail, quotedBody, quotedBodyHtml, editedSignature, inReplyTo, references, attachments });
 
     const draftsFolder = await resolveDraftsFolder(account);
     if (!draftsFolder) return res.status(422).json({ error: 'No Drafts folder found for this account' });
@@ -384,30 +384,26 @@ router.post('/draft', async (req, res) => {
     let replaced = null;
     if (existingUid && existingFolder) {
       try {
-        replaced = await findReplacedDraft(req.session.userId, account, draftsFolder, { existingUid, existingFolder, existingAccountId });
+        replaced = await findReplacedDraft(req.session.userId, account, draftsFolder, { existingUid, existingFolder, existingAccountId, existingSource });
       } catch (err) {
         console.error(`Draft: not deleting old uid=${JSON.stringify(existingUid)}: ${err.message}`);
       }
     }
 
     // APPEND the new draft first so we never lose the message
-    let { uid, identityContext } = await imapManager.appendToFolder(account, draftsFolder, rawMessage, ['\\Draft', '\\Seen']);
-    // A server without UIDPLUS does not name the new uid. The composer then had nothing to replace
-    // on its next save, and every autosave left one more copy in Drafts. The Message-ID is new for
-    // every save, so a SEARCH for it finds this copy and no other.
-    if (uid == null) {
-      uid = await imapManager.findUidByMessageId(account, draftsFolder, meta.messageId)
-        .catch(err => { console.warn(`Draft: could not find the saved draft's uid: ${err.message}`); return null; });
-    }
+    const { uid, identityContext } = await imapManager.appendToFolder(account, draftsFolder, rawMessage, ['\\Draft', '\\Seen']);
+    let draftSource = null;
+    // Without exact APPENDUID proof, keep the new copy but issue no cleanup authority.
+    // RFC Message-ID SEARCH cannot bind the APPEND to a physical UID after a reset.
 
     // Persist a local Drafts row immediately so the composer can reopen this draft
     // (recipient/subject/body) even if the folder re-sync is delayed or fails on a
     // flaky connection. Non-fatal — the append already stored the message on IMAP.
     if (uid != null) {
       try {
-        await imapManager.upsertDraftMessageRecord(account, draftsFolder, uid, {
+        const row = await imapManager.upsertDraftMessageRecord(account, draftsFolder, uid, {
           messageId: meta.messageId,
-          identityContext,
+          identityContext: identityContext ? { ...identityContext, expectedOwnerId: req.session.userId } : null,
           subject,
           fromName: meta.fromName,
           fromEmail: meta.fromEmail,
@@ -423,23 +419,20 @@ router.post('/draft', async (req, res) => {
           inReplyTo: meta.inReplyTo,
           references: meta.references,
         });
+        if (identityContext && row?.account_id === account.id && row.folder === draftsFolder && String(row.uid) === String(uid)
+          && row.storage_generation === identityContext.storageGeneration && String(row.uid_validity) === identityContext.uidValidity) {
+          draftSource = draftSourceOf(row);
+        }
       } catch (rowErr) {
         console.error(`Draft: failed to persist local row uid=${uid}: ${rowErr.message}`);
       }
     }
 
-    // Delete the old draft only after the new one is safely stored.
-    if (replaced) {
+    const cleanupRequested = existingUid != null || existingFolder != null || existingSource != null;
+    let cleanup = cleanupRequested ? { status: 'retained', code: 'draft_source_changed' } : undefined;
+    if (replaced && draftSource) {
       try {
-        const deleted = await imapManager.permanentDeleteMessage(replaced.account, replaced.uid, replaced.folder, { expectMessageId: replaced.messageId });
-        if (!deleted) {
-          console.error(`Draft: refusing to delete old uid=${replaced.uid} in folder ${JSON.stringify(replaced.folder)}: the server copy's Message-ID does not match its local row`);
-        } else {
-          await query(
-            'DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3',
-            [replaced.account.id, replaced.uid, replaced.folder]
-          );
-        }
+        if (await deleteDraftCopy(replaced)) cleanup = { status: 'deleted' };
       } catch (delErr) {
         console.error(`Draft: failed to delete old uid=${replaced.uid}: ${delErr.message}`);
       }
@@ -462,7 +455,8 @@ router.post('/draft', async (req, res) => {
 
     noteDraftsChanged(req.session.userId, account.id, draftsFolder);
     res.json({
-      uid, folder: draftsFolder,
+      uid, folder: draftsFolder, draftSource,
+      ...(cleanup ? { cleanup } : {}),
       ...(req.body.includeIdentity === true ? { messageId: meta.messageId } : {}),
       ...(scheduledRemoved !== undefined ? { scheduledRemoved } : {}),
     });
@@ -473,10 +467,12 @@ router.post('/draft', async (req, res) => {
 });
 
 router.delete('/draft/:uid', async (req, res) => {
-  const uid = parseInt(req.params.uid, 10);
-  if (!uid || !Number.isFinite(uid)) return res.status(400).json({ error: 'Invalid uid' });
+  const physicalUid = protocolNumber(req.params.uid);
+  const uid = Number(physicalUid);
+  if (!physicalUid || physicalUid !== req.params.uid) return res.status(400).json({ error: 'Invalid uid' });
 
   const { accountId, folder } = req.query;
+  const existingSource = draftSourceFromHeader(req.headers['x-mailflow-message-source']);
   if (!accountId || !folder) return res.status(400).json({ error: 'accountId and folder required' });
 
   const account = await findOwnedAccount(req.session.userId, accountId);
@@ -486,31 +482,18 @@ router.delete('/draft/:uid', async (req, res) => {
     if (!(await isDraftsPath(account, folder))) {
       return res.status(400).json({ error: 'Folder is not a Drafts folder' });
     }
-    // As a delete from the message list, the server copy must still be the row's message. A uid
-    // with no row is deleted unchecked: the composer has it from its own save.
-    const { rows: [row] } = await query(
-      'SELECT message_id, date, from_email, subject FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3',
-      [account.id, uid, folder]
-    );
-    const deleted = await imapManager.permanentDeleteMessage(account, uid, folder, row ? { expectRow: row } : {});
-    if (deleted === false) {
-      // Sync never corrects a row whose uid holds another message: drop it and pull the folder.
-      console.warn(`Draft: not deleting uid=${uid} in folder ${JSON.stringify(folder)}: the server copy there is not its row's message`);
-      await query('DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3', [account.id, uid, folder]);
-      imapManager.syncFolderOnDemand(account, folder)
-        .catch(err => console.warn('post-delete folder sync failed:', err.message));
-      noteDraftsChanged(req.session.userId, account.id, folder);
-      return res.status(409).json({ error: 'This draft changed on the server and was not deleted. Refresh and try again.' });
+    const target = await findReplacedDraft(req.session.userId, account, undefined, {
+      existingUid: uid, existingFolder: folder, existingAccountId: accountId,
+      existingSource,
+    });
+    if (!target || !await deleteDraftCopy(target)) {
+      return res.status(409).json({ error: 'This draft could not be verified and was not deleted. Refresh and try again.',
+        cleanup: { status: 'retained', code: 'draft_source_changed' } });
     }
-    await query(
-      'DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3',
-      [account.id, uid, folder]
-    );
-    noteDraftsChanged(req.session.userId, account.id, folder);
-    res.json({ ok: true });
+    res.json({ ok: true, cleanup: { status: 'deleted' } });
   } catch (err) {
     console.error('Delete draft failed:', err.message);
-    res.status(500).json({ error: err.message || 'Failed to delete draft' });
+    res.status(err.status || 500).json({ error: err.message || 'Failed to delete draft', cleanup: { status: 'retained', code: 'draft_source_changed' } });
   }
 });
 

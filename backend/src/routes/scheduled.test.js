@@ -31,10 +31,11 @@ import { openJson, aad } from '../services/scheduledSend.js';
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
 const GENERATION = '33333333-3333-4333-8333-333333333333';
 const ID = '22222222-2222-4222-8222-222222222222';
-let server, base;
+let server, base, lastRequestDraft;
 beforeAll(async () => {
   const app = express();
   app.use(express.json({ limit: '35mb' }));
+  app.use((req, _res, next) => { lastRequestDraft = req.body?.draft; next(); });
   app.use('/api/mail', routes);
   await new Promise(resolve => { server = app.listen(0, resolve); });
   base = `http://127.0.0.1:${server.address().port}/api/mail/scheduled`;
@@ -88,6 +89,27 @@ describe('POST /scheduled checks before storing anything', () => {
     expect(insert[10]).toBe(GENERATION);
     const payload = openJson(insert[7], aad.payload({ id: insert[0], user_id: 'u1', version: 1 }));
     expect(payload).toMatchObject({ plaintextEmail: true, bodyIsHtml: false, signatureIsPlainText: true, signature });
+  });
+
+  it.each([true, false])('carries the exact original cleanup proof after durable scheduling (deleted %s)', async deleted => {
+    vi.stubEnv('ENCRYPTION_KEY', '7a'.repeat(32));
+    const draft = { uid: 9, folder: 'Drafts', accountId: ACCOUNT, source: {
+      messageId: ID, accountId: ACCOUNT, storageGeneration: GENERATION,
+      entityId: '44444444-4444-4444-8444-444444444444', folder: 'Drafts', uid: '9', uidValidity: '10',
+    } };
+    deleteSentDraft.mockResolvedValueOnce(deleted);
+    const client = { query: vi.fn(async (sql, values) => ({ rows: sql.includes('COUNT(*)')
+      ? [{ pending: 0, bytes: 0 }] : sql.includes('INSERT INTO scheduled_messages') ? [{ id: values[0] }] : [] })) };
+    withTransaction.mockImplementationOnce(fn => {
+      lastRequestDraft.source.messageId = '99999999-9999-4999-8999-999999999999';
+      lastRequestDraft.source.uidValidity = '99'; lastRequestDraft.accountId = 'another-account';
+      return fn(client);
+    });
+    const result = await call('POST', '', createBody({ draft }));
+    expect(result.status).toBe(201);
+    expect(deleteSentDraft).toHaveBeenCalledExactlyOnceWith('u1', expect.objectContaining({ id: ACCOUNT }), draft);
+    expect(result.body.cleanup).toEqual(deleted ? { status: 'deleted' } : { status: 'retained', code: 'draft_source_changed' });
+    expect(client.query.mock.invocationCallOrder.at(-1)).toBeLessThan(deleteSentDraft.mock.invocationCallOrder[0]);
   });
 
   it('reports stale create preparation as a conflict, without deleting its draft', async () => {

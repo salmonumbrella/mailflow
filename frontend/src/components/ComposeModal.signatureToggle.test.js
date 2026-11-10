@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { savedDraftFixture, composeDraftFixture, signatureLibraryFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { setImmediate } from 'node:timers';
@@ -57,13 +58,13 @@ const ComposeModal = (await import('./ComposeModal.jsx')).default;
 const requests = [];
 globalThis.fetch = async (url, options) => {
   const path = String(url);
-  if (path.endsWith('/mail/draft')) { requests.push(['draft', JSON.parse(options.body)]); return { ok: true, status: 200, json: async () => ({ uid: 40 + requests.length, folder: 'Drafts' }) }; }
+  if (path.endsWith('/mail/draft')) { requests.push(['draft', JSON.parse(options.body)]); return { ok: true, status: 200, json: async () => savedDraftFixture(JSON.parse(options.body).accountId, 40 + requests.length) }; }
   if (path.endsWith('/mail/send')) { requests.push(['send', JSON.parse(options.body)]); return { ok: true, status: 200, json: async () => ({ messageId: '<x@y>' }) }; }
   return { ok: true, status: 200, json: async () => ({}) };
 };
 const ACCOUNTS = [
-  { id: 'on', email_address: 'on@example.test', aliases: [], signature: '<p>On sig</p>', signature_enabled: true },
-  { id: 'off', email_address: 'off@example.test', aliases: [], signature: '<p>Off sig</p>', signature_enabled: false },
+  { id: '20000000-0000-4000-8000-000000000011', email_address: 'on@example.test', aliases: [], signature: '<p>On sig</p>', signature_enabled: true },
+  { id: '20000000-0000-4000-8000-000000000012', email_address: 'off@example.test', aliases: [], signature: '<p>Off sig</p>', signature_enabled: false },
 ];
 const toggle = () => document.querySelector('button[aria-label="compose.insertSignature"]');
 const signatureBox = () => [...document.querySelectorAll('textarea')].find(el => /sig|Edited/.test(el.value));
@@ -72,9 +73,9 @@ const setText = (el, value) => React.act(async () => {
   Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(el, value);
   el.dispatchEvent(new window.Event('input', { bubbles: true }));
 });
-async function mount(composeData, { plain = true } = {}) {
+async function mount(composeData, { plain = true, accounts = ACCOUNTS } = {}) {
   requests.length = 0;
-  useStore.setState({ accounts: ACCOUNTS, plaintextEmail: plain, composing: true, prepareComposeSwitch: null, composeData });
+  useStore.setState({ accounts, plaintextEmail: plain, composing: true, prepareComposeSwitch: null, composeData });
   const root = createRoot(document.getElementById('root'));
   await React.act(async () => root.render(React.createElement(ComposeModal)));
   return root;
@@ -92,7 +93,7 @@ const save = async () => {
 };
 
 test('off sends an empty signature override, and turning it back on keeps the edits', async () => {
-  const root = await mount({ accountId: 'on', to: ['to@example.test'], subject: 's', body: 'hi' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', to: ['to@example.test'], subject: 's', body: 'hi' });
   try {
     assert.equal(toggle().getAttribute('aria-pressed'), 'true');
     await setText(signatureBox(), 'Edited sig');
@@ -108,21 +109,26 @@ test('off sends an empty signature override, and turning it back on keeps the ed
 });
 
 test('a mailbox with the default off starts off, and changing From applies the new default', async () => {
-  const root = await mount({ accountId: 'off', to: ['to@example.test'], subject: 's', body: 'hi' });
+  // This legacy default has not loaded a named-signature library. The selected sender below
+  // is a complete account, and all returned draft authorities still use UUIDs.
+  const root = await mount({ accountId: 'off', to: ['to@example.test'], subject: 's', body: 'hi' },
+    { accounts: [ACCOUNTS[0], { ...ACCOUNTS[1], id: 'off' }] });
   try {
     assert.equal(toggle().getAttribute('aria-pressed'), 'false');
     const from = document.querySelector('select');
-    await React.act(async () => { from.value = 'account:on'; from.dispatchEvent(new window.Event('change', { bubbles: true })); });
+    await React.act(async () => { from.value = 'account:20000000-0000-4000-8000-000000000011'; from.dispatchEvent(new window.Event('change', { bubbles: true })); });
     assert.equal(toggle().getAttribute('aria-pressed'), 'true');
     assert.equal(signatureBox().value, 'On sig');
     const [sent] = await send();
     assert.equal(sent.editedSignature, 'On sig');
+    assert.equal(sent.draft, undefined, 'this legacy signature control has no draft cleanup authority');
   } finally { await unmount(root); }
 });
 
 test('a default applied by a From change is not an edit, but the toggle is', async () => {
   // Both mailboxes share the signature text, so only the default differs. (On main a From change
   // that swaps in a different signature already counts as an edit, toggle or not.)
+  // The legacy starting sender has no draft pointer. Saving happens only after the UUID sender is selected.
   useStore.setState({ accounts: [...ACCOUNTS.slice(0, 1), { id: 'off', email_address: 'off@example.test', aliases: [], signature: '<p>On sig</p>', signature_enabled: false }] });
   requests.length = 0;
   useStore.setState({ plaintextEmail: true, composing: true, prepareComposeSwitch: null, composeData: { accountId: 'off', to: ['to@example.test'], subject: 's', body: 'hi' } });
@@ -131,16 +137,17 @@ test('a default applied by a From change is not an edit, but the toggle is', asy
   try {
     assert.equal(toggle().getAttribute('aria-pressed'), 'false');
     const from = document.querySelector('select');
-    await React.act(async () => { from.value = 'account:on'; from.dispatchEvent(new window.Event('change', { bubbles: true })); });
+    await React.act(async () => { from.value = 'account:20000000-0000-4000-8000-000000000011'; from.dispatchEvent(new window.Event('change', { bubbles: true })); });
     assert.deepEqual(await save(), [], 'an untouched composer has nothing to save');
     await click(toggle());
     const [draft] = await save();
     assert.equal(draft.editedSignature, '', 'off is saved as an empty signature');
+    assert.equal(draft.existingSource, undefined, 'a new draft has no existing copy to clean up');
   } finally { await unmount(root); }
 });
 
 test('a draft saved with the signature off reopens off, with the From signature ready', async () => {
-  const root = await mount({ accountId: 'on', draftUid: 7, draftFolder: 'Drafts', to: ['to@example.test'], subject: 'Re: s', body: 'reply', signature: '' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', ...composeDraftFixture('20000000-0000-4000-8000-000000000011', 7), to: ['to@example.test'], subject: 'Re: s', body: 'reply', signature: '' });
   try {
     assert.equal(toggle().getAttribute('aria-pressed'), 'false');
     assert.equal(signatureBox(), undefined);
@@ -150,7 +157,7 @@ test('a draft saved with the signature off reopens off, with the From signature 
 });
 
 test('a draft saved with a signature reopens on, whatever the mailbox default', async () => {
-  const root = await mount({ accountId: 'off', draftUid: 8, draftFolder: 'Drafts', to: ['to@example.test'], subject: 'Re: s', body: 'reply', signature: '<p>Saved sig</p>' });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000012', ...composeDraftFixture('20000000-0000-4000-8000-000000000012', 8), to: ['to@example.test'], subject: 'Re: s', body: 'reply', signature: '<p>Saved sig</p>' });
   try {
     assert.equal(toggle().getAttribute('aria-pressed'), 'true');
     assert.equal(signatureBox().value, 'Saved sig');
@@ -158,16 +165,16 @@ test('a draft saved with a signature reopens on, whatever the mailbox default', 
 });
 
 test('there is no toggle without a signature to turn on', async () => {
-  useStore.setState({ accounts: [{ id: 'none', email_address: 'none@example.test', aliases: [], signature: null }] });
+  useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000013', email_address: 'none@example.test', aliases: [], signature: null }] });
   requests.length = 0;
-  useStore.setState({ plaintextEmail: true, composing: true, prepareComposeSwitch: null, composeData: { accountId: 'none', to: ['to@example.test'], subject: 's', body: 'hi' } });
+  useStore.setState({ plaintextEmail: true, composing: true, prepareComposeSwitch: null, composeData: { accountId: '20000000-0000-4000-8000-000000000013', to: ['to@example.test'], subject: 's', body: 'hi' } });
   const root = createRoot(document.getElementById('root'));
   await React.act(async () => root.render(React.createElement(ComposeModal)));
   try { assert.equal(toggle(), null); } finally { await unmount(root); }
 });
 
 for (const plain of [true, false]) test(`the toggle is in the ${plain ? 'plain-text footer' : 'rich-text toolbar'} on a desktop`, async () => {
-  const root = await mount({ accountId: 'on', to: ['to@example.test'], subject: 's', body: 'hi' }, { plain });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', to: ['to@example.test'], subject: 's', body: 'hi' }, { plain });
   try { assert.ok(toggle()); } finally { await unmount(root); }
 });
 
@@ -175,7 +182,7 @@ for (const plain of [true, false]) test(`the toggle is reachable on a phone (${p
   // useMobile() reads window.innerWidth first.
   const width = window.innerWidth;
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
-  const root = await mount({ accountId: 'on', to: ['to@example.test'], subject: 's', body: 'hi' }, { plain });
+  const root = await mount({ accountId: '20000000-0000-4000-8000-000000000011', to: ['to@example.test'], subject: 's', body: 'hi' }, { plain });
   try {
     assert.ok(toggle());
     // Plain text has no toolbar on a phone; its strip also carries the attach button.
@@ -193,6 +200,7 @@ for (const plain of [true, false]) test(`the toggle is reachable on a phone (${p
 
 
 const { api } = await import('../utils/api.js');
+api.getSignatureLibrary = async accountId => signatureLibraryFixture(useStore.getState().accounts.find(account => account.id === accountId));
 const LIB_ACCOUNT = '11111111-1111-4111-8111-111111111111';
 const LIB_OTHER = '22222222-2222-4222-8222-222222222222';
 const LIB_ALIAS = '33333333-3333-4333-8333-333333333333';

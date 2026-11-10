@@ -1,5 +1,6 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { savedDraftFixture, signatureLibraryFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { JSDOM } from 'jsdom';
@@ -58,6 +59,7 @@ const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
+api.getSignatureLibrary = async accountId => signatureLibraryFixture(useStore.getState().accounts.find(account => account.id === accountId));
 const ComposeModal = (await import('./ComposeModal.jsx')).default;
 
 const originalApi = { post: api.post, saveDraft: api.saveDraft, savePreferencesOnExit: api.savePreferencesOnExit, getContacts: api.getContacts };
@@ -70,15 +72,15 @@ beforeEach(() => {
   saved = [];
   rejectSend = false;
   api.savePreferencesOnExit = () => {};
-  api.saveDraft = async payload => { saved.push(payload); return { uid: 42, folder: 'Drafts' }; };
+  api.saveDraft = async payload => { saved.push(payload); return savedDraftFixture(payload.accountId, 42, saved.length); };
   api.post = async (path, body) => {
     posted.push({ path, body });
     if (path === '/mail/send' && rejectSend) throw new Error('Synthetic send failure');
     return { sentFolder: 'Sent' };
   };
   useStore.setState({
-    user: { id: 'synthetic-user' }, accounts: [{ id: 'account', enabled: true, email_address: 'me@example.invalid', name: 'Me' }],
-    selectedAccountId: 'account', plaintextEmail: false, composing: false, composeData: null,
+    user: { id: 'synthetic-user' }, accounts: [{ id: '20000000-0000-4000-8000-000000000002', enabled: true, email_address: 'me@example.invalid', name: 'Me' }],
+    selectedAccountId: '20000000-0000-4000-8000-000000000002', plaintextEmail: false, composing: false, composeData: null,
     composeDefaultFullscreen: false, prepareComposeSwitch: null, notifications: [], enabledPlugins: [],
   });
   useStore.getState().setLayout('gmail');
@@ -91,7 +93,7 @@ afterEach(async () => {
 });
 
 async function mount(data = {}, props = {}) {
-  useStore.getState().openCompose({ accountId: 'account', ...data });
+  useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000002', ...data });
   root = createRoot(document.getElementById('root'));
   await React.act(async () => root.render(React.createElement(ComposeModal, props)));
   await React.act(async () => {});

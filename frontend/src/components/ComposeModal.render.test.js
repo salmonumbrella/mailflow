@@ -6,6 +6,7 @@
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { draftSourceFixture, savedDraftFixture, composeDraftFixture, signatureLibraryFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { JSDOM } from 'jsdom';
@@ -61,13 +62,23 @@ const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
+api.getSignatureLibrary = async accountId => signatureLibraryFixture(useStore.getState().accounts.find(account => account.id === accountId));
 const ComposeModal = (await import('./ComposeModal.jsx')).default;
 
 // A draft as Gmail saves it. TipTap loads this as <p> paragraphs, so its getHTML() never
 // matches the stored string even when nobody has touched it.
 const GMAIL_DRAFT = '<div dir="ltr">Hi Bob,<div><br></div><div>The contract is attached.</div></div>';
 
+const accountLabel = id => ({
+  '20000000-0000-4000-8000-000000000001': 'acct',
+  '20000000-0000-4000-8000-000000000007': 'A',
+  '20000000-0000-4000-8000-000000000008': 'B',
+  '20000000-0000-4000-8000-000000000009': 'late',
+  '20000000-0000-4000-8000-000000000010': 'other',
+})[id] || id;
 const saved = [];
+const savedCopies = [];
+let saveRevision = 0;
 
 // Autosave also runs when the tab is hidden, without waiting for the idle timer, which makes
 // it the deterministic way to ask the composer "would you save now?".
@@ -83,9 +94,8 @@ async function openDraft({ plaintextEmail, body }) {
   saved.length = 0;
   useStore.setState({ plaintextEmail, composing: false, composeData: null, prepareComposeSwitch: null });
   useStore.getState().openCompose({
-    accountId: 'acct',
-    draftUid: 7,
-    draftFolder: 'Drafts',
+    accountId: '20000000-0000-4000-8000-000000000001',
+    ...composeDraftFixture('20000000-0000-4000-8000-000000000001', 7),
     to: ['Bob <bob@example.invalid>'],
     cc: [],
     subject: 'Contract',
@@ -100,10 +110,15 @@ async function openDraft({ plaintextEmail, body }) {
 }
 
 before(() => {
-  api.saveDraft = async (payload) => { saved.push(payload); return { uid: 8, folder: 'Drafts' }; };
+  api.saveDraft = async (payload) => {
+    saved.push(payload);
+    const result = savedDraftFixture(payload.accountId, 8, `save-${++saveRevision}`);
+    savedCopies.push(result);
+    return result;
+  };
   useStore.setState({
     user: { id: 'u1' },
-    accounts: [{ id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
+    accounts: [{ id: '20000000-0000-4000-8000-000000000001', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
   });
 });
 
@@ -131,6 +146,7 @@ describe('reopening a draft saved by another client', () => {
     await hideTab();
     assert.equal(saved.length, 1, 'a real edit is saved');
     assert.equal(saved[0].existingUid, 7);
+    assert.deepEqual(saved[0].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000001', 7));
     assert.equal(saved[0].existingFolder, 'Drafts');
     assert.match(saved[0].body, /Thanks\./);
   });
@@ -157,8 +173,8 @@ describe('switching From on a reopened draft', () => {
   before(async () => {
     useStore.setState({
       accounts: [
-        { id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' },
-        { id: 'other', enabled: true, email_address: 'other@example.invalid', name: 'Other', color: '#000' },
+        { id: '20000000-0000-4000-8000-000000000001', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' },
+        { id: '20000000-0000-4000-8000-000000000010', enabled: true, email_address: 'other@example.invalid', name: 'Other', color: '#000' },
       ],
     });
     close = await openDraft({ plaintextEmail: false, body: GMAIL_DRAFT });
@@ -167,19 +183,20 @@ describe('switching From on a reopened draft', () => {
 
   test('names the account that holds the copy being replaced', async () => {
     const from = [...document.querySelectorAll('select')]
-      .find(s => [...s.options].some(o => o.value === 'account:other'));
+      .find(s => [...s.options].some(o => o.value === 'account:20000000-0000-4000-8000-000000000010'));
     await React.act(async () => {
-      from.value = 'account:other';
+      from.value = 'account:20000000-0000-4000-8000-000000000010';
       from.dispatchEvent(new window.Event('change', { bubbles: true }));
     });
     const editor = document.querySelector('.ProseMirror').editor;
     await React.act(async () => { editor.commands.insertContent(' Thanks.'); });
     await hideTab();
     assert.equal(saved.length, 1, 'the edit is saved');
-    assert.equal(saved[0].accountId, 'other', 'the new copy goes to the account From names');
+    assert.equal(saved[0].accountId, '20000000-0000-4000-8000-000000000010', 'the new copy goes to the account From names');
     assert.equal(saved[0].existingUid, 7);
+    assert.deepEqual(saved[0].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000001', 7));
     assert.equal(saved[0].existingFolder, 'Drafts');
-    assert.equal(saved[0].existingAccountId, 'acct', 'the old copy is deleted from its own account');
+    assert.equal(saved[0].existingAccountId, '20000000-0000-4000-8000-000000000001', 'the old copy is deleted from its own account');
   });
 
   test('the next save replaces the new copy in the account it was saved to', async () => {
@@ -189,7 +206,9 @@ describe('switching From on a reopened draft', () => {
     await hideTab();
     assert.equal(saved.length, 1);
     assert.equal(saved[0].existingUid, 8);
-    assert.equal(saved[0].existingAccountId, 'other');
+    assert.deepEqual(saved[0].existingSource, savedCopies.at(-2).draftSource);
+    assert.notDeepEqual(savedCopies.at(-1).draftSource, savedCopies.at(-2).draftSource);
+    assert.equal(saved[0].existingAccountId, '20000000-0000-4000-8000-000000000010');
   });
 });
 
@@ -202,12 +221,12 @@ describe('automatic Cc and Bcc (#491)', () => {
   let realPost;
 
   const account = (id, { cc = [], bcc = [], aliases } = {}) => ({
-    id, enabled: true, email_address: `${id}@example.invalid`, name: id, color: '#fff',
+    id, enabled: true, email_address: `${accountLabel(id)}@example.invalid`, name: accountLabel(id), color: '#fff',
     auto_cc_addresses: cc, auto_bcc_addresses: bcc, ...(aliases ? { aliases } : {}),
   });
   // What composeFromMessage hands over for Reply All, and for Reply.
   const replyAll = (thread) => ({
-    accountId: 'A', isReply: true, isReplyAll: true, subject: 'Re: Plan', body: '',
+    accountId: '20000000-0000-4000-8000-000000000007', isReply: true, isReplyAll: true, subject: 'Re: Plan', body: '',
     to: [SENDER], originalFrom: [SENDER], cc: thread, allRecipients: thread,
   });
   const reply = (thread) => ({ ...replyAll(thread), isReplyAll: false, cc: [] });
@@ -297,14 +316,14 @@ describe('automatic Cc and Bcc (#491)', () => {
   after(() => { api.post = realPost; });
 
   test('a new message shows the account\'s automatic Bcc in a visible Bcc row', async () => {
-    const close = await mountCompose({}, { accounts: [account('A', { bcc: [ME] })] });
+    const close = await mountCompose({}, { accounts: [account('20000000-0000-4000-8000-000000000007', { bcc: [ME] })] });
     try {
       assert.deepEqual(chips('compose.bcc'), [ME]);
     } finally { await close(); }
   });
 
   test('an untouched composer with automatic recipients is not autosaved and closes without a prompt', async () => {
-    const close = await mountCompose({}, { accounts: [account('A', { cc: ['boss@example.invalid'], bcc: [ME] })] });
+    const close = await mountCompose({}, { accounts: [account('20000000-0000-4000-8000-000000000007', { cc: ['boss@example.invalid'], bcc: [ME] })] });
     try {
       assert.deepEqual(chips('compose.cc'), ['boss@example.invalid']);
       assert.deepEqual(chips('compose.bcc'), [ME]);
@@ -319,7 +338,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 
   test('the automatic Bcc is saved and sent like any other recipient', async () => {
-    const close = await mountCompose({ to: ['x@example.invalid'] }, { accounts: [account('A', { bcc: [ME] })] });
+    const close = await mountCompose({ to: ['x@example.invalid'] }, { accounts: [account('20000000-0000-4000-8000-000000000007', { bcc: [ME] })] });
     try {
       await typeSubject('Plan');
       await hideTab();
@@ -339,7 +358,7 @@ describe('automatic Cc and Bcc (#491)', () => {
         { messageId: 'spam-1', asMessage: true, filename: 'You won.eml', type: 'message/rfc822', size: null },
         { messageId: 'other-1', part: '2', filename: 'invoice.pdf', type: 'application/pdf', size: 2048 },
       ],
-    }, { accounts: [account('A')] });
+    }, { accounts: [account('20000000-0000-4000-8000-000000000007')] });
     try {
       const chipText = [...document.querySelectorAll('span')].map(sp => sp.textContent).join(' | ');
       assert.ok(chipText.includes('You won.eml'));
@@ -354,7 +373,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   test('a mailto Bcc is kept alongside the automatic Bcc, and the composer stays clean', async () => {
     const close = await mountCompose(
       { to: ['x@example.invalid'], bcc: ['u@example.invalid'] },
-      { accounts: [account('A', { bcc: [ME] })] },
+      { accounts: [account('20000000-0000-4000-8000-000000000007', { bcc: [ME] })] },
     );
     try {
       assert.deepEqual(chips('compose.bcc'), ['u@example.invalid', ME]);
@@ -366,7 +385,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   test('reply-all keeps an automatic Cc that is not on the thread', async () => {
     const close = await mountCompose(
       replyAll([{ name: '', email: 'thread@example.invalid' }]),
-      { accounts: [account('A', { cc: ['boss@example.invalid'] })] },
+      { accounts: [account('20000000-0000-4000-8000-000000000007', { cc: ['boss@example.invalid'] })] },
     );
     try {
       assert.deepEqual(chips('compose.cc'), ['thread@example.invalid', 'boss@example.invalid']);
@@ -376,7 +395,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   test('reply-all lists an automatic Cc that is already on the thread only once', async () => {
     const close = await mountCompose(
       replyAll([{ name: '', email: 'ARCHIVE@example.invalid' }]),
-      { accounts: [account('A', { cc: ['archive@example.invalid', 'boss@example.invalid'] })] },
+      { accounts: [account('20000000-0000-4000-8000-000000000007', { cc: ['archive@example.invalid', 'boss@example.invalid'] })] },
     );
     try {
       assert.deepEqual(chips('compose.cc'), ['ARCHIVE@example.invalid', 'boss@example.invalid']);
@@ -384,7 +403,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 
   test('a reopened draft is not given the automatic recipients, on opening or on a From switch', async () => {
-    const accounts = [account('acct', { bcc: [ME] }), account('other', { bcc: ['other-auto@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000001', { bcc: [ME] }), account('20000000-0000-4000-8000-000000000010', { bcc: ['other-auto@example.invalid'] })];
     const fresh = await mountCompose({}, { accounts });
     try {
       assert.deepEqual(chips('compose.bcc'), [ME], 'a new message from the same account gets it');
@@ -395,7 +414,7 @@ describe('automatic Cc and Bcc (#491)', () => {
       assert.equal(chips('compose.bcc'), null, 'no Bcc row: the draft saved none');
       await hideTab();
       assert.equal(saved.length, 0, 'opening the draft is still not an edit');
-      await chooseFrom('account:other');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000010');
       assert.equal(chips('compose.bcc'), null, 'nor from the account From switches to');
       await hideTab();
       assert.equal(saved.length, 1, 'a saved sender change is persisted');
@@ -403,39 +422,39 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 
   test('a message reopened by undo send keeps the Cc and Bcc it was sent with', async () => {
-    const accounts = [account('acct', { bcc: [ME] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000001', { bcc: [ME] })];
     const fresh = await mountCompose({}, { accounts });
     try {
       assert.deepEqual(chips('compose.bcc'), [ME], 'a new message from the account gets it');
     } finally { await fresh(); }
 
     // Sent without the automatic Bcc (the user removed it), then undone. No draft was saved.
-    const close = await mountCompose({ accountId: 'acct', to: ['x@example.invalid'], cc: [], bcc: [], subject: 'Plan', body: '<p>Plan</p>', restored: true }, { accounts });
+    const close = await mountCompose({ accountId: '20000000-0000-4000-8000-000000000001', to: ['x@example.invalid'], cc: [], bcc: [], subject: 'Plan', body: '<p>Plan</p>', restored: true }, { accounts });
     try {
       assert.equal(chips('compose.bcc'), null, 'the removed automatic Bcc does not come back');
     } finally { await close(); }
   });
 
   test('switching From before any save swaps only the automatic addresses', async () => {
-    const accounts = [account('A', { bcc: ['a@example.invalid'] }), account('B', { bcc: ['b@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { bcc: ['a@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { bcc: ['b@example.invalid'] })];
     const close = await mountCompose({ to: ['x@example.invalid'], bcc: ['u@example.invalid'] }, { accounts });
     try {
       assert.deepEqual(chips('compose.bcc'), ['u@example.invalid', 'a@example.invalid']);
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(chips('compose.bcc'), ['u@example.invalid', 'b@example.invalid']);
       await typeSubject('Plan');
       await hideTab();
       assert.equal(saved.length, 1);
-      assert.equal(saved[0].accountId, 'B');
+      assert.equal(saved[0].accountId, '20000000-0000-4000-8000-000000000008');
       assert.deepEqual(saved[0].bcc, ['u@example.invalid', 'b@example.invalid']);
     } finally { await close(); }
   });
 
   test('switching From on an untouched composer is not an edit', async () => {
-    const accounts = [account('A', { bcc: ['a@example.invalid'] }), account('B', { bcc: ['b@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { bcc: ['a@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { bcc: ['b@example.invalid'] })];
     const close = await mountCompose({}, { accounts });
     try {
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(chips('compose.bcc'), ['b@example.invalid']);
       await hideTab();
       assert.equal(saved.length, 0);
@@ -443,26 +462,26 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 
   test('switching From to another account and back gives the first account\'s automatic Bcc back', async () => {
-    const accounts = [account('A', { bcc: ['a@example.invalid'] }), account('B', { bcc: ['b@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { bcc: ['a@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { bcc: ['b@example.invalid'] })];
     const close = await mountCompose({ to: ['x@example.invalid'] }, { accounts });
     try {
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(chips('compose.bcc'), ['b@example.invalid']);
-      await chooseFrom('account:A');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000007');
       assert.deepEqual(chips('compose.bcc'), ['a@example.invalid']);
     } finally { await close(); }
   });
 
   test('a Cc or Bcc the user typed before a From switch is still an unsaved edit', async () => {
     const accounts = [
-      account('A', { cc: ['a-cc@example.invalid'], bcc: ['a@example.invalid'] }),
-      account('B', { cc: ['b-cc@example.invalid'], bcc: ['b@example.invalid'] }),
+      account('20000000-0000-4000-8000-000000000007', { cc: ['a-cc@example.invalid'], bcc: ['a@example.invalid'] }),
+      account('20000000-0000-4000-8000-000000000008', { cc: ['b-cc@example.invalid'], bcc: ['b@example.invalid'] }),
     ];
     for (const [field, fromB] of [['cc', 'b-cc@example.invalid'], ['bcc', 'b@example.invalid']]) {
       const close = await mountCompose({ to: ['x@example.invalid'] }, { accounts });
       try {
         await addChip(`compose.${field}`, 'typed@example.invalid');
-        await chooseFrom('account:B');
+        await chooseFrom('account:20000000-0000-4000-8000-000000000008');
         await hideTab();
         assert.equal(saved.length, 1, `the typed ${field} is the only edit, and it is saved`);
         assert.deepEqual(saved[0][field], ['typed@example.invalid', fromB]);
@@ -471,15 +490,15 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 
   test('a tab hidden right after a From switch does not save the old account\'s chips under the new From', async () => {
-    const accounts = [account('A', { bcc: ['a@example.invalid'] }), account('B', { bcc: ['b@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { bcc: ['a@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { bcc: ['b@example.invalid'] })];
     const close = await mountCompose({}, { accounts });
     const actEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
     try {
       // Outside act(), so React schedules as it does in a browser: the From change renders in a
       // microtask, and the tab is hidden straight after it, before any later task can run.
       globalThis.IS_REACT_ACT_ENVIRONMENT = false;
-      const from = [...document.querySelectorAll('select')].find(s => [...s.options].some(o => o.value === 'account:B'));
-      from.value = 'account:B';
+      const from = [...document.querySelectorAll('select')].find(s => [...s.options].some(o => o.value === 'account:20000000-0000-4000-8000-000000000008'));
+      from.value = 'account:20000000-0000-4000-8000-000000000008';
       from.dispatchEvent(new window.Event('change', { bubbles: true }));
       await Promise.resolve();
       visibility = 'hidden';
@@ -497,34 +516,35 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 
   test('switching From after an autosave saves the new From together with its lists', async () => {
-    const accounts = [account('A', { bcc: ['a@example.invalid'] }), account('B', { bcc: ['b@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { bcc: ['a@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { bcc: ['b@example.invalid'] })];
     const close = await mountCompose({ to: ['x@example.invalid'] }, { accounts });
     try {
       await editBody('Hi');
       await hideTab();
       assert.equal(saved.length, 1);
-      assert.equal(saved[0].accountId, 'A');
+      assert.equal(saved[0].accountId, '20000000-0000-4000-8000-000000000007');
       assert.deepEqual(saved[0].bcc, ['a@example.invalid']);
 
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       await hideTab();
       assert.equal(saved.length, 2, 'the switch alone is saved');
-      assert.equal(saved[1].accountId, 'B');
+      assert.equal(saved[1].accountId, '20000000-0000-4000-8000-000000000008');
       assert.deepEqual(saved[1].bcc, ['b@example.invalid']);
       assert.equal(saved[1].existingUid, 8);
-      assert.equal(saved[1].existingAccountId, 'A');
+      assert.deepEqual(saved[1].existingSource, savedCopies.at(-2).draftSource);
+      assert.equal(saved[1].existingAccountId, '20000000-0000-4000-8000-000000000007');
     } finally { await close(); }
   });
 
   test('an automatic address the user removed is not added back by a From switch', async () => {
-    const accounts = [account('A', { cc: ['crm@example.invalid'] }), account('B', { cc: ['crm@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { cc: ['crm@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { cc: ['crm@example.invalid'] })];
     const close = await mountCompose({}, { accounts });
     try {
       assert.deepEqual(chips('compose.cc'), ['crm@example.invalid']);
       await removeChip('compose.cc', 'crm@example.invalid');
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(chips('compose.cc'), []);
-      await chooseFrom('account:A');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000007');
       assert.deepEqual(chips('compose.cc'), [], 'nor by switching back');
     } finally { await close(); }
   });
@@ -576,7 +596,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   }
 
   test('after undo send, an automatic address removed before sending stays out across From switches', async () => {
-    const accounts = [account('A', { cc: ['crm@example.invalid'] }), account('B', { cc: ['crm@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { cc: ['crm@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { cc: ['crm@example.invalid'] })];
     const cc = () => chips('compose.cc') ?? [];
     const close = await sendAndUndo({ to: ['x@example.invalid'], subject: 'Plan' }, {
       accounts,
@@ -587,25 +607,25 @@ describe('automatic Cc and Bcc (#491)', () => {
     });
     try {
       assert.deepEqual(cc(), [], 'reopened as it was sent');
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(cc(), [], 'a From switch does not bring it back');
-      await chooseFrom('account:A');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000007');
       assert.deepEqual(cc(), [], 'nor does switching back');
     } finally { await close(); }
   });
 
   test('after undo send, a From switch replaces the first account\'s automatic Bcc with the second\'s', async () => {
-    const accounts = [account('A', { bcc: ['a-arch@example.invalid'] }), account('B', { bcc: ['b-arch@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { bcc: ['a-arch@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { bcc: ['b-arch@example.invalid'] })];
     const close = await sendAndUndo({ to: ['x@example.invalid'], subject: 'Plan' }, { accounts });
     try {
       assert.deepEqual(chips('compose.bcc'), ['a-arch@example.invalid'], 'reopened as it was sent');
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(chips('compose.bcc'), ['b-arch@example.invalid']);
     } finally { await close(); }
   });
 
   test('after undo send of a reply, Reply All and back to Reply keeps the automatic Bcc', async () => {
-    const close = await sendAndUndo(reply([{ name: '', email: 'thread@example.invalid' }]), { accounts: [account('A', { bcc: [ME] })] });
+    const close = await sendAndUndo(reply([{ name: '', email: 'thread@example.invalid' }]), { accounts: [account('20000000-0000-4000-8000-000000000007', { bcc: [ME] })] });
     try {
       assert.deepEqual(chips('compose.bcc'), [ME], 'reopened as it was sent');
       await switchReplyType('compose.replyAll');
@@ -615,13 +635,13 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 
   test('after undo send, a From switch made while the message was being sent does not change what it reopens with', async () => {
-    const accounts = [account('A', { cc: ['crm-a@example.invalid'] }), account('B', { cc: ['crm-b@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { cc: ['crm-a@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { cc: ['crm-b@example.invalid'] })];
     const cc = () => chips('compose.cc') ?? [];
     // The server has not answered yet, and From stays usable while it is sending.
-    const close = await sendAndUndo({ to: ['x@example.invalid'], subject: 'Plan' }, { accounts, whileSending: () => chooseFrom('account:B') });
+    const close = await sendAndUndo({ to: ['x@example.invalid'], subject: 'Plan' }, { accounts, whileSending: () => chooseFrom('account:20000000-0000-4000-8000-000000000008') });
     try {
       assert.deepEqual(cc(), ['crm-a@example.invalid'], 'reopened as it was sent, from A');
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(cc(), ['crm-b@example.invalid'], 'B\'s automatic Cc replaces A\'s');
     } finally { await close(); }
   });
@@ -629,7 +649,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   test('after undo send of a message autosaved before Send, a From switch still swaps the automatic Cc', async () => {
     // A composer open for a while has saved a draft by the time Send is clicked. The undone message
     // comes back with that draft, but it was never opened from one, so it behaves like its composer.
-    const accounts = [account('A', { cc: ['crm-a@example.invalid'] }), account('B', { cc: ['crm-b@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { cc: ['crm-a@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { cc: ['crm-b@example.invalid'] })];
     const close = await sendAndUndo({ to: ['x@example.invalid'], subject: 'Plan' }, {
       accounts,
       beforeSend: async () => {
@@ -641,14 +661,14 @@ describe('automatic Cc and Bcc (#491)', () => {
     try {
       assert.equal(useStore.getState().composeData.draftUid, 8, 'reopened with its draft');
       assert.deepEqual(chips('compose.cc'), ['crm-a@example.invalid']);
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(chips('compose.cc'), ['crm-b@example.invalid']);
     } finally { await close(); }
   });
 
   test('a message undone after an autosave closes like its composer once saved again: without a discard prompt', async () => {
     const close = await sendAndUndo({ to: ['x@example.invalid'], subject: 'Plan' }, {
-      accounts: [account('A')],
+      accounts: [account('20000000-0000-4000-8000-000000000007')],
       beforeSend: async () => { await editBody('Hi'); await hideTab(); },
     });
     try {
@@ -661,29 +681,29 @@ describe('automatic Cc and Bcc (#491)', () => {
 
   test('after undo send of a draft opened from the list, a From switch still adds no automatic Bcc', async () => {
     // The other side of the two tests above: this one was opened from a draft, so it stays one.
-    const accounts = [account('A', { bcc: ['a-arch@example.invalid'] }), account('B', { bcc: ['b-arch@example.invalid'] })];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { bcc: ['a-arch@example.invalid'] }), account('20000000-0000-4000-8000-000000000008', { bcc: ['b-arch@example.invalid'] })];
     const close = await sendAndUndo(
-      { accountId: 'A', draftUid: 7, draftFolder: 'Drafts', to: ['x@example.invalid'], subject: 'Plan', body: '<p>Plan</p>' },
+      { accountId: '20000000-0000-4000-8000-000000000007', ...composeDraftFixture('20000000-0000-4000-8000-000000000007', 7), to: ['x@example.invalid'], subject: 'Plan', body: '<p>Plan</p>' },
       { accounts },
     );
     try {
       assert.equal(useStore.getState().composeData.draftUid, 7, 'reopened with its draft');
       assert.equal(chips('compose.bcc'), null, 'no Bcc row: the draft saved none');
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.equal(chips('compose.bcc'), null, 'nor from the account From switches to');
     } finally { await close(); }
   });
 
   test('a From switch keeps a recipient the user added for an automatic address', async () => {
-    const accounts = [account('A', { cc: ['boss@example.invalid'] }), account('B')];
+    const accounts = [account('20000000-0000-4000-8000-000000000007', { cc: ['boss@example.invalid'] }), account('20000000-0000-4000-8000-000000000008')];
     const close = await mountCompose({ to: ['x@example.invalid'], subject: 'Plan' }, { accounts });
     try {
       await addChip('compose.cc', 'Boss Person <boss@example.invalid>');
       assert.deepEqual(chips('compose.cc'), ['boss@example.invalid', 'Boss Person <boss@example.invalid>']);
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(chips('compose.cc'), ['Boss Person <boss@example.invalid>'], 'only the automatic chip goes');
       const sent = await send();
-      assert.equal(sent.accountId, 'B');
+      assert.equal(sent.accountId, '20000000-0000-4000-8000-000000000008');
       assert.deepEqual(sent.cc, ['Boss Person <boss@example.invalid>']);
     } finally { await close(); }
   });
@@ -691,7 +711,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   test('Reply All to Reply keeps the automatic Bcc, and its row stays while the user edits it', async () => {
     const close = await mountCompose(
       replyAll([{ name: '', email: 'thread@example.invalid' }]),
-      { accounts: [account('A', { bcc: [ME] })] },
+      { accounts: [account('20000000-0000-4000-8000-000000000007', { bcc: [ME] })] },
     );
     try {
       assert.deepEqual(chips('compose.bcc'), [ME]);
@@ -711,12 +731,12 @@ describe('automatic Cc and Bcc (#491)', () => {
 
   test('sent Reply -> Reply All -> Reply retains external To and only toggles extras', async () => {
     const { openReplyFromMessage } = await import('../utils/composeFromMessage.js');
-    const owner = account('A');
+    const owner = account('20000000-0000-4000-8000-000000000007');
     owner.email_address = 'owner@example.test';
     const to = [{ email: 'first@example.test' }, { email: 'second@example.test' }];
     const cc = [{ email: 'extra@example.test' }];
     let data;
-    await openReplyFromMessage({ account_id: 'A', from_email: owner.email_address, reply_to: [{ email: owner.email_address }], to_addresses: to, cc_addresses: cc }, {
+    await openReplyFromMessage({ account_id: '20000000-0000-4000-8000-000000000007', from_email: owner.email_address, reply_to: [{ email: owner.email_address }], to_addresses: to, cc_addresses: cc }, {
       accounts: [owner], openCompose: p => { data = p; }, getMessageBody: async () => null,
     });
     const close = await mountCompose(data, { accounts: [owner] });
@@ -733,7 +753,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 
   test('Reply to Reply All keeps the automatic Cc and leaves no address in both Cc and Bcc', async () => {
-    const close = await mountCompose(reply(THREAD), { accounts: [account('A', BOTH_LISTS)] });
+    const close = await mountCompose(reply(THREAD), { accounts: [account('20000000-0000-4000-8000-000000000007', BOTH_LISTS)] });
     try {
       assert.deepEqual(chips('compose.cc'), ['boss@example.invalid']);
       assert.deepEqual(chips('compose.bcc'), [PERSONAL]);
@@ -746,7 +766,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   test('the mobile Reply and Reply All tabs keep the automatic Bcc as well', () => onMobile(async (tab) => {
     const close = await mountCompose(
       replyAll([{ name: '', email: 'thread@example.invalid' }]),
-      { accounts: [account('A', { bcc: [ME] })] },
+      { accounts: [account('20000000-0000-4000-8000-000000000007', { bcc: [ME] })] },
     );
     try {
       assert.ok(tab('compose.reply'), 'the mobile layout is rendered');
@@ -760,7 +780,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   }));
 
   test('the mobile Reply All tab keeps the automatic Cc and leaves no address in both Cc and Bcc', () => onMobile(async (tab) => {
-    const close = await mountCompose(reply(THREAD), { accounts: [account('A', BOTH_LISTS)] });
+    const close = await mountCompose(reply(THREAD), { accounts: [account('20000000-0000-4000-8000-000000000007', BOTH_LISTS)] });
     try {
       assert.ok(tab('compose.replyAll'), 'the mobile layout is rendered');
       assert.deepEqual(chips('compose.cc'), ['boss@example.invalid']);
@@ -774,7 +794,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   test('Reply All to Reply keeps an automatic Cc that was on the thread', async () => {
     const close = await mountCompose(
       replyAll([{ name: '', email: 'archive@example.invalid' }]),
-      { accounts: [account('A', { cc: ['archive@example.invalid'] })] },
+      { accounts: [account('20000000-0000-4000-8000-000000000007', { cc: ['archive@example.invalid'] })] },
     );
     try {
       assert.deepEqual(chips('compose.cc'), ['archive@example.invalid']);
@@ -784,25 +804,25 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 
   test('a From switch after Reply All to Reply takes out the automatic Bcc that Reply placed', async () => {
-    const close = await mountCompose(replyAll(THREAD), { accounts: [account('A', { bcc: [PERSONAL] }), account('B')] });
+    const close = await mountCompose(replyAll(THREAD), { accounts: [account('20000000-0000-4000-8000-000000000007', { bcc: [PERSONAL] }), account('20000000-0000-4000-8000-000000000008')] });
     try {
       assert.equal(chips('compose.bcc'), null, 'Reply All: the thread already has it in Cc');
       await switchReplyType('compose.reply');
       assert.deepEqual(chips('compose.bcc'), [PERSONAL]);
-      await chooseFrom('account:B');
+      await chooseFrom('account:20000000-0000-4000-8000-000000000008');
       assert.deepEqual(chips('compose.bcc'), [], 'B has no lists');
     } finally { await close(); }
   });
 
   test('an alias reply opened before accounts load gets the automatic Bcc when they arrive, and stays clean', async () => {
     const close = await mountCompose({
-      accountId: 'late', aliasId: 'al1', isReply: true, subject: 'Re: Plan', body: '',
+      accountId: '20000000-0000-4000-8000-000000000009', aliasId: 'al1', isReply: true, subject: 'Re: Plan', body: '',
       to: [SENDER], originalFrom: [SENDER], cc: [], allRecipients: [],
     }, { accounts: [] });
     try {
       assert.equal(chips('compose.bcc'), null);
       await React.act(async () => {
-        useStore.setState({ accounts: [account('late', { bcc: [ME], aliases: [{ id: 'al1', email: 'alias@example.invalid', name: 'Alias' }] })] });
+        useStore.setState({ accounts: [account('20000000-0000-4000-8000-000000000009', { bcc: [ME], aliases: [{ id: 'al1', email: 'alias@example.invalid', name: 'Alias' }] })] });
       });
       assert.deepEqual(chips('compose.bcc'), [ME]);
       await hideTab();
@@ -813,7 +833,7 @@ describe('automatic Cc and Bcc (#491)', () => {
   test('under StrictMode the automatic Bcc is applied once and the composer stays clean', async () => {
     const close = await mountCompose(
       { to: ['x@example.invalid'], bcc: ['u@example.invalid'] },
-      { accounts: [account('A', { bcc: [ME] })], strict: true },
+      { accounts: [account('20000000-0000-4000-8000-000000000007', { bcc: [ME] })], strict: true },
     );
     try {
       assert.deepEqual(chips('compose.bcc'), ['u@example.invalid', ME]);
@@ -824,7 +844,7 @@ describe('automatic Cc and Bcc (#491)', () => {
 });
 
 describe('opening Cc and Bcc', () => {
-  const account = (id, extra = {}) => ({ id, enabled: true, email_address: `${id}@example.invalid`, name: id, color: '#fff', ...extra });
+  const account = (id, extra = {}) => ({ id, enabled: true, email_address: `${accountLabel(id)}@example.invalid`, name: accountLabel(id), color: '#fff', ...extra });
 
   async function mountCompose(composeData, accounts) {
     useStore.setState({ plaintextEmail: false, accounts, selectedAccountId: accounts[0]?.id ?? null, defaultSender: '', composing: false, composeData: null, prepareComposeSwitch: null });
@@ -853,7 +873,7 @@ describe('opening Cc and Bcc', () => {
   };
 
   test('the Cc and Bcc buttons open their row with the cursor in it', async () => {
-    const close = await mountCompose({}, [account('A')]);
+    const close = await mountCompose({}, [account('20000000-0000-4000-8000-000000000007')]);
     try {
       assert.equal(cursorIn(), 'compose.to', 'a new message starts in To');
       assert.equal(await click(button('compose.cc')), 'compose.cc', 'focused during the click');
@@ -866,7 +886,7 @@ describe('opening Cc and Bcc', () => {
   test('on a phone, Cc and Bcc picked from the menu open with the cursor in them', async () => {
     const width = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 375 });
-    const close = await mountCompose({}, [account('A')]);
+    const close = await mountCompose({}, [account('20000000-0000-4000-8000-000000000007')]);
     // The phone layout puts Cc and Bcc in a menu behind the chevron at the end of the To row.
     const chevron = () => [...rowOf('compose.to').children].find(el => el.tagName === 'BUTTON');
     try {
@@ -886,12 +906,12 @@ describe('opening Cc and Bcc', () => {
   test('a row the account opens by itself leaves the cursor where it is', async () => {
     // Opened before the accounts load: the account's automatic Bcc row appears when they
     // arrive, which can be while the user is already typing.
-    const close = await mountCompose({ accountId: 'late', aliasId: 'al1' }, []);
+    const close = await mountCompose({ accountId: '20000000-0000-4000-8000-000000000009', aliasId: 'al1' }, []);
     try {
       await click(button('compose.cc'));
       assert.equal(cursorIn(), 'compose.cc');
       await React.act(async () => {
-        useStore.setState({ accounts: [account('late', {
+        useStore.setState({ accounts: [account('20000000-0000-4000-8000-000000000009', {
           auto_bcc_addresses: ['me@example.invalid'],
           aliases: [{ id: 'al1', email: 'alias@example.invalid', name: 'Alias' }],
         })] });
@@ -914,7 +934,7 @@ describe('undo send', () => {
     useStore.setState({
       plaintextEmail: false, composing: false, composeData: null, prepareComposeSwitch: null,
       notifications: [],
-      accounts: [{ id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
+      accounts: [{ id: '20000000-0000-4000-8000-000000000001', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
     });
     api.post = async (path, payload) => {
       posted.push({ path, payload });
@@ -924,9 +944,8 @@ describe('undo send', () => {
     api.cancelSend = async (id) => { cancels.push(id); return { cancelled: true }; };
     api.getSendStatus = async () => ({ status: 'pending' });
     useStore.getState().openCompose({
-      accountId: 'acct',
-      draftUid: 7,
-      draftFolder: 'Drafts',
+      accountId: '20000000-0000-4000-8000-000000000001',
+      ...composeDraftFixture('20000000-0000-4000-8000-000000000001', 7),
       to: ['Bob <bob@example.invalid>'],
       cc: [],
       subject: 'Contract',
@@ -948,7 +967,7 @@ describe('undo send', () => {
     assert.equal(posted.length, 1);
     const { payload } = posted[0];
     assert.equal(payload.undoSeconds, 10);
-    assert.deepEqual(payload.draft, { uid: 7, folder: 'Drafts', accountId: 'acct' });
+    assert.deepEqual(payload.draft, { uid: 7, folder: 'Drafts', accountId: '20000000-0000-4000-8000-000000000001', source: draftSourceFixture('20000000-0000-4000-8000-000000000001', 7) });
     assert.equal(payload.attachments[0].filename, 'contract.pdf');
     assert.equal(payload.priority, 'high');
     assert.equal(useStore.getState().composing, false);
@@ -978,18 +997,21 @@ describe('undo send', () => {
     await hideTab();
     assert.equal(saved.length, 1, 'saved although nothing was typed since it reopened');
     assert.equal(saved[0].existingUid, 7);
+    assert.deepEqual(saved[0].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000001', 7));
     assert.equal(saved[0].subject, 'Contract');
   });
 
-  test('a server without undo send delivers at once, and the draft is deleted from here', async () => {
+  test('a server without undo send delivers at once without an unverified browser delete', async () => {
     posted.length = 0;
     api.post = async (path, payload) => { posted.push({ path, payload }); return { ok: true }; };
     const send = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'compose.send');
     await React.act(async () => { send.click(); });
     await React.act(async () => {});
     assert.equal(useStore.getState().composing, false);
-    assert.deepEqual(deleted, [['acct', 8, 'Drafts']], 'the copy saved after the undo');
-    assert.equal(useStore.getState().notifications[0].title, 'compose.sent.title');
+    assert.deepEqual(deleted, [], 'draft cleanup belongs to the server, never a locator-only browser delete');
+    assert.deepEqual(posted[0].payload.draft.source, savedCopies.at(-1).draftSource);
+    assert.ok(useStore.getState().notifications.some(n => n.title === 'compose.sent.title'));
+    assert.ok(useStore.getState().notifications.some(n => n.persistent && n.body === 'compose.draftRetainedBody'));
   });
 });
 
@@ -1003,7 +1025,7 @@ describe('undo send, message without attachments', () => {
     api.post = async () => ({ ok: true, pending: true, pendingId: 'p2', sendAt: new Date(Date.now() + 10_000).toISOString() });
     api.cancelSend = async () => ({ cancelled: true });
     useStore.getState().openCompose({
-      accountId: 'acct', draftUid: 9, draftFolder: 'Drafts',
+      accountId: '20000000-0000-4000-8000-000000000001', ...composeDraftFixture('20000000-0000-4000-8000-000000000001', 9),
       to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Plan', body: '<p>Typed after the last autosave.</p>',
     });
     const root = createRoot(document.getElementById('root'));
@@ -1024,6 +1046,7 @@ describe('undo send, message without attachments', () => {
     await hideTab();
     assert.equal(saved.length, 1, 'saved although nothing was typed since it reopened');
     assert.equal(saved[0].existingUid, 9);
+    assert.deepEqual(saved[0].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000001', 9));
     assert.match(saved[0].body, /Typed after the last autosave\./);
   });
 });
@@ -1056,7 +1079,7 @@ describe('undo send while another message is being written', () => {
   const sendButton = () => [...document.querySelectorAll('button')].find(b => /compose\.(send|sending)$/.test(b.textContent.trim()));
   async function write(subject) {
     await React.act(async () => {
-      useStore.getState().openCompose({ accountId: 'acct', to: ['Bob <bob@example.invalid>'], cc: [], subject, body: `<p>${subject} body</p>` });
+      useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000001', to: ['Bob <bob@example.invalid>'], cc: [], subject, body: `<p>${subject} body</p>` });
     });
     await React.act(async () => {});
   }
@@ -1139,7 +1162,7 @@ describe('Reply with AI', () => {
     api.resolveMessage = async (ref) => thread.find(m => m.message_id === ref) ?? null;
     useStore.setState({
       user: { id: 'u1' },
-      accounts: [{ id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
+      accounts: [{ id: '20000000-0000-4000-8000-000000000001', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
     });
   });
   after(() => {
@@ -1154,7 +1177,7 @@ describe('Reply with AI', () => {
     // Opened the way a reply from the ungrouped list is: without the thread id, which that list
     // does not load.
     before(() => mount({
-      accountId: 'acct', isReply: true, subject: 'Re: Artwork', body: '', cc: [],
+      accountId: '20000000-0000-4000-8000-000000000001', isReply: true, subject: 'Re: Artwork', body: '', cc: [],
       to: [ANA], originalFrom: [ANA], inReplyTo: '<m3@example.invalid>',
       quotedBody: '\n\n---\nOn 10/3/2026, Ana wrote:\n> Done, the logo is bigger now. Can you approve?',
       quotedBodyHtml: '<div><p>Done, the logo is bigger now. Can you approve?</p></div>',
@@ -1258,7 +1281,7 @@ describe('Reply with AI', () => {
     before(async () => {
       api.ai.status = async () => ({ enabled: true, features: { compose: true, summarize: false } });
       await mount({
-        accountId: 'acct', isReply: true, subject: 'Re: Artwork', body: '', cc: [],
+        accountId: '20000000-0000-4000-8000-000000000001', isReply: true, subject: 'Re: Artwork', body: '', cc: [],
         to: [ANA], originalFrom: [ANA], inReplyTo: '<m3@example.invalid>',
       });
     });
@@ -1282,7 +1305,7 @@ describe('Reply with AI', () => {
       // The message being answered alone is longer than one AI request.
       api.getMessageBody = async (id) => (id === 'm3' ? { text: 'A clause of the contract.\n\n'.repeat(3_000) } : bodies[id]);
       await mount({
-        accountId: 'acct', isReply: true, subject: 'Re: Artwork', body: '', cc: [],
+        accountId: '20000000-0000-4000-8000-000000000001', isReply: true, subject: 'Re: Artwork', body: '', cc: [],
         to: [ANA], originalFrom: [ANA], inReplyTo: '<m3@example.invalid>',
       });
     });
@@ -1315,7 +1338,7 @@ describe('Reply with AI', () => {
       api.getThread = async () => ({ messages: long });
       api.getMessageBody = async (id) => ({ text: `Body of ${id}.` });
       await mount({
-        accountId: 'acct', isReply: true, subject: 'Re: Artwork', body: '', cc: [], threadId: '<l0@example.invalid>',
+        accountId: '20000000-0000-4000-8000-000000000001', isReply: true, subject: 'Re: Artwork', body: '', cc: [], threadId: '<l0@example.invalid>',
         to: [ANA], originalFrom: [ANA], inReplyTo: '<l11@example.invalid>',
       });
     });
@@ -1338,7 +1361,7 @@ describe('Reply with AI', () => {
 
   describe("opened by the message view's Reply with AI", () => {
     const opened = {
-      accountId: 'acct', isReply: true, aiReply: true, subject: 'Re: Artwork', body: '', cc: [],
+      accountId: '20000000-0000-4000-8000-000000000001', isReply: true, aiReply: true, subject: 'Re: Artwork', body: '', cc: [],
       to: [ANA], originalFrom: [ANA], inReplyTo: '<m3@example.invalid>',
       quotedBody: '\n\n---\nOn 10/3/2026, Ana wrote:\n> Done, the logo is bigger now. Can you approve?',
     };
@@ -1383,9 +1406,9 @@ describe('Reply with AI', () => {
     let accountsBefore;
     before(async () => {
       accountsBefore = useStore.getState().accounts;
-      useStore.setState({ accounts: [{ id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', sender_name: 'Jordan Lee', color: '#fff', signature: '<p>Jordan Lee<br>Purchasing</p>' }] });
+      useStore.setState({ accounts: [{ id: '20000000-0000-4000-8000-000000000001', enabled: true, email_address: 'me@example.invalid', name: 'Me', sender_name: 'Jordan Lee', color: '#fff', signature: '<p>Jordan Lee<br>Purchasing</p>' }] });
       await mount({
-        accountId: 'acct', isReply: true, subject: 'Re: Artwork', body: '', cc: [],
+        accountId: '20000000-0000-4000-8000-000000000001', isReply: true, subject: 'Re: Artwork', body: '', cc: [],
         to: [ANA], originalFrom: [ANA], inReplyTo: '<m3@example.invalid>',
       });
     });
@@ -1413,7 +1436,7 @@ describe('Reply with AI', () => {
   });
 
   describe('in a new message', () => {
-    before(() => mount({ accountId: 'acct', to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Quote', body: '' }));
+    before(() => mount({ accountId: '20000000-0000-4000-8000-000000000001', to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Quote', body: '' }));
     after(() => unmount());
 
     test('Reply with AI is not offered, since there is nothing to reply to', async () => {
@@ -1446,10 +1469,10 @@ describe('pasting text copied from an email', () => {
   before(async () => {
     useStore.setState({
       plaintextEmail: false, notifications: [], composing: false, composeData: null,
-      accounts: [{ id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
+      accounts: [{ id: '20000000-0000-4000-8000-000000000001', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
     });
     api.post = async (path, payload) => { posted.push({ path, payload }); return { ok: true }; };
-    useStore.getState().openCompose({ accountId: 'acct', to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Rink', body: '' });
+    useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000001', to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Rink', body: '' });
     const root = createRoot(document.getElementById('root'));
     await React.act(async () => { root.render(React.createElement(Host)); });
     await React.act(async () => {});
@@ -1517,11 +1540,11 @@ describe('pasting into the signature and the quoted message', () => {
     posted.length = 0;
     useStore.setState({
       plaintextEmail: false, notifications: [], composing: false, composeData: null,
-      accounts: [{ id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff', signature: '<p>Marty Example</p>' }],
+      accounts: [{ id: '20000000-0000-4000-8000-000000000001', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff', signature: '<p>Marty Example</p>' }],
     });
     api.post = async (path, payload) => { posted.push({ path, payload }); return { ok: true }; };
     useStore.getState().openCompose({
-      accountId: 'acct', isReply: true, to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Re: Rink', body: '',
+      accountId: '20000000-0000-4000-8000-000000000001', isReply: true, to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Re: Rink', body: '',
       quotedBodyHtml: '<p>Original message</p>',
     });
     const width = window.innerWidth;
@@ -1583,6 +1606,7 @@ describe('locking the screen while composing', () => {
     assert.equal(useStore.getState().composing, true, 'the composer reopens after unlock');
     assert.match(kept.body, /Typed after the autosave\./);
     assert.equal(kept.draftUid, 8, 'it keeps saving into the draft the autosave wrote');
+    assert.deepEqual(kept.draftSource, savedCopies.at(-1).draftSource);
     assert.equal(kept.restored, true);
 
     // As in the browser: unlock remounts the composer at once, and the accounts (cleared by the
@@ -1600,12 +1624,13 @@ describe('locking the screen while composing', () => {
     await hideTab();
     assert.equal(saved.length, 1, 'the unsaved part is saved, rather than dropped');
     assert.equal(saved[0].existingUid, 8, 'into the same draft, not a second one');
-    assert.equal(saved[0].accountId, 'acct', 'from the account it was written from');
+    assert.deepEqual(saved[0].existingSource, kept.draftSource);
+    assert.equal(saved[0].accountId, '20000000-0000-4000-8000-000000000001', 'from the account it was written from');
     await React.act(async () => root.unmount());
     useStore.setState({ composing: false, composeData: null });
   });
 
-  test('an autosave that answers after the lock points the reopened composer at its copy', async () => {
+  test('an autosave that answers after the lock keeps the original source and marks the outcome uncertain', async () => {
     const close = await openDraft({ plaintextEmail: false, body: GMAIL_DRAFT });
     const editor = document.querySelector('.ProseMirror').editor;
     await React.act(async () => { editor.commands.insertContent(' Saving as it locks.'); });
@@ -1617,12 +1642,16 @@ describe('locking the screen while composing', () => {
       assert.ok(answer, 'precondition: an autosave in flight');
       await React.act(async () => { useStore.getState().setLocked(true); });
       await close();
-      await React.act(async () => { answer({ uid: 9, folder: 'Drafts' }); await new Promise(r => setTimeout(r, 0)); });
-      assert.equal(useStore.getState().composeData.draftUid, 9, 'the copy the late save wrote');
+      await React.act(async () => { answer(savedDraftFixture('20000000-0000-4000-8000-000000000001', 9)); await new Promise(r => setTimeout(r, 0)); });
+      const kept = useStore.getState().composeData;
+      assert.equal(kept.draftUid, 7, 'a late save cannot replace the parked pointer');
+      assert.deepEqual(kept.draftSource, draftSourceFixture('20000000-0000-4000-8000-000000000001', 7));
+      assert.equal(kept.draftSaveUncertain, true, 'the unresolved APPEND must not be repeated automatically');
+      assert.match(kept.body, /Saving as it locks\./);
     } finally {
       api.saveDraft = realSave;
       useStore.getState().setLocked(false);
-      useStore.setState({ composing: false, composeData: null, accounts: [{ id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }] });
+      useStore.setState({ composing: false, composeData: null, accounts: [{ id: '20000000-0000-4000-8000-000000000001', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }] });
     }
   });
 });

@@ -28,7 +28,7 @@ router.post('/send', async (req, res) => {
     : 0;
   // The draft this message was written in, deleted once it is delivered (see deleteSentDraft).
   const sentDraft = draft && typeof draft === 'object' && !Array.isArray(draft)
-    ? { uid: draft.uid, folder: draft.folder, accountId: draft.accountId }
+    ? { uid: draft.uid, folder: draft.folder, accountId: draft.accountId, source: draft.source && typeof draft.source === 'object' ? Object.freeze({ ...draft.source }) : null }
     : null;
   const missing = missingSendFields(req.body);
   if (missing) return res.status(400).json({ error: missing });

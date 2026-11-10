@@ -1,5 +1,7 @@
 import { query } from './db.js';
-import { findOwnedAccount } from './ownership.js';
+import { findOwnedAccount, findOwnedMessage } from './ownership.js';
+import { captureMessageSource, assertExpectedSource, protocolNumber, withMailboxIdentity } from './messageIdentity.js';
+import { sameAttachmentSource } from './attachmentReadScope.js';
 import { imapManager } from '../index.js';
 import { resolveAllDraftsPaths } from '../utils/mailUtils.js';
 
@@ -45,55 +47,89 @@ export async function isDraftsPath(account, folder, draftsFolder) {
   return specialUse.rows.length > 0;
 }
 
-// The previous copy a save replaces, or null (logged) when it cannot be pinned down. It lives in
-// the account it was last saved to, which is not the saving account once From has been switched.
-// The uid goes to IMAP as a UID set, so it must be a single uid ("1:*" would expunge the folder),
-// in a Drafts folder, with a local row whose Message-ID the delete checks the server copy against.
-export async function findReplacedDraft(userId, account, draftsFolder, { existingUid, existingFolder, existingAccountId }) {
-  const refuse = (why) => {
-    console.error(`Draft: refusing to delete old uid=${JSON.stringify(existingUid)} in folder ${JSON.stringify(existingFolder)}: ${why}`);
-    return null;
-  };
-  const uid = (typeof existingUid === 'number' || typeof existingUid === 'string')
-    && /^[1-9]\d*$/.test(String(existingUid)) ? Number(existingUid) : null;
-  if (!uid) return refuse('not a single uid');
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SOURCE_KEYS = ['messageId', 'accountId', 'storageGeneration', 'entityId', 'folder', 'uidValidity', 'uid'];
 
-  // A composer from before existingAccountId was sent means the saving account.
-  let holder = account;
-  if (existingAccountId != null && existingAccountId !== account.id) {
-    if (typeof existingAccountId !== 'string') return refuse('invalid account');
-    holder = await findOwnedAccount(userId, existingAccountId);
-    if (!holder) return refuse(`account ${JSON.stringify(existingAccountId)} not found`);
-  }
-  if (!(await isDraftsPath(holder, existingFolder, holder === account ? draftsFolder : undefined))) {
-    return refuse('not a Drafts folder');
-  }
-
-  const { rows: [row] } = await query(
-    'SELECT message_id FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3',
-    [holder.id, uid, existingFolder]
-  );
-  if (!row?.message_id) return refuse('no local row with a Message-ID to check the server copy against');
-  return { account: holder, uid, folder: existingFolder, messageId: row.message_id };
+// A physical cache UUID is not the RFC Message-ID header. Never repair missing proof
+// by looking up whatever currently occupies a UID.
+export function parseDraftSource(source) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)
+    || Object.keys(source).length !== SOURCE_KEYS.length || !SOURCE_KEYS.every(key => Object.hasOwn(source, key))
+    || !['messageId', 'accountId', 'storageGeneration', 'entityId'].every(key => typeof source[key] === 'string' && UUID_RE.test(source[key]))
+    || typeof source.folder !== 'string' || !source.folder.length || source.folder.length > 500
+    || [...source.folder].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+    || typeof source.uid !== 'string' || protocolNumber(source.uid) !== source.uid
+    || typeof source.uidValidity !== 'string' || protocolNumber(source.uidValidity) !== source.uidValidity) return null;
+  return Object.freeze({ id: source.messageId.toLowerCase(), account_id: source.accountId.toLowerCase(),
+    storage_generation: source.storageGeneration.toLowerCase(), entity_id: source.entityId.toLowerCase(),
+    folder: source.folder, uid_validity: source.uidValidity, uid: source.uid });
 }
 
-// Deletes the draft a message was sent from, once services/outgoingMail.js has delivered it. This runs on
-// the server, after delivery, because with undo send the delivery happens after the composer has
-// closed, possibly with the tab gone too: a draft deleted when Send was clicked would take with it
-// the only other copy of a message whose delivery then failed. The checks are those of a save
-// replacing its previous copy. Never throws: a draft left behind is logged, not a failed send.
-export async function deleteSentDraft(userId, account, { uid, folder, accountId } = {}) {
+export function draftSourceOf(row) {
+  if (!row) return null;
+  const source = { messageId: row.id, accountId: row.account_id, storageGeneration: row.storage_generation,
+    entityId: row.entity_id, folder: row.folder, uidValidity: protocolNumber(row.uid_validity), uid: protocolNumber(row.uid) };
+  return parseDraftSource(source) ? Object.freeze(source) : null;
+}
+
+export function draftSourceFromHeader(header) {
   try {
-    const target = await findReplacedDraft(userId, account, undefined, { existingUid: uid, existingFolder: folder, existingAccountId: accountId });
-    if (!target) return false;
-    const deleted = await imapManager.permanentDeleteMessage(target.account, target.uid, target.folder, { expectMessageId: target.messageId });
-    if (!deleted) {
-      console.error(`Draft: not deleting sent draft uid=${target.uid} in folder ${JSON.stringify(target.folder)}: the server copy's Message-ID does not match its local row`);
-      return false;
-    }
-    await query('DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3', [target.account.id, target.uid, target.folder]);
-    noteDraftsChanged(userId, target.account.id, target.folder);
-    return true;
+    if (typeof header !== 'string' || header.length > 8192) return null;
+    const source = JSON.parse(decodeURIComponent(header));
+    return parseDraftSource(source) ? source : null;
+  } catch { return null; }
+}
+
+export async function findReplacedDraft(userId, account, draftsFolder, { existingUid, existingFolder, existingAccountId, existingSource }) {
+  const source = parseDraftSource(existingSource);
+  const refuse = why => {
+    console.warn(`Draft: retaining previous copy: ${why}`);
+    return null;
+  };
+  if (!source || protocolNumber(existingUid) !== source.uid || existingFolder !== source.folder
+    || (existingAccountId ?? account.id) !== source.account_id) return refuse('missing or inconsistent source proof');
+  const holder = await findOwnedAccount(userId, source.account_id, { enabled: true });
+  if (!holder || holder.storage_generation !== source.storage_generation) return refuse('account changed');
+  const frozenAccount = Object.freeze({ ...holder, expectedOwnerId: userId });
+  if (!(await isDraftsPath(frozenAccount, source.folder, holder.id === account.id ? draftsFolder : undefined))) return refuse('not a Drafts folder');
+  const row = await findOwnedMessage(userId, source.id, { live: true, enabledAccount: true });
+  if (!sameAttachmentSource(row, source)) return refuse('source changed');
+  const expectedSource = Object.freeze({ ...row });
+  try {
+    const { context } = await captureMessageSource(frozenAccount, source.folder, source.uid, expectedSource);
+    return Object.freeze({ account: frozenAccount, uid: Number(source.uid), folder: source.folder,
+      userId, expectedSource, context: Object.freeze({ ...context, expectedOwnerId: userId }) });
+  } catch (err) {
+    if (err.status === 409 || err.status === 404) return refuse(err.message);
+    throw err;
+  }
+}
+
+export async function deleteDraftCopy(target) {
+  const { account, uid, folder, expectedSource, context, userId } = target;
+  await assertExpectedSource(context, expectedSource);
+  const deleted = await imapManager.permanentDeleteMessage(account, uid, folder, {
+    expectRow: expectedSource, expectedSource, expectedOwnerId: userId,
+  });
+  if (!deleted) return false;
+  // A delayed cleanup must never delete a row that sync has since put at the old UID.
+  try {
+    await withMailboxIdentity(context, tx => tx.query(`DELETE FROM messages WHERE id=$1 AND account_id=$2
+      AND folder=$3 AND uid=$4 AND storage_generation=$5 AND uid_validity=$6 AND entity_id=$7`,
+    [expectedSource.id, account.id, folder, uid, expectedSource.storage_generation, expectedSource.uid_validity, expectedSource.entity_id]));
+  } catch (err) { console.warn(`Draft deleted; local cache refresh pending: ${err.message}`); }
+  noteDraftsChanged(userId, account.id, folder);
+  return true;
+}
+
+// Cleanup is best-effort after SMTP delivery or durable scheduling. Its refusal must
+// never turn accepted mail into an apparent send failure that invites duplicate sends.
+export async function deleteSentDraft(userId, account, { uid, folder, accountId, source } = {}) {
+  try {
+    const target = await findReplacedDraft(userId, account, undefined, {
+      existingUid: uid, existingFolder: folder, existingAccountId: accountId, existingSource: source,
+    });
+    return target ? await deleteDraftCopy(target) : false;
   } catch (err) {
     console.error(`Draft: failed to delete sent draft uid=${JSON.stringify(uid)}: ${err.message}`);
     return false;

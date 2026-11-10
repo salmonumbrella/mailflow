@@ -94,6 +94,11 @@
     "hidePassword": "Nascondi password"
   },
   "compose": {
+    "draftSourceUnavailable": "Non è stato possibile verificare questa bozza. Conserva il testo, poi aggiorna la cartella Bozze e controlla le copie salvate prima di salvarla o rimuoverla.",
+    "draftRetainedTitle": "Bozza originale conservata",
+    "draftRetainedBody": "Non è stato possibile rimuovere la bozza originale in sicurezza. Aggiorna la cartella Bozze e controlla le copie salvate.",
+    "draftSeparateConfirm": "Salvare il testo attuale come bozza separata? Le copie già salvate verranno conservate. Controlla poi la cartella Bozze.",
+    "draftSeparateCopy": "Salva come bozza separata",
     "unsupportedDraftFrom": "Scegli un mittente configurato prima di salvare o inviare questa bozza.",
     "newMessage": "Nuovo messaggio",
     "reply": "Rispondi",

@@ -94,6 +94,11 @@
     "hidePassword": "Ocultar senha"
   },
   "compose": {
+    "draftSourceUnavailable": "Não foi possível verificar este rascunho. Guarde seu texto, depois atualize a pasta Rascunhos e revise as cópias salvas antes de salvá-lo ou removê-lo.",
+    "draftRetainedTitle": "Rascunho original mantido",
+    "draftRetainedBody": "Não foi possível remover o rascunho original com segurança. Atualize a pasta Rascunhos e revise as cópias salvas.",
+    "draftSeparateConfirm": "Salvar o texto atual como um rascunho separado? As cópias já salvas serão mantidas. Revise a pasta Rascunhos depois.",
+    "draftSeparateCopy": "Salvar como rascunho separado",
     "unsupportedDraftFrom": "Escolha um remetente configurado antes de salvar ou enviar este rascunho.",
     "newMessage": "Nova mensagem",
     "reply": "Responder",

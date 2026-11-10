@@ -1,3 +1,4 @@
+import { draftSourceFromRow, draftPointerData } from './draftSource.js';
 import { splitDraftSignature } from './draftSignature.js';
 
 function addresses(value) {
@@ -22,11 +23,8 @@ export function savedDraftToComposeData(draft, bodyData, accounts = []) {
   return {
     accountId: draft.account_id,
     ...(aliasId ? { aliasId } : {}),
-    draftUid: draft.uid,
-    draftFolder: draft.folder,
-    persistedKey: `${draft.account_id}:${draft.folder}:${draft.uid}:${draft.message_id || ''}:${draft.uid_validity || ''}`,
+    ...draftPointerData({ accountId: draft.account_id, folder: draft.folder, uid: draft.uid, source: draftSourceFromRow(draft) }),
     draftMessageId: draft.message_id,
-    draftUidValidity: draft.uid_validity,
     ...(unsupportedFrom ? { unsupportedFrom } : {}),
     to: addresses(draft.to_addresses),
     cc: addresses(draft.cc_addresses),

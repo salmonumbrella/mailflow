@@ -1,5 +1,6 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { draftSourceFixture, savedDraftFixture, composeDraftFixture, signatureLibraryFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { JSDOM } from 'jsdom';
@@ -56,6 +57,7 @@ const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
+api.getSignatureLibrary = async accountId => signatureLibraryFixture(useStore.getState().accounts.find(account => account.id === accountId));
 const ComposeModal = (await import('./ComposeModal.jsx')).default;
 
 const originalApi = { post: api.post, saveDraft: api.saveDraft, savePreferencesOnExit: api.savePreferencesOnExit, getContacts: api.getContacts };
@@ -68,15 +70,15 @@ beforeEach(() => {
   saved = [];
   rejectSend = false;
   api.savePreferencesOnExit = () => {};
-  api.saveDraft = async payload => { saved.push(payload); return { uid: 42, folder: 'Drafts' }; };
+  api.saveDraft = async payload => { saved.push(payload); return savedDraftFixture(payload.accountId, 42, saved.length); };
   api.post = async (path, body) => {
     posted.push({ path, body });
     if (path === '/mail/send' && rejectSend) throw new Error('Synthetic send failure');
     return { sentFolder: 'Sent' };
   };
   useStore.setState({
-    user: { id: 'synthetic-user' }, accounts: [{ id: 'account', enabled: true, email_address: 'me@example.invalid', name: 'Me' }],
-    selectedAccountId: 'account', plaintextEmail: false, composing: false, composeData: null,
+    user: { id: 'synthetic-user' }, accounts: [{ id: '20000000-0000-4000-8000-000000000002', enabled: true, email_address: 'me@example.invalid', name: 'Me' }],
+    selectedAccountId: '20000000-0000-4000-8000-000000000002', plaintextEmail: false, composing: false, composeData: null,
     prepareComposeSwitch: null, notifications: [], enabledPlugins: [],
   });
   useStore.getState().setLayout('gmail');
@@ -89,7 +91,7 @@ afterEach(async () => {
 });
 
 async function mount(data = {}, props = {}) {
-  useStore.getState().openCompose({ accountId: 'account', ...data });
+  useStore.getState().openCompose({ accountId: '20000000-0000-4000-8000-000000000002', ...data });
   root = createRoot(document.getElementById('root'));
   await React.act(async () => root.render(React.createElement(ComposeModal, props)));
   await React.act(async () => {});
@@ -122,7 +124,7 @@ test('Gmail composer sends typed recipients, subject and rich text through the n
   await send();
   const payload = sendPayload();
   assert.ok(payload);
-  assert.equal(payload.accountId, 'account');
+  assert.equal(payload.accountId, '20000000-0000-4000-8000-000000000002');
   assert.match(JSON.stringify(payload.to), /recipient@example.invalid/);
   assert.equal(payload.subject, 'Synthetic Gmail message');
   assert.match(payload.body, /<strong>recipient<\/strong>/);
@@ -163,7 +165,7 @@ test('Gmail send failure keeps the editable draft open and layout switching pres
 });
 
 test('Gmail composer autosaves an edited draft without sending it', async () => {
-  await mount({ to: ['recipient@example.invalid'], subject: 'Save for later', body: '<p>Original</p>', bodyIsHtml: true, draftUid: 7, draftFolder: 'Drafts' });
+  await mount({ to: ['recipient@example.invalid'], subject: 'Save for later', body: '<p>Original</p>', bodyIsHtml: true, ...composeDraftFixture('20000000-0000-4000-8000-000000000002', 7) });
   const editor = document.querySelector('.ProseMirror').editor;
   await React.act(async () => editor.commands.insertContent(' Updated'));
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
@@ -171,6 +173,7 @@ test('Gmail composer autosaves an edited draft without sending it', async () => 
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
   assert.equal(saved.length, 1);
   assert.equal(saved[0].existingUid, 7);
+  assert.deepEqual(saved[0].existingSource, draftSourceFixture('20000000-0000-4000-8000-000000000002', 7));
   assert.match(saved[0].body, /Updated/);
   assert.equal(sendPayload(), undefined);
 });
@@ -255,7 +258,7 @@ test('Gmail formatting toggle hides only the toolbar and retains rich text and a
 test('Gmail inline reply preserves one editable draft across navigation, maximize, restore and pop-out', async () => {
   const target = document.createElement('div');
   document.body.appendChild(target);
-  const matching = { element: target, messageId: 'source', accountId: 'account' };
+  const matching = { element: target, messageId: 'source', accountId: '20000000-0000-4000-8000-000000000002' };
   try {
     await mount({ to: ['recipient@example.invalid'], subject: 'Inline reply', body: '<p>Draft reply</p>', bodyIsHtml: true, isReply: true, sourceMessageId: 'source' }, { gmailReplyTarget: matching });
     assert.equal(target.querySelector('.compose-window').dataset.inline, 'true');

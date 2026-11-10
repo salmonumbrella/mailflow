@@ -139,9 +139,13 @@ describe.skipIf(!ADMIN_URL)('scheduled messages API on PostgreSQL (#543)', () =>
 
   describe('create', () => {
     it('stores the message encrypted, deletes the draft after the commit, and says so', async () => {
-      const r = await call('POST', '', draftBody({ draft: { uid: 9, folder: 'Drafts', accountId: account.id } }));
+      const draft = { uid: 9, folder: 'Drafts', accountId: account.id, source: {
+        messageId: randomUUID(), accountId: account.id, storageGeneration: account.storage_generation,
+        entityId: randomUUID(), folder: 'Drafts', uid: '9', uidValidity: '10',
+      } };
+      const r = await call('POST', '', draftBody({ draft }));
       expect(r.status).toBe(201);
-      expect(r.body).toEqual({ id: expect.any(String), sendAt: expect.any(String), status: 'scheduled' });
+      expect(r.body).toEqual({ id: expect.any(String), sendAt: expect.any(String), status: 'scheduled', cleanup: { status: 'deleted' } });
       const row = await rowOf(r.body.id);
       expect(row).toMatchObject({ storage_generation: account.storage_generation, status: 'scheduled', time_zone: 'Europe/Berlin', attempts: 0, version: 1 });
       expect(row.due_at).toEqual(row.send_at);
@@ -149,7 +153,7 @@ describe.skipIf(!ADMIN_URL)('scheduled messages API on PostgreSQL (#543)', () =>
       expect(payload).toMatchObject({ v: 1, to: ['you@example.net'], subject: 'Q4 numbers', aliasId: null });
       expect(payload.messageId).toMatch(/^<[0-9a-f]{32}@example\.com>$/);
       expect(row.payload_enc.includes(Buffer.from('Q4 numbers'))).toBe(false);
-      expect(deleteSentDraft).toHaveBeenCalledWith(owner.id, expect.objectContaining({ id: account.id }), { uid: 9, folder: 'Drafts', accountId: account.id });
+      expect(deleteSentDraft).toHaveBeenCalledWith(owner.id, expect.objectContaining({ id: account.id }), draft);
       expect(broadcasts()).toEqual([{ type: 'scheduled_changed', id: r.body.id, status: 'scheduled' }]);
     });
 

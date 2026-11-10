@@ -153,6 +153,8 @@ function noteRemoved(state, ids) {
 export const useStore = create((set, get) => ({
   // Auth
   user: null,
+  composeAuthEpoch: 0,
+  composeSignOutPending: false,
   attachmentSessionEpoch: 0,
   attachmentSignOutPending: false,
   setUser: (user) => {
@@ -183,6 +185,8 @@ export const useStore = create((set, get) => ({
     }
     set(state => ({
       user,
+      composeSession: state.composeSession + (state.user?.id !== user?.id ? 1 : 0),
+      composeAuthEpoch: state.composeAuthEpoch + (state.user?.id !== user?.id ? 1 : 0),
       attachmentSessionEpoch: state.attachmentSessionEpoch + (state.user?.id !== user?.id ? 1 : 0),
       ...(state.user?.id !== user?.id ? {
         gmailDensity: readDensityCache(localStorage, user?.id)?.value || normalizeGmailDensity(localStorage.getItem('mailflow_gmail_density')),
@@ -229,7 +233,8 @@ export const useStore = create((set, get) => ({
   // The sidebar and the lock screen sign out here, through the shared helper (#523, #310).
   signOut: async () => {
     if (get().attachmentSignOutPending) return;
-    set(state => ({ attachmentSignOutPending: true, attachmentSessionEpoch: state.attachmentSessionEpoch + 1 }));
+    set(state => ({ attachmentSignOutPending: true, attachmentSessionEpoch: state.attachmentSessionEpoch + 1,
+      composeSignOutPending: true, composeAuthEpoch: state.composeAuthEpoch + 1, composeSession: state.composeSession + 1 }));
     // Before the request, not after it: if the page reloads while the request is out and the
     // server did sign out, the next load clears the lock with no user signed in, which reopens
     // this message for whoever signs in next.
@@ -247,7 +252,7 @@ export const useStore = create((set, get) => ({
         },
       });
     } finally {
-      set({ attachmentSignOutPending: false });
+      set({ attachmentSignOutPending: false, composeSignOutPending: false });
     }
   },
 
@@ -296,6 +301,8 @@ export const useStore = create((set, get) => ({
       set({
         serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
         isLocked: true,
+        composeSession: get().composeSession + (densitySessionChanged ? 1 : 0),
+        prepareComposeSwitch: null,
         activeLabel: null, nativeLabelFeed: null, nativeLabelSnapshots: {},
         messages: [], searchResults: [], searchSizeIndex: null, searchLabelIndex: null, searchQuery: '',
         accounts: [], accountsReady: false,
@@ -715,27 +722,29 @@ export const useStore = create((set, get) => ({
   // The open composer's current state, kept across the lock screen (see setLocked).
   keepComposeForLock: (session, data) => set(state =>
     state.composing && state.composeSession === session ? { composeData: data } : {}),
-  // `draft` ({ draftUid, draftFolder, draftAccountId }): the copy the save wrote. A save that
-  // answers after the composer was put away for the lock screen (keepComposeForLock) points the
-  // composer that reopens at it, rather than at the copy it replaced.
+  // A receipt may only update the still-active compose lifetime. Locking advances that lifetime;
+  // an in-flight save leaves its parked text marked for review rather than replaying APPEND.
   updateComposePersistedKey: (session, persistedKey, draft = {}) => set(state =>
-    state.composing && state.composeSession === session
+    !state.isLocked && state.composing && state.composeSession === session
       ? { composeData: { ...state.composeData, persistedKey, ...draft } } : {}),
   openCompose: (data = null, { preparedSession } = {}) => {
     const initial = get();
+    if (initial.isLocked || initial.composeSignOutPending || (preparedSession !== undefined && preparedSession !== initial.composeSession)) return false;
     if (initial.composing && data?.persistedKey && data.persistedKey === initial.composeData?.persistedKey) return true;
     const replace = () => {
       set(state => ({ composing: true, composeSession: state.composeSession + 1, composeData: data, prepareComposeSwitch: null }));
       return true;
     };
-    if (preparedSession !== undefined && preparedSession !== initial.composeSession) return false;
     // Reply-draft opening already saved this exact editor and revalidated its target.
     if (!initial.composing || preparedSession === initial.composeSession) return replace();
     // Every ordinary Compose/Reply/draft-list entry point shares this guard. A
     // composer still mounting cannot yet prove that its content is safe to replace.
     if (!initial.prepareComposeSwitch) return false;
     let ownerChanged = false;
-    const unsubscribe = useStore.subscribe(state => { if (state.user?.id !== initial.user?.id) ownerChanged = true; });
+    const unsubscribe = useStore.subscribe((state, previous) => {
+      for (const value of [previous, state]) if (value && (value.user?.id !== initial.user?.id || value.isLocked !== initial.isLocked
+        || value.composeSignOutPending || value.composeAuthEpoch !== initial.composeAuthEpoch)) ownerChanged = true;
+    });
     return (async () => {
       try {
         if (!(await initial.prepareComposeSwitch())) return false;

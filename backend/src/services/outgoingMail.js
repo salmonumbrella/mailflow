@@ -627,7 +627,7 @@ async function learnRecipients(userId, allRecipients, now) {
 // whose publicMessage is safe to show the user, the SMTP error as its cause, and that error's
 // responseCode, code and command where it has them.
 //
-// `sentDraft` is the draft to delete ({ uid, folder, accountId }) or null. The hooks:
+// `sentDraft` is the draft to delete ({ uid, folder, accountId, source }) or null. The hooks:
 // - onDelivered(early, { refusals }): awaited as soon as SMTP has accepted the message (see
 //   sendHold.js). `refusals` lists each recipient the server refused at RCPT with its reply
 //   code, so a caller can tell a deferral (4xx) from a rejection (5xx). With the hook, the result
@@ -643,6 +643,7 @@ export async function deliverAndRecord(
   const { fromName, fromEmail } = identity;
   let delivered = false; // true once transport.sendMail has actually handed off the message
   let rejected = [];
+  let cleanup = null;
   let learning = Promise.resolve(); // never rejects: its errors are logged inside
   try {
     const info = await transport.sendMail(mailOptions);
@@ -661,7 +662,8 @@ export async function deliverAndRecord(
     await onDelivered?.({ ok: true, ...(rejected.length ? { rejected } : {}) }, { refusals });
     // Awaited, like the contact learning of a held send below: a shutdown delivers held sends
     // and waits for them to finish, and work left in a setImmediate would be cut off.
-    if (sentDraft) await deleteSentDraft(userId, account, sentDraft);
+    cleanup = sentDraft ? (await deleteSentDraft(userId, account, sentDraft)
+      ? { status: 'deleted' } : { status: 'retained', code: 'draft_source_changed' }) : null;
 
     // Auto-learn sent recipients. A DB error here must never affect the send response. An
     // immediate send does not wait for it; a held send does, because nobody is waiting on that
@@ -765,7 +767,7 @@ export async function deliverAndRecord(
       }
     }
 
-    const sendResult = { ok: true };
+    const sendResult = { ok: true, ...(cleanup ? { cleanup } : {}) };
     // Surface only the problem case so existing success handling is unchanged; the UI warns
     // when a delivered message could not be saved to the account's Sent folder.
     if (sentCopySaved === false) sendResult.sentCopySaved = false;
@@ -785,7 +787,7 @@ export async function deliverAndRecord(
       // SMTP already accepted this message. A Sent-folder or metadata failure
       // must not invite the user to send it again.
       console.error('Post-send processing failed:', err.message);
-      const sendResult = { ok: true, sentCopySaved: false };
+      const sendResult = { ok: true, sentCopySaved: false, ...(cleanup ? { cleanup } : {}) };
       if (rejected.length) sendResult.rejected = rejected;
       onResult?.(sendResult);
       if (onDelivered) await learning;

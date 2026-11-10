@@ -6,6 +6,7 @@
 
 import { test, describe, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { draftSourceFixture, savedDraftFixture, composeDraftFixture, signatureLibraryFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { JSDOM } from 'jsdom';
@@ -59,10 +60,11 @@ const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
+api.getSignatureLibrary = async accountId => signatureLibraryFixture(useStore.getState().accounts.find(account => account.id === accountId));
 const ComposeModal = (await import('./ComposeModal.jsx')).default;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const ACCOUNT = { id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' };
+const ACCOUNT = { id: '20000000-0000-4000-8000-000000000001', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' };
 const refusal = (status, code, message, extra = {}) => Object.assign(new Error(message), { status, code, ...extra });
 
 // Every call the composer makes to the scheduled API and to Drafts, with an answer per test.
@@ -94,14 +96,14 @@ before(() => {
 beforeEach(() => {
   calls.length = 0;
   answers = {
-    create: ({ sendAt }) => ({ id: 's1', sendAt, status: 'scheduled' }),
+    create: ({ sendAt }) => ({ id: 's1', sendAt, status: 'scheduled', cleanup: { status: 'deleted' } }),
     update: (id, { sendAt, version }) => ({ id, version: version + 1, sendAt, status: 'scheduled' }),
     hold: { editToken: '11111111-1111-4111-8111-111111111111', version: 3, statusBefore: 'scheduled' },
     release: { status: 'scheduled' },
     cancel: { status: 'cancelled', undoUntil: new Date(Date.now() + 600_000).toISOString() },
     sendNow: () => ({ status: 'scheduled', sendAt: new Date(Date.now() + 10_000).toISOString(), undoToken: 'undo-token', undoUntil: new Date(Date.now() + 10_000).toISOString() }),
     undoSendNow: { status: 'scheduled', sendAt: SEND_AT },
-    saveDraft: { uid: 9, folder: 'Drafts', scheduledRemoved: true },
+    saveDraft: { ...savedDraftFixture('20000000-0000-4000-8000-000000000001', 9), scheduledRemoved: true },
   };
 });
 
@@ -128,7 +130,7 @@ async function setInput(input, value) {
 async function mount(composeData, { mobile = false } = {}) {
   Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: mobile ? 375 : 1280 });
   useStore.setState({
-    user: { id: 'u1' }, plaintextEmail: false, accounts: [ACCOUNT], selectedAccountId: 'acct', defaultSender: '',
+    user: { id: 'u1' }, plaintextEmail: false, accounts: [ACCOUNT], selectedAccountId: '20000000-0000-4000-8000-000000000001', defaultSender: '',
     composing: false, composeData: null, prepareComposeSwitch: null, notifications: [],
   });
   useStore.getState().openCompose(composeData);
@@ -149,8 +151,8 @@ const mounted = [];
 afterEach(async () => { while (mounted.length) await mounted.pop()(); });
 
 const NEW_MESSAGE = {
-  accountId: 'acct', to: ['Bob <bob@example.invalid>'], subject: 'Q4 numbers', body: '<p>Here they are.</p>',
-  draftUid: 7, draftFolder: 'Drafts', draftAccountId: 'acct',
+  accountId: '20000000-0000-4000-8000-000000000001', to: ['Bob <bob@example.invalid>'], subject: 'Q4 numbers', body: '<p>Here they are.</p>',
+  ...composeDraftFixture('20000000-0000-4000-8000-000000000001', 7), draftAccountId: '20000000-0000-4000-8000-000000000001',
 };
 
 describe('Send later on desktop', () => {
@@ -208,7 +210,7 @@ describe('Send later on desktop', () => {
     assert.equal(at.getMinutes(), 0);
     assert.equal(body.timeZone, Intl.DateTimeFormat().resolvedOptions().timeZone);
     assert.match(body.clientKey, UUID);
-    assert.deepEqual(body.draft, { uid: 7, folder: 'Drafts', accountId: 'acct' });
+    assert.deepEqual(body.draft, { uid: 7, folder: 'Drafts', accountId: '20000000-0000-4000-8000-000000000001', source: draftSourceFixture('20000000-0000-4000-8000-000000000001', 7) });
     assert.deepEqual(body.to, ['Bob <bob@example.invalid>']);
     assert.equal(body.subject, 'Q4 numbers');
     assert.match(body.body, /Here they are\./);
@@ -271,7 +273,7 @@ describe('Send later on desktop', () => {
   });
 
   test('a retry after a failure uses the same client key', async () => {
-    answers.create = [new TypeError('Failed to fetch'), ({ sendAt }) => ({ id: 's1', sendAt, status: 'scheduled' })];
+    answers.create = [new TypeError('Failed to fetch'), ({ sendAt }) => ({ id: 's1', sendAt, status: 'scheduled', cleanup: { status: 'deleted' } })];
     await click(chevron());
     await click(preset('tomorrowMorning'));
     await settle();
@@ -525,7 +527,7 @@ describe('Send later on a phone', () => {
 // A scheduled message as the Scheduled view opens it (utils/scheduledCompose.js).
 const SEND_AT = new Date(Date.now() + 3 * 86_400_000).toISOString();
 const SCHEDULED = {
-  accountId: 'acct', to: ['Bob <bob@example.invalid>'], subject: 'Q4 numbers', body: '<p>Here they are.</p>',
+  accountId: '20000000-0000-4000-8000-000000000001', to: ['Bob <bob@example.invalid>'], subject: 'Q4 numbers', body: '<p>Here they are.</p>',
   scheduled: {
     id: '22222222-2222-4222-8222-222222222222', version: 3, sendAt: SEND_AT, timeZone: 'Europe/Berlin',
     attachments: [
@@ -784,7 +786,7 @@ describe('editing a scheduled message', () => {
     await settle();
     const [[, body]] = callsTo('saveDraft');
     assert.deepEqual(body.fromScheduled, { id: ID, editToken: TOKEN });
-    assert.equal(body.accountId, 'acct');
+    assert.equal(body.accountId, '20000000-0000-4000-8000-000000000001');
     assert.equal(body.subject, 'Q4 numbers');
     assert.equal(body.existingUid, undefined, 'a new draft');
     assert.equal(useStore.getState().composing, false);
@@ -794,7 +796,7 @@ describe('editing a scheduled message', () => {
   });
 
   test('Unschedule that could not remove the scheduled copy says it is still scheduled', async () => {
-    answers.saveDraft = { uid: 9, folder: 'Drafts', scheduledRemoved: false };
+    answers.saveDraft = { ...savedDraftFixture('20000000-0000-4000-8000-000000000001', 9), scheduledRemoved: false };
     const close = await mount({ ...structuredClone(SCHEDULED), scheduled: { ...SCHEDULED.scheduled, attachments: [] } });
     await click(chevron());
     await click(menuItems().at(-1));

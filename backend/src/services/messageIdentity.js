@@ -26,9 +26,12 @@ function providerKey(context, message) {
     ? { namespace: context.providerNamespace, id } : null;
 }
 
-async function lockAccount(client, accountId, generation) {
-  const { rows: [account] } = await client.query('SELECT id, storage_generation FROM email_accounts WHERE id=$1 FOR UPDATE', [accountId]);
+async function lockAccount(client, accountId, generation, expectedOwnerId) {
+  const { rows: [account] } = await client.query(`SELECT id, storage_generation${expectedOwnerId ? ', user_id, enabled' : ''} FROM email_accounts WHERE id=$1 FOR UPDATE`, [accountId]);
   if (!account) throw identityError('identity_account_missing', 'Account no longer exists', 404);
+  if (expectedOwnerId && (account.user_id !== expectedOwnerId || account.enabled !== true)) {
+    throw identityError('identity_source_changed', 'The draft account is no longer available to its original owner');
+  }
   if (generation && generation !== account.storage_generation) {
     throw identityError('storage_generation_conflict', 'The mailbox account changed. Refresh and try again.');
   }
@@ -46,8 +49,8 @@ export async function readMailboxIdentity(account, folderPath) {
     throw identityError('invalid_identity_locator', 'Invalid mailbox identity scope', 400);
   }
   return withTransaction(async client => {
-    const current = await lockAccount(client, account.id, account.storage_generation);
-    const context = { accountId: account.id, storageGeneration: current.storage_generation, folderPath };
+    const current = await lockAccount(client, account.id, account.storage_generation, account.expectedOwnerId);
+    const context = { accountId: account.id, storageGeneration: current.storage_generation, folderPath, ...(account.expectedOwnerId ? { expectedOwnerId: account.expectedOwnerId } : {}) };
     const epoch = await epochRow(client, context);
     const cached = (await client.query('SELECT uid_validity FROM folders WHERE account_id=$1 AND path=$2', [account.id, folderPath])).rows[0];
     return { ...context, revision: epoch?.revision ?? '0', uidValidity: epoch?.uid_validity ?? null, cachedUidValidity: cached?.uid_validity ?? null };
@@ -73,7 +76,7 @@ export async function observeMailboxIdentity(snapshot, imapClient) {
   const providerMailboxId = providerNamespace === 'imap-objectid' && typeof imapClient.mailbox?.mailboxId === 'string'
     ? imapClient.mailbox.mailboxId : null;
   return withTransaction(async client => {
-    await lockAccount(client, snapshot.accountId, snapshot.storageGeneration);
+    await lockAccount(client, snapshot.accountId, snapshot.storageGeneration, snapshot.expectedOwnerId);
     const old = await epochRow(client, snapshot);
     if (String(old?.revision ?? '0') !== String(snapshot.revision)) {
       throw identityError('identity_epoch_changed', 'Mailbox epoch changed while selecting it');
@@ -102,7 +105,7 @@ export async function observeMailboxIdentity(snapshot, imapClient) {
 }
 
 async function assertContext(client, context) {
-  await lockAccount(client, context.accountId, context.storageGeneration);
+  await lockAccount(client, context.accountId, context.storageGeneration, context.expectedOwnerId);
   const epoch = await epochRow(client, context);
   if (!epoch || String(epoch.revision) !== String(context.revision) || epoch.uid_validity !== protocolNumber(context.uidValidity)) {
     throw identityError('identity_epoch_changed', 'Mailbox epoch changed during the operation');
@@ -370,7 +373,7 @@ export async function prepareIdentityOperations(context, destinationFolder, uids
 
 export async function prepareAppendIdentityOperation(snapshot, destinationFolder = snapshot.folderPath) {
   return withTransaction(async client => {
-    await lockAccount(client, snapshot.accountId, snapshot.storageGeneration);
+    await lockAccount(client, snapshot.accountId, snapshot.storageGeneration, snapshot.expectedOwnerId);
     const destination = await epochRow(client, { ...snapshot, folderPath: destinationFolder });
     if (String(destination?.revision ?? '0') !== String(snapshot.revision)) throw identityError('identity_epoch_changed', 'Mailbox changed before APPEND');
     return (await client.query(`INSERT INTO mail_identity_operations(account_id,storage_generation,operation_type,destination_folder,destination_revision)

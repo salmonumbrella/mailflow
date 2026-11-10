@@ -94,6 +94,11 @@
     "hidePassword": "Passwort verbergen"
   },
   "compose": {
+    "draftSourceUnavailable": "Dieser Entwurf konnte nicht überprüft werden. Bewahre deinen Text auf, aktualisiere dann den Ordner „Entwürfe“ und prüfe die gespeicherten Kopien, bevor du den Entwurf speicherst oder entfernst.",
+    "draftRetainedTitle": "Ursprünglicher Entwurf beibehalten",
+    "draftRetainedBody": "Der ursprüngliche Entwurf konnte nicht sicher entfernt werden. Aktualisiere den Ordner „Entwürfe“ und prüfe die gespeicherten Kopien.",
+    "draftSeparateConfirm": "Den aktuellen Text als separaten Entwurf speichern? Vorhandene gespeicherte Kopien bleiben erhalten. Prüfe danach den Ordner „Entwürfe“.",
+    "draftSeparateCopy": "Als separaten Entwurf speichern",
     "unsupportedDraftFrom": "Wähle einen eingerichteten Absender, bevor du diesen Entwurf speicherst oder sendest.",
     "newMessage": "Neue Nachricht",
     "reply": "Antworten",

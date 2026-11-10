@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { draftRowFixture } from '../test/draftSourceFixture.js';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { JSDOM } from 'jsdom';
@@ -62,8 +63,7 @@ test('an accessible action opens a background row with its actual draft account'
   useStore.setState({ replyDrafts: { row: { exists: true } }, selectedMessageId: 'old',
     selectedFolder: 'INBOX', selectedAccountId: null, conversationMode: 'off',
     composing: false, composeData: null, accounts: [] });
-  api.getReplyDraft = async id => { assert.equal(id, 'row'); return { draft: { id: 'draft',
-    account_id: 'actual', folder: 'Drafts', uid: 5, message_id: '<draft@example.test>',
+  api.getReplyDraft = async id => { assert.equal(id, 'row'); return { draft: { ...draftRowFixture('20000000-0000-4000-8000-000000000001', 5), message_id: '<draft@example.test>',
     attachments_complete: true }, body: { text: 'Reply', attachments: [] } }; };
   try {
     await React.act(async () => root.render(React.createElement(Indicator, { message: { id: 'row', folder: 'INBOX' } })));
@@ -71,7 +71,7 @@ test('an accessible action opens a background row with its actual draft account'
     assert.ok(button);
     await React.act(async () => button.click());
     assert.equal(useStore.getState().selectedMessageId, 'row');
-    assert.equal(useStore.getState().composeData.accountId, 'actual');
+    assert.equal(useStore.getState().composeData.accountId, '20000000-0000-4000-8000-000000000001');
     assert.equal(useStore.getState().composeData.source, 'manualReplyDraft');
   } finally { await React.act(async () => root.unmount()); }
 });

@@ -16,6 +16,13 @@ const imap = vi.hoisted(() => {
   return { fns, manager };
 });
 vi.mock('../services/db.js', () => { const query = vi.fn(); return { query, withTransaction: fn => fn({ query }) }; });
+// This suite pins real ownership lookups; durable source fences have independent PostgreSQL coverage.
+vi.mock('../services/messageIdentity.js', async original => ({ ...await original(),
+  captureMessageSource: vi.fn(async (account, folderPath, uid, expectedSource) => ({
+    context: { accountId: account.id, storageGeneration: account.storage_generation, folderPath, uidValidity: '9', revision: '1' }, expectedSource,
+  })), assertExpectedSource: vi.fn(async () => {}),
+  withMailboxIdentity: vi.fn(async (_context, run) => run({ query })),
+}));
 vi.mock('../middleware/auth.js', () => {
   const signIn = (req, _res, next) => { req.session = { userId: session.userId }; next(); };
   return { requireAuth: signIn, requireAdmin: signIn };
@@ -58,6 +65,15 @@ const ACCOUNTS = {
   [SECOND_ACCOUNT_ID]: { id: SECOND_ACCOUNT_ID, storage_generation: '22222222-2222-4222-8222-222222222222', user_id: OWNER, name: 'Me too', email_address: 'me2@example.com', protocol: 'imap', enabled: true, folder_mappings: { drafts: 'Drafts' }, oauth_provider: null },
 };
 const message = () => ({ id: MESSAGE_ID, account_id: ACCOUNT_ID, uid: 7, folder: 'INBOX', message_id: '<m1@example.com>', subject: 'Weekly', from_email: 'news@example.com', snippet: 'Hi', spam_details: null, owner_id: OWNER, folder_mappings: {} });
+const DRAFT_ID = 'f6f6f6f6-6666-4666-8666-f6f6f6f6f6f6';
+const OLD_DRAFT_ID = '77777777-7777-4777-8777-777777777777';
+const NEW_DRAFT_ID = '88888888-8888-4888-8888-888888888888';
+const draftRow = (accountId, id, uid) => ({ id, account_id: accountId, uid, folder: 'Drafts',
+  storage_generation: ACCOUNTS[accountId].storage_generation, entity_id: '99999999-9999-4999-8999-999999999999',
+  uid_validity: '9', message_id: '<old@example.com>' });
+const draftRows = [draftRow(ACCOUNT_ID, DRAFT_ID, 5), draftRow(SECOND_ACCOUNT_ID, OLD_DRAFT_ID, 9)];
+const sourceOf = row => ({ messageId: row.id, accountId: row.account_id, storageGeneration: row.storage_generation,
+  entityId: row.entity_id, folder: row.folder, uidValidity: row.uid_validity, uid: String(row.uid) });
 const contact = () => ({ id: CONTACT_ID, uid: 'u-1', user_id: OWNER, address_book_id: BOOK_ID, display_name: 'Ann', first_name: null, last_name: null, primary_email: 'ann@example.com', emails: [{ value: 'ann@example.com' }], phones: [], organization: null, notes: null, source: 'local', book_source: 'local', read_only: false });
 
 const flat = sql => sql.replace(/\s+/g, ' ').trim();
@@ -77,7 +93,8 @@ function fakeQuery(rawSql, params = []) {
     return result(params[0] === ALIAS_ID && params[1] === OWNER && params[2] === ACCOUNT_ID ? [{ id: ALIAS_ID, account_id: ACCOUNT_ID }] : []);
   }
   if (/FROM messages m JOIN email_accounts a ON (m\.account_id = a\.id|a\.id = m\.account_id) WHERE m\.id = \$1 AND a\.user_id = \$2/.test(sql)) {
-    return result(params[0] === MESSAGE_ID && params[1] === OWNER ? [message()] : []);
+    if (params[0] === MESSAGE_ID) return result(params[1] === OWNER ? [message()] : []);
+    return result(draftRows.filter(row => row.id === params[0] && ACCOUNTS[row.account_id].user_id === params[1]));
   }
   if (sql.includes('FROM contacts c JOIN address_books ab ON ab.id = c.address_book_id WHERE c.id = $1 AND c.user_id = $2')) {
     return result(params[0] === CONTACT_ID && params[1] === OWNER ? [contact()] : []);
@@ -120,17 +137,18 @@ beforeEach(() => {
     connectAccount: vi.fn(() => Promise.resolve(true)),
     backfillAllRunning: new Set(),
     backfillAllFolders: vi.fn(() => Promise.resolve()),
-    appendToFolder: vi.fn(() => Promise.resolve({ uid: 12 })),
-    upsertDraftMessageRecord: vi.fn(() => Promise.resolve()),
+    appendToFolder: vi.fn(async (account, folder) => ({ uid: 12, identityContext: { accountId: account.id,
+      storageGeneration: account.storage_generation, folderPath: folder, uidValidity: '9', revision: '1' } })),
+    upsertDraftMessageRecord: vi.fn(async account => draftRow(account.id, NEW_DRAFT_ID, 12)),
     permanentDeleteMessage: vi.fn(() => Promise.resolve(true)),
   });
 });
 
-async function call(userId, { method = 'GET', path, body }) {
+async function call(userId, { method = 'GET', path, body, headers = {} }) {
   session.userId = userId;
   const res = await fetch(base + path, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -165,8 +183,10 @@ const cases = [
   ['POST /rules', { method: 'POST', path: '/rules', body: rule }, { status: 403, json: { error: 'Account not found' } }, { status: 201 }],
   ['PUT /rules/:id', { method: 'PUT', path: `/rules/${ALIAS_ID}`, body: rule }, { status: 403, json: { error: 'Account not found' } }, { status: 200 }],
   ['POST /rules/sender-category', { method: 'POST', path: '/rules/sender-category', body: { messageId: MESSAGE_ID, scope: 'sender', category: 'newsletter' } }, messageNotFound, { status: 200 }],
-  ['POST /mail/draft', { method: 'POST', path: '/mail/draft', body: draft }, accountNotFound, { status: 200, json: { uid: 12, folder: 'Drafts' } }],
-  ['DELETE /mail/draft/:uid', { method: 'DELETE', path: `/mail/draft/5?accountId=${ACCOUNT_ID}&folder=Drafts` }, accountNotFound, { status: 200, json: { ok: true } }],
+  ['POST /mail/draft', { method: 'POST', path: '/mail/draft', body: draft }, accountNotFound, { status: 200, json: { uid: 12, folder: 'Drafts', draftSource: sourceOf(draftRow(ACCOUNT_ID, NEW_DRAFT_ID, 12)) } }],
+  ['DELETE /mail/draft/:uid', { method: 'DELETE', path: `/mail/draft/5?accountId=${ACCOUNT_ID}&folder=Drafts`,
+    headers: { 'X-Mailflow-Message-Source': encodeURIComponent(JSON.stringify(sourceOf(draftRows[0]))) } },
+  accountNotFound, { status: 200, json: { ok: true, cleanup: { status: 'deleted' } } }],
   ['POST /categories/ai-classify/:messageId', { method: 'POST', path: `/categories/ai-classify/${MESSAGE_ID}` }, messageNotFound, { status: 200, json: { ok: true, category: 'newsletter' } }],
   ['GET /contacts/:id', { path: `/contacts/${CONTACT_ID}` }, contactNotFound, { status: 200 }],
   ['PATCH /contacts/:id', { method: 'PATCH', path: `/contacts/${CONTACT_ID}`, body: { displayName: 'Anne' } }, contactNotFound, { status: 200 }],
@@ -193,13 +213,13 @@ describe('routes still serve the owner', () => {
 
 describe('replacing a draft saved in another account', () => {
   const save = existingAccountId => call(OWNER, {
-    method: 'POST', path: '/mail/draft', body: { ...draft, existingUid: 9, existingFolder: 'Drafts', existingAccountId },
+    method: 'POST', path: '/mail/draft', body: { ...draft, existingUid: 9, existingFolder: 'Drafts', existingAccountId, existingSource: sourceOf(draftRows[1]) },
   });
 
   it('deletes the old copy from another of the user\'s own accounts', async () => {
     expect((await save(SECOND_ACCOUNT_ID)).status).toBe(200);
     expect(imap.fns.permanentDeleteMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ id: SECOND_ACCOUNT_ID }), 9, 'Drafts', { expectMessageId: '<old@example.com>' });
+      expect.objectContaining({ id: SECOND_ACCOUNT_ID }), 9, 'Drafts', { expectRow: draftRows[1], expectedSource: draftRows[1], expectedOwnerId: OWNER });
   });
 
   it('leaves alone a copy in an account that is not the user\'s', async () => {
@@ -209,6 +229,22 @@ describe('replacing a draft saved in another account', () => {
     } finally {
       ACCOUNTS[SECOND_ACCOUNT_ID].user_id = OWNER;
     }
+    expect(imap.fns.permanentDeleteMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('legacy draft locators do not bypass ownership or source proof', () => {
+  it('retains an owned draft when its clicked physical proof is absent', async () => {
+    const result = await call(OWNER, { method: 'DELETE', path: `/mail/draft/5?accountId=${ACCOUNT_ID}&folder=Drafts` });
+    expect(result.status).toBe(409); expect(result.json.cleanup.status).toBe('retained');
+    expect(writes).toEqual([]); expect(imapCalls()).toEqual([]);
+  });
+  it('does not query another account from an unproved replacement locator', async () => {
+    const result = await call(OWNER, { method: 'POST', path: '/mail/draft', body: {
+      ...draft, existingUid: 9, existingFolder: 'Drafts', existingAccountId: SECOND_ACCOUNT_ID,
+    } });
+    expect(result.status).toBe(200); expect(result.json.cleanup.status).toBe('retained');
+    expect(ownership.findOwnedAccount.mock.calls.some(([, id]) => id === SECOND_ACCOUNT_ID)).toBe(false);
     expect(imap.fns.permanentDeleteMessage).not.toHaveBeenCalled();
   });
 });
@@ -258,7 +294,8 @@ describe('each route looks up with its own columns and filters', () => {
   });
 
   it('looks up the account a replaced draft was saved in, in full', async () => {
-    await call(OWNER, { method: 'POST', path: '/mail/draft', body: { ...draft, existingUid: 9, existingFolder: 'Drafts', existingAccountId: SECOND_ACCOUNT_ID } });
-    expect(lookupsMade()).toContainEqual(['findOwnedAccount', OWNER, SECOND_ACCOUNT_ID]);
+    await call(OWNER, { method: 'POST', path: '/mail/draft', body: { ...draft, existingUid: 9, existingFolder: 'Drafts', existingAccountId: SECOND_ACCOUNT_ID, existingSource: sourceOf(draftRows[1]) } });
+    expect(lookupsMade()).toContainEqual(['findOwnedAccount', OWNER, SECOND_ACCOUNT_ID, { enabled: true }]);
+    expect(lookupsMade()).toContainEqual(['findOwnedMessage', OWNER, OLD_DRAFT_ID, { live: true, enabledAccount: true }]);
   });
 });

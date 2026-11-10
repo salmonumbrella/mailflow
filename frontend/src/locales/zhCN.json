@@ -94,6 +94,11 @@
     "hidePassword": "隐藏密码"
   },
   "compose": {
+    "draftSourceUnavailable": "无法验证此草稿。请保留当前文本，然后刷新草稿箱并检查已保存的副本，再保存或删除此草稿。",
+    "draftRetainedTitle": "原始草稿已保留",
+    "draftRetainedBody": "无法安全删除原始草稿。请刷新草稿箱并检查已保存的副本。",
+    "draftSeparateConfirm": "将当前文本另存为独立草稿？现有的已保存副本将予以保留。之后请检查草稿箱。",
+    "draftSeparateCopy": "另存为独立草稿",
     "unsupportedDraftFrom": "保存或发送此草稿前，请选择已配置的发件人。",
     "newMessage": "新邮件",
     "reply": "回复",

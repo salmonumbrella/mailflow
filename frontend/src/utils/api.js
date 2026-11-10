@@ -1,3 +1,5 @@
+import { draftSourceForPointer } from './draftSource.js';
+import { encodeAttachmentSource } from './attachmentSource.js';
 import { orderedRead } from './readOrder.js';
 
 export const API_BASE = '/api';
@@ -638,8 +640,12 @@ export const api = {
     return request('GET', `/mail/messages/${encodeURIComponent(id)}/reply-draft?${params}`);
   },
   saveDraft:   (data)              => request('POST',   '/mail/draft', data),
-  deleteDraft: (accountId, uid, folder) =>
-    request('DELETE', `/mail/draft/${uid}?accountId=${encodeURIComponent(accountId)}&folder=${encodeURIComponent(folder)}`),
+  deleteDraft: (accountId, uid, folder, source) => {
+    const proof = draftSourceForPointer({ accountId, uid, folder, source });
+    if (!proof) return Promise.reject(Object.assign(new Error('Draft source is unavailable. Refresh Drafts before removing it.'), { code: 'draft_source_changed' }));
+    return request('DELETE', `/mail/draft/${uid}?accountId=${encodeURIComponent(accountId)}&folder=${encodeURIComponent(folder)}`, undefined,
+      { 'X-Mailflow-Message-Source': encodeAttachmentSource(proof) });
+  },
 
   // Block List
   getBlockList:          ()      => request('GET',    '/block-list'),

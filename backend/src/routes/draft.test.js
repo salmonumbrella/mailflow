@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/messageIdentity.js', async original => ({ ...await original(),
+  captureMessageSource: vi.fn(async (account, folderPath, uid, expectedSource) => ({
+    context: { accountId: account.id, storageGeneration: account.storage_generation, folderPath, uidValidity: '9', revision: '1' }, expectedSource,
+  })), assertExpectedSource: vi.fn(async () => {}),
+  withMailboxIdentity: vi.fn(async (_context, run) => run({ query })),
+}));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
@@ -21,11 +27,13 @@ vi.mock('../index.js', () => ({ imapManager }));
 import express from 'express';
 import draftRoutes, { deleteSentDraft } from './draft.js';
 import { query } from '../services/db.js';
+import { assertExpectedSource } from '../services/messageIdentity.js';
 
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111';
 const ACCOUNT_ROW = {
   id: ACCOUNT_ID, email_address: 'matthias@mailflow.sh', name: 'Matt',
-  sender_name: null, signature: null, folder_mappings: {},
+  sender_name: null, signature: null, folder_mappings: {}, user_id: 'user-1', enabled: true,
+  storage_generation: '33333333-3333-4333-8333-333333333333',
 };
 
 function buildApp() {
@@ -45,13 +53,14 @@ describe('POST /api/mail/draft — local row persistence', () => {
   beforeEach(() => {
     query.mockReset();
     imapManager.appendToFolder.mockReset();
+    imapManager.findUidByMessageId.mockReset();
     imapManager.upsertDraftMessageRecord.mockReset();
     imapManager.permanentDeleteMessage.mockReset();
     // 1) owner check, 2) buildRawDraft account load, 3) resolveDraftsFolder lookup
     query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID }] });
     query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });
     query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });
-    imapManager.appendToFolder.mockResolvedValue({ uid: 5, folder: 'Drafts' });
+    imapManager.appendToFolder.mockResolvedValue({ uid: 5, folder: 'Drafts', draftSource: null });
     imapManager.upsertDraftMessageRecord.mockResolvedValue(undefined);
   });
 
@@ -63,7 +72,7 @@ describe('POST /api/mail/draft — local row persistence', () => {
       body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['friend@example.test'], subject: 'Draft', body: 'Body' }) });
     expect(response.status).toBe(200);
     expect(await response.json()).not.toHaveProperty('identityContext');
-    expect(imapManager.upsertDraftMessageRecord.mock.calls[0][3].identityContext).toBe(identityContext);
+    expect(imapManager.upsertDraftMessageRecord.mock.calls[0][3].identityContext).toEqual({ ...identityContext, expectedOwnerId: 'user-1' });
   });
 
   it('persists a Drafts row with parsed recipient, subject and body after append', async () => {
@@ -80,7 +89,7 @@ describe('POST /api/mail/draft — local row persistence', () => {
       }),
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
+    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts', draftSource: null });
 
     expect(imapManager.upsertDraftMessageRecord).toHaveBeenCalledTimes(1);
     const [acct, folder, uid, meta] = imapManager.upsertDraftMessageRecord.mock.calls[0];
@@ -156,7 +165,7 @@ describe('POST /api/mail/draft — local row persistence', () => {
         body: JSON.stringify({ accountId: ACCOUNT_ID, to: [], subject: 'Re: x', body: 'b', bodyIsHtml: false }),
       });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
+      expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts', draftSource: null });
     } finally {
       imapManager.broadcast.mockReset();
       warn.mockRestore();
@@ -183,7 +192,7 @@ describe('POST /api/mail/draft — local row persistence', () => {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ accountId: ACCOUNT_ID, to: [], subject: 's', body: 'b', fromScheduled: { id, editToken } }),
     });
-    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts', scheduledRemoved: true });
+    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts', draftSource: null, scheduledRemoved: true });
     const del = query.mock.calls.find(([sql]) => sql.includes('DELETE FROM scheduled_messages'));
     expect(del[0]).toMatch(/WHERE id = \$1 AND user_id = \$2 AND status = 'editing' AND edit_token = \$3/);
     expect(del[1]).toEqual([id, 'user-1', editToken]);
@@ -338,7 +347,7 @@ describe('POST /api/mail/draft — local row persistence', () => {
       body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['a@b.com'], subject: 'x', body: 'y' }),
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
+    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts', draftSource: null });
   });
 
   it('does not persist a row when the append returns no uid and none can be found (no reliable key)', async () => {
@@ -353,9 +362,8 @@ describe('POST /api/mail/draft — local row persistence', () => {
     expect(imapManager.upsertDraftMessageRecord).not.toHaveBeenCalled();
   });
 
-  // Without UIDPLUS the APPEND names no uid; the composer then had no copy to replace, and every
-  // autosave left another draft behind.
-  it('finds the new copy by its Message-ID when the server does not name its uid', async () => {
+  // Header searches cannot prove which physical copy an unresolved APPEND created.
+  it('retains an unresolved APPEND without adopting a Message-ID search result', async () => {
     imapManager.appendToFolder.mockResolvedValueOnce({ uid: null, folder: 'Drafts' });
     imapManager.findUidByMessageId.mockResolvedValueOnce(77);
     const res = await fetch(`${base}/api/mail/draft`, {
@@ -365,14 +373,14 @@ describe('POST /api/mail/draft — local row persistence', () => {
     });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toMatchObject({ uid: 77, folder: 'Drafts' });
+    expect(body).toMatchObject({ uid: null, folder: 'Drafts', draftSource: null });
     const raw = imapManager.appendToFolder.mock.calls.at(-1)[2].toString();
     expect(raw).toContain(`Message-ID: ${body.messageId}`);
-    expect(imapManager.findUidByMessageId).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 'Drafts', body.messageId);
-    expect(imapManager.upsertDraftMessageRecord).toHaveBeenCalledWith(expect.anything(), 'Drafts', 77, expect.objectContaining({ messageId: body.messageId }));
+    expect(imapManager.findUidByMessageId).not.toHaveBeenCalled();
+    expect(imapManager.upsertDraftMessageRecord).not.toHaveBeenCalled();
   });
 
-  it('still saves when that lookup fails', async () => {
+  it('still reports an acknowledged save without performing a header lookup', async () => {
     imapManager.appendToFolder.mockResolvedValueOnce({ uid: null, folder: 'Drafts' });
     imapManager.findUidByMessageId.mockRejectedValueOnce(new Error('connection lost'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -383,327 +391,208 @@ describe('POST /api/mail/draft — local row persistence', () => {
     });
     warn.mockRestore();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ uid: null, folder: 'Drafts' });
+    expect(await res.json()).toEqual({ uid: null, folder: 'Drafts', draftSource: null });
   });
 });
 
-describe('POST /api/mail/draft — replacing the previous copy', () => {
-  let server, base;
-  beforeAll(async () => {
-    await new Promise(r => { server = buildApp().listen(0, r); });
-    base = `http://127.0.0.1:${server.address().port}`;
-  });
-  afterAll(async () => { await new Promise(r => server.close(r)); });
-  const OLD_MESSAGE_ID = '<old-draft@mailflow.sh>';
-  // Once the queued answers run out: the old copy's local row, whose Message-ID the delete
-  // checks the server copy against.
-  const oldCopyRow = async (sql) => ({
-    rows: sql.includes('SELECT message_id FROM messages') ? [{ message_id: OLD_MESSAGE_ID }] : [],
-  });
-  beforeEach(() => {
-    query.mockReset();
-    imapManager.appendToFolder.mockReset();
-    imapManager.upsertDraftMessageRecord.mockReset();
-    imapManager.permanentDeleteMessage.mockReset();
-    // 1) owner check, 2) buildRawDraft account load, 3) resolveDraftsFolder lookup
-    query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID }] });
-    query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });
-    query.mockImplementation(oldCopyRow);
-    imapManager.appendToFolder.mockResolvedValue({ uid: 5, folder: 'Drafts' });
-    imapManager.upsertDraftMessageRecord.mockResolvedValue(undefined);
-    imapManager.permanentDeleteMessage.mockResolvedValue(true);
-  });
+const OTHER_ID = '22222222-2222-4222-8222-222222222222';
+const OLD_ID = '44444444-4444-4444-8444-444444444444';
+const NEW_ID = '55555555-5555-4555-8555-555555555555';
+const ENTITY_ID = '66666666-6666-4666-8666-666666666666';
+const oldDraft = (overrides = {}) => ({ id: OLD_ID, account_id: ACCOUNT_ID, folder: 'Drafts', uid: 4,
+  storage_generation: ACCOUNT_ROW.storage_generation, entity_id: ENTITY_ID, uid_validity: '9',
+  message_id: '<old-draft@mailflow.sh>', date: '2026-10-21T09:00:00.000Z', from_email: 'matthias@mailflow.sh', subject: 'Hello', ...overrides });
+const sourceOf = row => ({ messageId: row.id, accountId: row.account_id, storageGeneration: row.storage_generation,
+  entityId: row.entity_id, folder: row.folder, uidValidity: String(row.uid_validity), uid: String(row.uid) });
+const deletedRows = () => query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM messages')).map(([, params]) => params);
+const expectedDelete = row => ({ expectRow: row, expectedSource: row, expectedOwnerId: 'user-1' });
+const deleteParams = row => [row.id, row.account_id, row.folder, Number(row.uid), row.storage_generation, row.uid_validity, row.entity_id];
 
-  const saveDraft = (extra) => fetch(`${base}/api/mail/draft`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['a@b.com'], subject: 'x', body: 'y', ...extra }),
+function sourceFixture({ row = oldDraft(), accounts = [ACCOUNT_ROW], paths = ['Drafts', 'INBOX.Drafts'], special = ['Drafts'] } = {}) {
+  const state = { row, accounts, paths, special };
+  query.mockReset().mockImplementation(async (sql, params = []) => {
+    if (sql.includes('FROM messages m JOIN email_accounts')) return { rows: state.row?.id === params[0] ? [state.row] : [] };
+    if (sql.includes('FROM email_accounts')) return { rows: state.accounts.filter(account => account.id === params[0]) };
+    if (sql.includes('SELECT path FROM folders') && sql.includes('LIMIT 1')) return { rows: state.special.slice(0, 1).map(path => ({ path })) };
+    if (sql.includes('SELECT path FROM folders')) return { rows: state.paths.map(path => ({ path })) };
+    if (sql.includes('SELECT 1 FROM folders')) return { rows: (sql.includes('special_use') ? state.special : state.paths).includes(params[1]) ? [{}] : [] };
+    return { rows: [], rowCount: 1 };
   });
-  const deletedRows = () => query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM messages')).map(([, params]) => params);
+  assertExpectedSource.mockReset().mockResolvedValue(undefined);
+  imapManager.permanentDeleteMessage.mockReset().mockResolvedValue(true);
+  imapManager.broadcast.mockReset(); imapManager.scheduleCountRefresh.mockClear();
+  imapManager.appendToFolder.mockReset().mockImplementation(async (account, folder) => ({ uid: 5, folder,
+    identityContext: { accountId: account.id, storageGeneration: account.storage_generation, folderPath: folder, uidValidity: '9', revision: '1' } }));
+  imapManager.upsertDraftMessageRecord.mockReset().mockImplementation(async (account, folder, uid) => oldDraft({ id: NEW_ID, account_id: account.id, folder, uid }));
+  return state;
+}
+
+describe('POST /api/mail/draft — replacing the previous copy', () => {
+  let server, base, state;
+  beforeAll(async () => { await new Promise(r => { server = buildApp().listen(0, r); }); base = `http://127.0.0.1:${server.address().port}`; });
+  afterAll(async () => { await new Promise(r => server.close(r)); });
+  beforeEach(() => { state = sourceFixture(); });
+  const saveDraft = extra => fetch(`${base}/api/mail/draft`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['a@b.com'], subject: 'x', body: 'y',
+      existingUid: state.row?.uid ?? 4, existingFolder: state.row?.folder ?? 'Drafts',
+      existingAccountId: state.row?.account_id ?? ACCOUNT_ID, existingSource: sourceOf(state.row ?? oldDraft()), ...extra }) });
+  const expectSaved = async (res, status = 'deleted', folder = 'Drafts') => {
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ uid: 5, folder, draftSource: sourceOf(oldDraft({ id: NEW_ID, uid: 5, folder })),
+      cleanup: status === 'deleted' ? { status } : { status, code: 'draft_source_changed' } });
+  };
 
   it('replaces the previous copy when it is in the Drafts folder it just saved to', async () => {
-    const res = await saveDraft({ existingUid: 4, existingFolder: 'Drafts' });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 4, 'Drafts', { expectMessageId: OLD_MESSAGE_ID });
-    expect(query).toHaveBeenLastCalledWith(expect.stringContaining('DELETE FROM messages'), [ACCOUNT_ID, 4, 'Drafts']);
+    await expectSaved(await saveDraft());
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 4, 'Drafts', expectedDelete(state.row));
+    expect(deletedRows()).toEqual([deleteParams(state.row)]);
   });
-
   it('accepts a reopened draft (string BIGINT uid) from another canonical Drafts path', async () => {
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }, { path: 'INBOX.Drafts' }] }); // resolveAllDraftsPaths
-    const res = await saveDraft({ existingUid: '12', existingFolder: 'INBOX.Drafts' });
-    expect(res.status).toBe(200);
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 12, 'INBOX.Drafts', { expectMessageId: OLD_MESSAGE_ID });
+    state.row = oldDraft({ uid: '12', folder: 'INBOX.Drafts' });
+    await expectSaved(await saveDraft());
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 12, 'INBOX.Drafts', expectedDelete(state.row));
   });
-
   it('replaces its own previous copy even when the drafts mapping is not a synced folder', async () => {
-    // resolveDraftsFolder uses the raw mapping, so the new copy lands in 'Custom'; the canonical
-    // set would not include it, and every autosave would otherwise leave a duplicate behind.
-    query.mockReset();
-    query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID }] });
-    query.mockResolvedValueOnce({ rows: [{ ...ACCOUNT_ROW, folder_mappings: { drafts: 'Custom' } }] });
-    query.mockImplementation(oldCopyRow);
-    imapManager.appendToFolder.mockResolvedValue({ uid: 5, folder: 'Custom' });
-    const res = await saveDraft({ existingUid: 4, existingFolder: 'Custom' });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ uid: 5, folder: 'Custom' });
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 4, 'Custom', { expectMessageId: OLD_MESSAGE_ID });
+    state.accounts = [{ ...ACCOUNT_ROW, folder_mappings: { drafts: 'Custom' } }]; state.row = oldDraft({ folder: 'Custom' });
+    await expectSaved(await saveDraft(), 'deleted', 'Custom');
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 4, 'Custom', expectedDelete(state.row));
   });
-
-  // A draft reopened from one account and saved after From was switched to another. Both
-  // accounts have a folder called Drafts, so the uid alone passes every other check, and it
-  // used to be expunged from the saving account, taking whatever message sat there.
-  describe('when the previous copy is in another of the user\'s accounts', () => {
-    const OTHER_ID = '22222222-2222-4222-8222-222222222222';
-    const OTHER_ROW = { ...ACCOUNT_ROW, id: OTHER_ID, email_address: 'other@mailflow.sh' };
-
-    it('deletes it through the account that holds it', async () => {
-      query.mockResolvedValueOnce({ rows: [OTHER_ROW] });           // the old copy's account, owned by this user
-      query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });  // its own Drafts folder
-      const res = await saveDraft({ existingUid: 7, existingFolder: 'Drafts', existingAccountId: OTHER_ID });
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
-      expect(query).toHaveBeenCalledWith(expect.stringContaining('FROM email_accounts WHERE id = $1 AND user_id = $2'), [OTHER_ID, 'user-1']);
-      expect(query).toHaveBeenCalledWith(expect.stringContaining('SELECT message_id FROM messages'), [OTHER_ID, 7, 'Drafts']);
-      expect(imapManager.permanentDeleteMessage).toHaveBeenCalledTimes(1);
-      expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: OTHER_ID }), 7, 'Drafts', { expectMessageId: OLD_MESSAGE_ID });
-      expect(deletedRows()).toEqual([[OTHER_ID, 7, 'Drafts']]);
-    });
-
-    it('saves the draft but deletes nothing when that account is not the user\'s', async () => {
-      query.mockResolvedValueOnce({ rows: [] }); // ownership check fails
-      const res = await saveDraft({ existingUid: 7, existingFolder: 'Drafts', existingAccountId: OTHER_ID });
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
-      expect(imapManager.appendToFolder).toHaveBeenCalledTimes(1);
-      expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
-      expect(deletedRows()).toEqual([]);
-    });
+  it('deletes through the previous account when From switches to another owned account', async () => {
+    state.accounts.push({ ...ACCOUNT_ROW, id: OTHER_ID }); state.row = oldDraft({ uid: 7, account_id: OTHER_ID });
+    await expectSaved(await saveDraft());
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('FROM email_accounts WHERE id = $1 AND user_id = $2'), [OTHER_ID, 'user-1']);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('WHERE m.id = $1 AND a.user_id = $2'), [OLD_ID, 'user-1']);
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: OTHER_ID }), 7, 'Drafts', expectedDelete(state.row));
+    expect(deletedRows()).toEqual([deleteParams(state.row)]);
   });
-
-  it('keeps the local row when the server copy at that uid is not the draft being replaced', async () => {
-    imapManager.permanentDeleteMessage.mockResolvedValue(false); // Message-ID did not match
-    const res = await saveDraft({ existingUid: 4, existingFolder: 'Drafts' });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 4, 'Drafts', { expectMessageId: OLD_MESSAGE_ID });
+  it('saves the new draft but retains an original in an account the user does not own', async () => {
+    state.row = oldDraft({ account_id: OTHER_ID });
+    await expectSaved(await saveDraft(), 'retained');
+    expect(imapManager.appendToFolder).toHaveBeenCalledOnce(); expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
     expect(deletedRows()).toEqual([]);
   });
-
-  it('deletes nothing when the old copy has no local row to check the server copy against', async () => {
-    query.mockImplementation(async () => ({ rows: [] }));
-    const res = await saveDraft({ existingUid: 4, existingFolder: 'Drafts' });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
-    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  it('keeps the local row when the server copy is not the draft being replaced', async () => {
+    imapManager.permanentDeleteMessage.mockResolvedValue(false);
+    await expectSaved(await saveDraft(), 'retained');
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 4, 'Drafts', expectedDelete(state.row));
     expect(deletedRows()).toEqual([]);
   });
-
-  it('checks the old copy against its own row, not the one the new draft has just written', async () => {
-    // A uid is unique only within one UIDVALIDITY, so after a reset the new draft can land on
-    // the old copy's uid. Its row then carries the new Message-ID, which the server copy matches.
-    let written = null;
-    imapManager.appendToFolder.mockResolvedValue({ uid: 4, folder: 'Drafts' });
-    imapManager.upsertDraftMessageRecord.mockImplementation(async (_acct, _folder, _uid, meta) => { written = meta.messageId; });
-    query.mockImplementation(async (sql) => ({
-      rows: sql.includes('SELECT message_id FROM messages') ? [{ message_id: written ?? OLD_MESSAGE_ID }] : [],
-    }));
-    const res = await saveDraft({ existingUid: 4, existingFolder: 'Drafts' });
-    expect(res.status).toBe(200);
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 4, 'Drafts', { expectMessageId: OLD_MESSAGE_ID });
+  it('deletes nothing when the exact old physical row is missing', async () => {
+    state.row = null; await expectSaved(await saveDraft(), 'retained');
+    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled(); expect(deletedRows()).toEqual([]);
   });
-
-  it('saves the draft but never expunges the old uid from a non-Drafts folder', async () => {
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] }); // resolveAllDraftsPaths
-    query.mockResolvedValueOnce({ rows: [] });                   // not the server's \Drafts folder
-    const res = await saveDraft({ existingUid: 4, existingFolder: 'INBOX' });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
-    expect(imapManager.appendToFolder).toHaveBeenCalledTimes(1);
-    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
-    expect(query.mock.calls.some(([sql]) => sql.includes('DELETE FROM messages'))).toBe(false);
+  it('never upgrades a locator-only legacy composer to the current row', async () => {
+    await expectSaved(await saveDraft({ existingSource: undefined }), 'retained');
+    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled(); expect(deletedRows()).toEqual([]);
   });
-
-  it.each([['1:*'], ['1,2,3'], [[1, 2, 3]], ['4abc'], [-1], [1.5]])('never expunges a uid range or non-integer uid %j', async (existingUid) => {
-    const res = await saveDraft({ existingUid, existingFolder: 'Drafts' });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
-    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  it('retains the old proof when APPEND cache work replaces its locator', async () => {
+    const original = state.row;
+    imapManager.upsertDraftMessageRecord.mockImplementation(async (account, folder, uid) => {
+      state.row = oldDraft({ id: NEW_ID, uid });
+      assertExpectedSource.mockRejectedValueOnce(Object.assign(new Error('Old source changed'), { status: 409 }));
+      return state.row;
+    });
+    await expectSaved(await saveDraft(), 'retained');
+    expect(assertExpectedSource).toHaveBeenCalledWith(expect.anything(), original);
+    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled(); expect(deletedRows()).toEqual([]);
+  });
+  it('saves the draft but never expunges from a non-Drafts folder', async () => {
+    state.row = oldDraft({ folder: 'INBOX' }); await expectSaved(await saveDraft(), 'retained');
+    expect(imapManager.appendToFolder).toHaveBeenCalledOnce(); expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+    expect(deletedRows()).toEqual([]);
+  });
+  it.each([['1:*'], ['1,2,3'], [[1, 2, 3]], ['4abc'], [-1], [1.5]])('never expunges a uid range or non-integer uid %j', async existingUid => {
+    await expectSaved(await saveDraft({ existingUid }), 'retained'); expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
   });
 });
 
 describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
-  let server, base;
-  beforeAll(async () => {
-    await new Promise(r => { server = buildApp().listen(0, r); });
-    base = `http://127.0.0.1:${server.address().port}`;
-  });
+  let server, base, state;
+  beforeAll(async () => { await new Promise(r => { server = buildApp().listen(0, r); }); base = `http://127.0.0.1:${server.address().port}`; });
   afterAll(async () => { await new Promise(r => server.close(r)); });
-  beforeEach(() => {
-    query.mockReset();
-    imapManager.permanentDeleteMessage.mockReset();
-    imapManager.permanentDeleteMessage.mockResolvedValue(true);
-    imapManager.syncFolderOnDemand.mockReset();
-    imapManager.syncFolderOnDemand.mockResolvedValue(undefined);
+  beforeEach(() => { state = sourceFixture({ row: oldDraft({ uid: 9 }) }); imapManager.syncFolderOnDemand.mockReset(); });
+  const del = (folder = 'Drafts', proof = sourceOf(state.row ?? oldDraft({ uid: 9 })), uid = '9') =>
+    fetch(`${base}/api/mail/draft/${uid}?accountId=${ACCOUNT_ID}&folder=${encodeURIComponent(folder)}`, { method: 'DELETE',
+      headers: proof ? { 'X-Mailflow-Message-Source': encodeURIComponent(JSON.stringify(proof)) } : {} });
+  it('deletes the original verified draft and refreshes its counts', async () => {
+    const res = await del(); expect(res.status).toBe(200); expect(await res.json()).toEqual({ ok: true, cleanup: { status: 'deleted' } });
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 9, 'Drafts', expectedDelete(state.row));
+    expect(deletedRows()).toEqual([deleteParams(state.row)]); expect(draftsChanged()).toEqual([[ACCOUNT_ID, 'user-1']]);
+    expect(imapManager.scheduleCountRefresh).toHaveBeenCalledWith(ACCOUNT_ID, ['Drafts']);
   });
-
-  const del = (qs) => fetch(`${base}/api/mail/draft/9?accountId=${ACCOUNT_ID}&${qs}`, { method: 'DELETE' });
-  const ROW = { message_id: '<draft@mailflow.sh>', date: '2026-10-21T09:00:00.000Z', from_email: 'matthias@mailflow.sh', subject: 'Hello' };
-
-  it('deletes a draft from the Drafts folder', async () => {
-    query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });          // owner check
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveDraftsFolder
-    query.mockResolvedValueOnce({ rows: [] });                     // no local row
-    query.mockResolvedValueOnce({ rows: [] });                     // DELETE FROM messages
-    imapManager.broadcast.mockReset();
-    const res = await del('folder=Drafts');
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
-    // The composer has the uid from its own save, so one with no row is deleted unchecked.
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 9, 'Drafts', {});
-    expect(draftsChanged()).toEqual([[ACCOUNT_ID, 'user-1']]);
-    expect(imapManager.scheduleCountRefresh).toHaveBeenCalledWith(ACCOUNT_ID, ['Drafts']); // #643: the Drafts total follows
+  it('requires the original physical row, even when the composer has a saved UID', async () => {
+    state.row = null; expect((await del()).status).toBe(409);
+    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled(); expect(deletedRows()).toEqual([]);
   });
-
-  it('checks the server copy against the draft\'s row', async () => {
-    query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });          // owner check
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveDraftsFolder
-    query.mockResolvedValueOnce({ rows: [ROW] });                  // the draft's row
-    query.mockResolvedValueOnce({ rows: [] });                     // DELETE FROM messages
-    const res = await del('folder=Drafts');
-    expect(res.status).toBe(200);
-    // The row brings everything the check compares: Message-ID, date, sender and subject.
-    expect(query).toHaveBeenCalledWith(
-      expect.stringMatching(/^SELECT (?=.*\bmessage_id\b)(?=.*\bdate\b)(?=.*\bfrom_email\b)(?=.*\bsubject\b).* FROM messages WHERE account_id = \$1 AND uid = \$2 AND folder = \$3$/),
-      [ACCOUNT_ID, 9, 'Drafts'],
-    );
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 9, 'Drafts', { expectRow: ROW });
+  it('retains a legacy discard without proof', async () => {
+    expect((await del('Drafts', null)).status).toBe(409); expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  });
+  it('checks the envelope from the original owned physical row', async () => {
+    expect((await del()).status).toBe(200);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('WHERE m.id = $1 AND a.user_id = $2'), [OLD_ID, 'user-1']);
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 9, 'Drafts', expectedDelete(state.row));
     expect(imapManager.syncFolderOnDemand).not.toHaveBeenCalled();
   });
-
-  it('expunges nothing when another message holds the draft\'s uid, and drops the row', async () => {
-    query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });          // owner check
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveDraftsFolder
-    query.mockResolvedValueOnce({ rows: [ROW] });                  // the draft's row
-    query.mockResolvedValueOnce({ rows: [] });                     // DELETE FROM messages
+  it('expunges nothing and preserves cached mail when the provider copy changed', async () => {
     imapManager.permanentDeleteMessage.mockResolvedValue(false);
-    imapManager.broadcast.mockReset();
-    const res = await del('folder=Drafts');
-    expect(res.status).toBe(409);
-    // As a delete from the message list: the row is dropped and the folder pulled, so a sync
-    // files what the uid holds.
-    expect(query).toHaveBeenCalledWith('DELETE FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3', [ACCOUNT_ID, 9, 'Drafts']);
-    expect(imapManager.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 'Drafts');
-    expect(draftsChanged()).toEqual([[ACCOUNT_ID, 'user-1']]);
+    const res = await del(); expect(res.status).toBe(409); expect((await res.json()).cleanup.status).toBe('retained');
+    expect(deletedRows()).toEqual([]); expect(imapManager.syncFolderOnDemand).not.toHaveBeenCalled(); expect(draftsChanged()).toEqual([]);
   });
-
-  it('deletes from any canonical Drafts path (e.g. a second drafts-named folder)', async () => {
-    query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }, { path: 'INBOX.Drafts' }] }); // resolveAllDraftsPaths
-    query.mockResolvedValueOnce({ rows: [] });                     // no local row
-    query.mockResolvedValueOnce({ rows: [] });
-    const res = await del('folder=INBOX.Drafts');
-    expect(res.status).toBe(200);
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 9, 'INBOX.Drafts', {});
+  it('deletes from another canonical Drafts path', async () => {
+    state.row = oldDraft({ uid: 9, folder: 'INBOX.Drafts' }); expect((await del('INBOX.Drafts')).status).toBe(200);
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 9, 'INBOX.Drafts', expectedDelete(state.row));
   });
-
-  it('refuses to expunge from a non-Drafts folder', async () => {
-    query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveDraftsFolder
-    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveAllDraftsPaths
-    query.mockResolvedValueOnce({ rows: [] });                     // not the server's \Drafts folder
-    imapManager.broadcast.mockReset();
-    const res = await del('folder=INBOX');
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: 'Folder is not a Drafts folder' });
-    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
-    expect(draftsChanged()).toEqual([]);
+  it('refuses a non-Drafts folder', async () => {
+    state.row = oldDraft({ uid: 9, folder: 'INBOX' }); const res = await del('INBOX'); expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Folder is not a Drafts folder' }); expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
   });
-
-  it('refuses a repeated folder param (array) without touching IMAP', async () => {
-    query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });
-    const res = await del('folder=Drafts&folder=INBOX');
-    expect(res.status).toBe(400);
-    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  it('refuses a repeated folder param without touching IMAP', async () => {
+    const res = await fetch(`${base}/api/mail/draft/9?accountId=${ACCOUNT_ID}&folder=Drafts&folder=INBOX`, { method: 'DELETE' });
+    expect(res.status).toBe(400); expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
   });
-
-  it('with the drafts mapping pointing elsewhere, still deletes from the server\'s own \\Drafts folder', async () => {
-    // The message list opens that folder as Drafts through special_use, so a draft opened there
-    // must still be discardable.
-    query.mockResolvedValueOnce({ rows: [{ ...ACCOUNT_ROW, folder_mappings: { drafts: 'INBOX.Drafts' } }] });
-    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });   // mappedFolderUsable: usable
-    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });   // special_use \Drafts
-    query.mockResolvedValueOnce({ rows: [] });                    // no local row
-    query.mockResolvedValueOnce({ rows: [] });                    // DELETE FROM messages
-    const res = await del('folder=Drafts');
-    expect(res.status).toBe(200);
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 9, 'Drafts', {});
+  it('deletes from server Drafts when the raw mapping points elsewhere', async () => {
+    state.accounts = [{ ...ACCOUNT_ROW, folder_mappings: { drafts: 'INBOX.Drafts' } }];
+    expect((await del()).status).toBe(200); expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.anything(), 9, 'Drafts', expectedDelete(state.row));
   });
-
-  it('with the drafts mapping pointing elsewhere, refuses a folder that is neither mapped nor \\Drafts', async () => {
-    query.mockResolvedValueOnce({ rows: [{ ...ACCOUNT_ROW, folder_mappings: { drafts: 'INBOX.Drafts' } }] });
-    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });   // mappedFolderUsable: usable
-    query.mockResolvedValueOnce({ rows: [] });                    // not the server's \Drafts folder
-    const res = await del('folder=Sent');
-    expect(res.status).toBe(400);
-    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  it('refuses a folder that is neither mapped nor server Drafts', async () => {
+    state.accounts = [{ ...ACCOUNT_ROW, folder_mappings: { drafts: 'INBOX.Drafts' } }]; state.row = oldDraft({ uid: 9, folder: 'Sent' });
+    expect((await del('Sent')).status).toBe(400); expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  });
+  it.each(['9garbage', '09', '1:*', '4294967296'])('refuses a noncanonical UID path %s', async uid => {
+    expect((await del('Drafts', sourceOf(state.row), uid)).status).toBe(400); expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
   });
 });
 
-describe('deleteSentDraft — the draft of a message that has been delivered', () => {
-  const MESSAGE_ID = '<sent-draft@mailflow.sh>';
-  const OTHER_ID = '22222222-2222-4222-8222-222222222222';
-  beforeEach(() => {
-    query.mockReset();
-    imapManager.permanentDeleteMessage.mockReset();
-    imapManager.permanentDeleteMessage.mockResolvedValue(true);
-    query.mockImplementation(async sql => ({
-      rows: sql.includes('SELECT path FROM folders') && sql.includes('LIMIT 1') ? [{ path: 'Drafts' }]
-        : sql.includes('SELECT message_id FROM messages') ? [{ message_id: MESSAGE_ID }]
-          : [],
-    }));
+describe('deleteSentDraft — the draft of a delivered message', () => {
+  let state;
+  beforeEach(() => { state = sourceFixture(); });
+  const sentDraft = extra => ({ uid: 4, folder: 'Drafts', accountId: ACCOUNT_ID, source: sourceOf(state.row), ...extra });
+  it('deletes the verified original and notifies its other tabs', async () => {
+    expect(await deleteSentDraft('user-1', ACCOUNT_ROW, sentDraft())).toBe(true);
+    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 4, 'Drafts', expectedDelete(state.row));
+    expect(deletedRows()).toEqual([deleteParams(state.row)]); expect(draftsChanged()).toEqual([[ACCOUNT_ID, 'user-1']]);
+    expect(imapManager.scheduleCountRefresh).toHaveBeenCalledWith(ACCOUNT_ID, ['Drafts']);
   });
-  const deletedRows = () => query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM messages')).map(([, params]) => params);
-
-  it('deletes it, checking that the server copy is that draft', async () => {
-    imapManager.broadcast.mockReset();
-    expect(await deleteSentDraft('user-1', ACCOUNT_ROW, { uid: 4, folder: 'Drafts' })).toBe(true);
-    expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(ACCOUNT_ROW, 4, 'Drafts', { expectMessageId: MESSAGE_ID });
-    expect(deletedRows()).toEqual([[ACCOUNT_ID, 4, 'Drafts']]);
-    expect(draftsChanged()).toEqual([[ACCOUNT_ID, 'user-1']]);
-    expect(imapManager.scheduleCountRefresh).toHaveBeenCalledWith(ACCOUNT_ID, ['Drafts']); // #643: the Drafts total follows
+  it('touches nothing outside Drafts', async () => {
+    state.row = oldDraft({ folder: 'INBOX' }); expect(await deleteSentDraft('user-1', ACCOUNT_ROW, sentDraft({ folder: 'INBOX' }))).toBe(false);
+    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled(); expect(deletedRows()).toEqual([]);
   });
-
-  it('touches nothing outside a Drafts folder', async () => {
-    expect(await deleteSentDraft('user-1', ACCOUNT_ROW, { uid: 4, folder: 'INBOX' })).toBe(false);
-    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
-    expect(deletedRows()).toEqual([]);
-  });
-
-  it('refuses a uid set, which would expunge more than one message', async () => {
-    expect(await deleteSentDraft('user-1', ACCOUNT_ROW, { uid: '1:*', folder: 'Drafts' })).toBe(false);
+  it('refuses a UID set', async () => {
+    expect(await deleteSentDraft('user-1', ACCOUNT_ROW, sentDraft({ uid: '1:*' }))).toBe(false);
     expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
   });
-
-  it("refuses a draft in an account that is not the user's", async () => {
-    expect(await deleteSentDraft('user-1', ACCOUNT_ROW, { uid: 4, folder: 'Drafts', accountId: OTHER_ID })).toBe(false);
+  it('refuses a draft in an unowned account', async () => {
+    state.row = oldDraft({ account_id: OTHER_ID }); expect(await deleteSentDraft('user-1', ACCOUNT_ROW, sentDraft({ accountId: OTHER_ID }))).toBe(false);
     expect(query).toHaveBeenCalledWith(expect.stringContaining('FROM email_accounts WHERE id = $1 AND user_id = $2'), [OTHER_ID, 'user-1']);
     expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
   });
-
-  it('keeps the local row when the server copy turned out to be another message', async () => {
-    imapManager.permanentDeleteMessage.mockResolvedValue(false);
-    imapManager.broadcast.mockReset();
-    expect(await deleteSentDraft('user-1', ACCOUNT_ROW, { uid: 4, folder: 'Drafts' })).toBe(false);
-    expect(deletedRows()).toEqual([]);
-    expect(draftsChanged()).toEqual([]);
+  it('retains both provider and cache on a changed envelope', async () => {
+    imapManager.permanentDeleteMessage.mockResolvedValue(false); expect(await deleteSentDraft('user-1', ACCOUNT_ROW, sentDraft())).toBe(false);
+    expect(deletedRows()).toEqual([]); expect(draftsChanged()).toEqual([]);
   });
-
-  it('never throws: a draft left behind must not turn a delivered message into an error', async () => {
+  it('never turns failed cleanup into failed delivery', async () => {
     imapManager.permanentDeleteMessage.mockRejectedValue(new Error('IMAP down'));
-    expect(await deleteSentDraft('user-1', ACCOUNT_ROW, { uid: 4, folder: 'Drafts' })).toBe(false);
+    expect(await deleteSentDraft('user-1', ACCOUNT_ROW, sentDraft())).toBe(false);
   });
 });
 
@@ -714,6 +603,7 @@ describe('POST /api/mail/draft — attachments', () => {
   beforeEach(() => {
     query.mockReset();
     imapManager.appendToFolder.mockReset();
+    imapManager.findUidByMessageId.mockReset();
     imapManager.upsertDraftMessageRecord.mockReset();
     query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID }] });
     query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });
