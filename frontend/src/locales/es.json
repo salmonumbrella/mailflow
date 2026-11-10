@@ -2581,5 +2581,27 @@
       "undoNeedsVerification": "Es necesario verificar la operación de deshacer etiquetas",
       "undoUncertain": "Se desconoce su resultado. Se ha conservado la solicitud exacta; no borres el almacenamiento del navegador."
     }
+  },
+  "nativeLabelRules": {
+    "saveUncertain": "Se desconoce el resultado del guardado. Revisa los filtros guardados antes de crear otro. No se ha reiniciado el guardado ni la ejecución.",
+    "searchAccount": "Cuenta de la etiqueta",
+    "searchLabel": "Etiqueta de MailFlow",
+    "searchHelp": "label: acepta un ID de etiqueta, una ruta completa exacta o un nombre corto único. Solo coinciden las asignaciones directas. Las etiquetas ambiguas o inexistentes generan errores. En la búsqueda unificada, las exclusiones pueden incluir mensajes verificados de otras cuentas. Las identidades no verificadas siguen siendo desconocidas.",
+    "apply": "Aplicar etiqueta de MailFlow",
+    "remove": "Quitar etiqueta de MailFlow",
+    "partialCoverage": "Algunos mensajes en caché tienen identidades no verificadas para las etiquetas. Los resultados por etiqueta, incluidas las exclusiones, pueden estar incompletos. Esta búsqueda no abarca todo el correo de tu proveedor.",
+    "cacheCoverage": "Las etiquetas solo están verificadas para esta caché sincronizada. Esta búsqueda no abarca todo el correo de tu proveedor.",
+    "choose": "Elige una etiqueta de MailFlow…",
+    "missing": "Falta la etiqueta. Corrige esta regla antes de activarla.",
+    "requiresAccount": "Elige una cuenta para usar las etiquetas propias de MailFlow.",
+    "accountChanged": "La cuenta de la etiqueta ha cambiado o no está disponible. Vuelve a abrir el editor y a elegir las etiquetas de esa cuenta.",
+    "unverified": "Las identidades para las etiquetas no están verificadas. Vuelve a cargar las etiquetas antes de guardar.",
+    "conflicting": "Una regla no puede aplicar y quitar la misma etiqueta.",
+    "coverageCount": "Identidades no verificadas: {{unavailable}} de {{total}} mensajes en caché.",
+    "emptyPartial": "No hay coincidencias en los datos indexados disponibles. Los mensajes con identidades no verificadas para las etiquetas podrían coincidir."
+  },
+  "gmailSearch": {
+    "supportedSearchOperatorsWithSize": "MailFlow admite from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: e in:. También admite OR, AND, paréntesis, grupos entre llaves, filename:, category: y newer_than:/older_than: (d, m, y). Las categorías usan los nombres de MailFlow. size: y larger: significan estrictamente mayor que; smaller: significa estrictamente menor que. label: busca en las etiquetas propias de MailFlow. La importancia no se indexa. Los nombres de los archivos adjuntos y el texto de los mensajes dependen del contenido sincronizado.",
+    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Las ejecuciones sobre mensajes existentes solo abarcan la bandeja de entrada y no ejecutan tus otros filtros. Las acciones sobre etiquetas propias de MailFlow son específicas de cada cuenta y no sincronizan las etiquetas del proveedor. El motor de reglas de MailFlow no admite condiciones de etiqueta, importancia ni la opción de no enviar nunca a spam. El reenvío se puede configurar en las reglas de MailFlow."
   }
 }

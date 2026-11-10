@@ -2600,5 +2600,27 @@
       "undoNeedsVerification": "Cofnięcie zmiany etykiet wymaga weryfikacji",
       "undoUncertain": "Wynik jest nieznany. Zachowano dokładne żądanie; nie czyść pamięci przeglądarki."
     }
+  },
+  "nativeLabelRules": {
+    "saveUncertain": "Wynik zapisu jest nieznany. Sprawdź zapisane filtry przed utworzeniem kolejnego. Nie ponowiono zapisu ani uruchomienia.",
+    "searchAccount": "Konto etykiety",
+    "searchLabel": "Etykieta MailFlow",
+    "searchHelp": "label: przyjmuje identyfikator etykiety, dokładną pełną ścieżkę lub unikalną krótką nazwę. Dopasowywane są tylko wiadomości bezpośrednio przypisane do etykiety. Niejednoznaczne lub brakujące etykiety powodują błędy. W wyszukiwaniu zbiorczym wyniki wykluczeń mogą obejmować zweryfikowane wiadomości z innych kont. Niezweryfikowane tożsamości pozostają nieznane.",
+    "apply": "Przypisz etykietę MailFlow",
+    "remove": "Usuń etykietę MailFlow",
+    "partialCoverage": "Niektóre wiadomości w pamięci podręcznej mają niezweryfikowane tożsamości na potrzeby etykiet. Wyniki wyszukiwania według etykiet, w tym wykluczeń, mogą być niepełne. To wyszukiwanie nie obejmuje całej poczty u dostawcy.",
+    "cacheCoverage": "Etykiety są zweryfikowane tylko dla tej zsynchronizowanej pamięci podręcznej. To wyszukiwanie nie obejmuje całej poczty u dostawcy.",
+    "choose": "Wybierz etykietę MailFlow…",
+    "missing": "Brak etykiety. Popraw tę regułę przed jej włączeniem.",
+    "requiresAccount": "Wybierz konto, aby używać etykiet własnych MailFlow.",
+    "accountChanged": "Konto etykiety zmieniło się lub jest niedostępne. Otwórz ponownie edytor i jeszcze raz wybierz etykiety tego konta.",
+    "unverified": "Tożsamości na potrzeby etykiet nie są zweryfikowane. Wczytaj ponownie etykiety przed zapisaniem.",
+    "conflicting": "Reguła nie może przypisywać i usuwać tej samej etykiety.",
+    "coverageCount": "Niezweryfikowane tożsamości: {{unavailable}} z {{total}} wiadomości w pamięci podręcznej.",
+    "emptyPartial": "Brak dopasowań w dostępnych zindeksowanych danych. Wiadomości z niezweryfikowanymi tożsamościami na potrzeby etykiet mogą jednak pasować."
+  },
+  "gmailSearch": {
+    "supportedSearchOperatorsWithSize": "MailFlow obsługuje from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: i in:. Obsługiwane są OR, AND, nawiasy, grupy w nawiasach klamrowych, filename:, category: i newer_than:/older_than: (d, m, y). Kategorie używają nazw z MailFlow. size: i larger: oznaczają ściśle większe niż, a smaller: oznacza ściśle mniejsze niż. label: wyszukuje etykiety własne MailFlow. Ważność nie jest indeksowana. Nazwy plików załączników i treść wiadomości zależą od zsynchronizowanej zawartości.",
+    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Uruchomienia dla istniejących wiadomości obejmują tylko skrzynkę odbiorczą i nie uruchamiają innych filtrów. Działania na etykietach własnych MailFlow są przypisane do konkretnego konta i nie synchronizują etykiet dostawcy. Mechanizm reguł MailFlow nie obsługuje warunków etykiet, ważności ani opcji nigdy nie oznaczaj jako spam. Przekazywanie można skonfigurować w regułach MailFlow."
   }
 }

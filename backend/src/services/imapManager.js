@@ -5347,7 +5347,16 @@ export class ImapManager {
                 newInboxIds.push(result.rows[0].id);
               }
               if (!parsed.isRead) {
-                newMessages.push({ ...parsed, id: result.rows[0].id, accountId: account.id, folder });
+                // Rules deliberately retain the existing unread-arrival scope. Capture the
+                // persisted binding/version, not a later occupant of this folder/UID.
+                const persisted = result.rows[0];
+                newMessages.push({ ...parsed, ...persisted, accountId: account.id, account_id: account.id, folder,
+                  _nativeLabelProof: persisted.entity_id && persisted.metadata_version != null ? {
+                    source: { id: persisted.id, account_id: account.id, entity_id: persisted.entity_id,
+                      canonicalEntityId: persisted.entity_id, storage_generation: persisted.storage_generation,
+                      folder, uid_validity: String(persisted.uid_validity), uid: String(parsed.uid) },
+                    expectedMetadataVersion: persisted.metadata_version,
+                  } : null });
               }
               this.maybeClassifyNewMessage(account, result.rows[0].id, parsed);
             }

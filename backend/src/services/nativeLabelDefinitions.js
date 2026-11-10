@@ -2,6 +2,7 @@
 // legacy folder-backed labels, or write to the disposable message/folder cache.
 import { createHash, randomUUID } from 'crypto';
 import { query, withTransaction } from './db.js';
+import { findLabelRuleReferences } from './nativeLabelRuleReferences.js';
 
 export const LABEL_CAPABILITIES = Object.freeze({ assignmentSupported: true, counts: null, coverage: 'synchronized-cache' });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -135,7 +136,8 @@ export async function previewDeletion(userId, id, input) {
     const { rows: associations } = await client.query(`SELECT storage_generation,COUNT(*)::int AS memberships,
       COUNT(DISTINCT entity_id)::int AS entities FROM native_label_memberships
       WHERE account_id=$1 AND label_id=ANY($2::uuid[]) GROUP BY storage_generation ORDER BY storage_generation`, [accountId, deletedLabelIds]);
-    return { label, descendants, deletedLabelIds, treeRevision: state?.tree_revision ?? '0', removesMessages: false,
+    const affectedRules = await findLabelRuleReferences(client, accountId, deletedLabelIds);
+    return { label, descendants, deletedLabelIds, affectedRules, blockedByRules: affectedRules.some(rule => rule.enabled), treeRevision: state?.tree_revision ?? '0', removesMessages: false,
       associations: associations.map(row => ({ storageGeneration: row.storage_generation,
         currentGeneration: row.storage_generation === account.storage_generation, memberships: row.memberships, entities: row.entities })),
       ...LABEL_CAPABILITIES };
@@ -172,6 +174,12 @@ async function mutate(userId, operation, id, rawInput) {
       if (operation === 'delete') {
         if (input.expectedTreeRevision !== state.tree_revision) conflict('stale_tree_revision', 'Labels changed since the preview. Review a fresh preview before deleting');
         const deletedLabelIds = [id, ...labels.filter(item => item.path.startsWith(`${label.path}/`)).map(item => item.id)];
+        const affectedRules = await findLabelRuleReferences(client, input.accountId, deletedLabelIds);
+        if (affectedRules.some(rule => rule.enabled)) {
+          const error = new LabelError(409, 'label_referenced_by_rule', 'Disable the rules referencing this label subtree before deleting it');
+          error.affectedRules = affectedRules;
+          throw error;
+        }
         const exhausted = await client.query(`SELECT 1 FROM message_entities e
           WHERE e.account_id=$1 AND e.metadata_version=9223372036854775807
             AND EXISTS (SELECT 1 FROM native_label_memberships m

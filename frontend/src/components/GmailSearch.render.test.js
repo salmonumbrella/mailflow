@@ -64,6 +64,8 @@ const input = async (node, value) => { assert.ok(node); await React.act(async ()
 async function mount(initial = '') {
   query = initial; payloads = []; rejectSave = false;
   useStore.setState({ user: { id: 'user-a' }, accounts: [{ id: 'acct-a', email_address: 'a@example.test', enabled: true }], selectedAccountId: 'acct-a', folders: { 'acct-a': [{ path: 'INBOX' }, { path: 'Archive' }] }, notifications: [] });
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', labels: [] });
+  api.getNativeLabelCounts = async accountId => ({ accountId, storageGeneration: 'gen-a', counts: [] });
   api.createRule = async value => { payloads.push(value); if (rejectSave) throw new Error('Offline, try again'); return { id: 'saved-rule' }; };
   function Harness() { const [value, setValue] = React.useState(initial); return React.createElement(GmailSearch, { query: value, onChange: next => { query = next; setValue(next); } }); }
   await React.act(async () => { root = createRoot(container()); root.render(React.createElement(Harness)); });
@@ -407,4 +409,97 @@ test('a failed run with pending operations also warns against replaying complete
   assert.match(text, /Mailbox recovery is still pending/);
   assert.match(text, /Do not rerun completed actions/);
   assert.equal(button('Retry applying filter'), undefined);
+});
+
+const choose = async (node, value) => React.act(async () => { node.value = value; node.dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
+const nativeLabels = [{ id: 'label-1', name: 'Child', path: 'Parent/Child' }, { id: 'label-2', name: 'Child', path: 'Other/Child' }];
+async function openNativeFilter() {
+  await mount('from:alice');
+  await React.act(async () => useStore.setState({ nativeLabelSnapshots: {}, accounts: [{ id: 'acct-a', email_address: 'a@example.test', enabled: true, storage_generation: 'gen-a' }] }));
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', labels: nativeLabels });
+  await click(button('Advanced search options')); await click(button('Create filter'));
+}
+
+test('native selectors display account and full path, save stable IDs and captured generation', async () => {
+  await openNativeFilter();
+  const select = container().querySelector('select[aria-label="Apply MailFlow label"]');
+  assert.deepEqual([...select.options].slice(1).map(option => option.textContent), ['a@example.test · Parent/Child', 'a@example.test · Other/Child']);
+  await choose(select, 'label-2');
+  await click(button('Create filter'));
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].expectedStorageGeneration, 'gen-a');
+  assert.deepEqual(payloads[0].actions, [{ type: 'apply_native_label', value: 'label-2' }]);
+});
+
+test('changing the captured filter account clears both native label actions', async () => {
+  await mount('subject:invoice');
+  await React.act(async () => useStore.setState({ selectedAccountId: null, accounts: [
+    { id: 'acct-a', enabled: true, storage_generation: 'gen-a' }, { id: 'acct-b', enabled: true, storage_generation: 'gen-a' },
+  ], nativeLabelSnapshots: {} }));
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', labels: nativeLabels });
+  await click(button('Advanced search options')); await click(button('Create filter'));
+  await choose(container().querySelector('[aria-label="Filter account"]'), 'acct-a');
+  await choose(container().querySelector('[aria-label="Apply MailFlow label"]'), 'label-1');
+  await choose(container().querySelector('[aria-label="Remove MailFlow label"]'), 'label-2');
+  await choose(container().querySelector('[aria-label="Filter account"]'), 'acct-b');
+  assert.equal(container().querySelector('[aria-label="Apply MailFlow label"]').value, '');
+  assert.equal(container().querySelector('[aria-label="Remove MailFlow label"]').value, '');
+});
+
+test('account replacement while a native filter is open cannot retarget its captured action', async () => {
+  await openNativeFilter();
+  await choose(container().querySelector('[aria-label="Apply MailFlow label"]'), 'label-1');
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-replaced', labels: nativeLabels });
+  api.getNativeLabelCounts = async accountId => ({ accountId, storageGeneration: 'gen-replaced', counts: [] });
+  await React.act(async () => useStore.setState({ accounts: [{ id: 'acct-a', enabled: true, storage_generation: 'gen-replaced' }] }));
+  await click(button('Create filter'));
+  assert.equal(payloads.length, 0);
+  assert.match(container().textContent, /nativeLabelRules.accountChanged/);
+});
+
+test('renames update display paths without changing identity and deleted references remain visible', async () => {
+  await openNativeFilter();
+  await choose(container().querySelector('[aria-label="Apply MailFlow label"]'), 'label-1');
+  await React.act(async () => useStore.getState().setNativeLabelSnapshot('acct-a', { accountId: 'acct-a', storageGeneration: 'gen-a', labels: [{ ...nativeLabels[0], path: 'Renamed/Child' }] }));
+  assert.equal(container().querySelector('[aria-label="Apply MailFlow label"]').value, 'label-1');
+  assert.match(container().textContent, /Renamed\/Child/);
+  await React.act(async () => useStore.getState().setNativeLabelSnapshot('acct-a', { accountId: 'acct-a', storageGeneration: 'gen-a', labels: [] }));
+  assert.match(container().textContent, /Missing label/);
+  await click(button('Create filter'));
+  assert.equal(payloads.length, 0);
+});
+
+test('repeated submit events use one save and an uncertain save cannot create a duplicate', async () => {
+  await openNativeFilter();
+  await choose(container().querySelector('[aria-label="Apply MailFlow label"]'), 'label-1');
+  let fail;
+  api.createRule = value => { payloads.push(value); return new Promise((_, reject) => { fail = reject; }); };
+  const form = container().querySelector('form[aria-label="Create filter"]');
+  await React.act(async () => { form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+  assert.equal(payloads.length, 1);
+  await React.act(async () => fail(new Error('Connection lost')));
+  assert.match(container().textContent, /save result is unknown/);
+  await React.act(async () => form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })));
+  assert.equal(payloads.length, 1);
+});
+
+test('advanced native label selection inserts its stable UUID and refuses rule conversion intact', async () => {
+  await mount('from:alice');
+  api.getNativeLabels = async accountId => ({ accountId, storageGeneration: 'gen-a', labels: nativeLabels });
+  await click(button('Advanced search options'));
+  await choose(container().querySelector('[aria-label="MailFlow label"]'), 'label-2');
+  await click(button('Create filter'));
+  assert.match(container().textContent, /cannot yet save.*label:label-2/);
+  assert.equal(payloads.length, 0);
+  await click(button('Search'));
+  assert.equal(query, 'from:alice label:label-2');
+});
+
+test('unified label search choices exclude accounts outside the displayed unified scope', async () => {
+  await mount();
+  await React.act(async () => useStore.setState({ selectedAccountId: null, accounts: [
+    { id: 'acct-a', enabled: true }, { id: 'hidden', enabled: true, include_in_unified_inbox: false }, { id: 'disabled', enabled: false },
+  ] }));
+  await click(button('Advanced search options'));
+  assert.deepEqual([...container().querySelector('[aria-label="Label account"]').options].map(option => option.value), ['', 'acct-a']);
 });

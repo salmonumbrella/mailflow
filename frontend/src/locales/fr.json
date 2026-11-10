@@ -2581,5 +2581,27 @@
       "undoNeedsVerification": "L’annulation de la modification de libellé doit être vérifiée",
       "undoUncertain": "Son résultat est inconnu. La demande exacte a été conservée ; n’effacez pas le stockage du navigateur."
     }
+  },
+  "nativeLabelRules": {
+    "saveUncertain": "Le résultat de l’enregistrement est inconnu. Vérifiez les filtres enregistrés avant d’en créer un autre. Aucun enregistrement ni aucune exécution n’a été relancé.",
+    "searchAccount": "Compte du libellé",
+    "searchLabel": "Libellé MailFlow",
+    "searchHelp": "label: accepte un identifiant de libellé, un chemin complet exact ou un nom court unique. Seules les associations directes correspondent. Les libellés ambigus ou manquants provoquent des erreurs. Dans la recherche unifiée, les exclusions peuvent inclure des messages vérifiés d’autres comptes. Les identités non vérifiées restent inconnues.",
+    "apply": "Appliquer un libellé MailFlow",
+    "remove": "Retirer un libellé MailFlow",
+    "partialCoverage": "Certains messages en cache ont des identités non vérifiées pour les libellés. Les résultats par libellé, y compris les exclusions, peuvent être incomplets. Cette recherche ne porte pas sur tous les messages chez votre fournisseur.",
+    "cacheCoverage": "Les libellés sont vérifiés uniquement pour ce cache synchronisé. Cette recherche ne porte pas sur tous les messages chez votre fournisseur.",
+    "choose": "Choisissez un libellé MailFlow…",
+    "missing": "Libellé manquant. Corrigez cette règle avant de l’activer.",
+    "requiresAccount": "Choisissez un compte pour utiliser les libellés propres à MailFlow.",
+    "accountChanged": "Le compte du libellé a changé ou est indisponible. Rouvrez l’éditeur et sélectionnez à nouveau les libellés de ce compte.",
+    "unverified": "Les identités pour les libellés ne sont pas vérifiées. Rechargez les libellés avant d’enregistrer.",
+    "conflicting": "Une règle ne peut pas appliquer et retirer le même libellé.",
+    "coverageCount": "Identités non vérifiées : {{unavailable}} sur {{total}} messages en cache.",
+    "emptyPartial": "Aucune correspondance dans les données indexées disponibles. Les messages dont les identités pour les libellés ne sont pas vérifiées peuvent néanmoins correspondre."
+  },
+  "gmailSearch": {
+    "supportedSearchOperatorsWithSize": "MailFlow prend en charge from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: et in:. OR, AND, les parenthèses, les groupes entre accolades, filename:, category: et newer_than:/older_than: (d, m, y) sont pris en charge. Les catégories utilisent les noms de MailFlow. size: et larger: signifient strictement supérieur à ; smaller: signifie strictement inférieur à. label: recherche les libellés propres à MailFlow. L’importance n’est pas indexée. Les noms des pièces jointes et le texte des messages dépendent du contenu synchronisé.",
+    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Les exécutions sur les messages existants portent uniquement sur la boîte de réception et ne déclenchent pas vos autres filtres. Les actions sur les libellés propres à MailFlow sont spécifiques à chaque compte et ne synchronisent pas les libellés du fournisseur. Le moteur de règles de MailFlow ne prend pas en charge les conditions de libellé, l’importance ni l’option « Ne jamais classer comme spam ». Le transfert peut être configuré dans les règles MailFlow."
   }
 }

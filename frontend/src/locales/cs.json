@@ -2600,5 +2600,27 @@
       "undoNeedsVerification": "Vrácení změny štítků vyžaduje ověření",
       "undoUncertain": "Výsledek není znám. Přesný požadavek byl zachován; nemažte úložiště prohlížeče."
     }
+  },
+  "nativeLabelRules": {
+    "saveUncertain": "Výsledek uložení není znám. Než vytvoříte další filtr, zkontrolujte uložené filtry. Uložení ani spuštění nebylo zopakováno.",
+    "searchAccount": "Účet štítku",
+    "searchLabel": "Štítek MailFlow",
+    "searchHelp": "label: přijímá ID štítku, přesnou úplnou cestu nebo jednoznačný krátký název. Shodují se pouze zprávy přímo přiřazené ke štítku. Nejednoznačné nebo chybějící štítky způsobí chybu. Ve sjednoceném vyhledávání mohou vyloučení zahrnovat ověřené zprávy z jiných účtů. Neověřené identity zůstávají neznámé.",
+    "apply": "Přiřadit štítek MailFlow",
+    "remove": "Odebrat štítek MailFlow",
+    "partialCoverage": "Některé zprávy v mezipaměti mají neověřené identity pro štítky. Výsledky hledání podle štítků, včetně vyloučení, mohou být neúplné. Toto vyhledávání neprohledává veškerou poštu u poskytovatele.",
+    "cacheCoverage": "Štítky jsou ověřeny pouze pro tuto synchronizovanou mezipaměť. Toto vyhledávání neprohledává veškerou poštu u poskytovatele.",
+    "choose": "Vyberte štítek MailFlow…",
+    "missing": "Štítek chybí. Před povolením tohoto pravidla jej opravte.",
+    "requiresAccount": "Chcete-li používat vlastní štítky MailFlow, vyberte účet.",
+    "accountChanged": "Účet štítku se změnil nebo není dostupný. Znovu otevřete editor a znovu vyberte štítky tohoto účtu.",
+    "unverified": "Identity pro štítky nejsou ověřeny. Před uložením znovu načtěte štítky.",
+    "conflicting": "Pravidlo nemůže současně přiřadit a odebrat stejný štítek.",
+    "coverageCount": "Neověřené identity: {{unavailable}} z {{total}} zpráv v mezipaměti.",
+    "emptyPartial": "V dostupných indexovaných datech nejsou žádné shody. Zprávy s neověřenými identitami pro štítky přesto mohou odpovídat."
+  },
+  "gmailSearch": {
+    "supportedSearchOperatorsWithSize": "MailFlow podporuje from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: a in:. Podporovány jsou také OR, AND, závorky, skupiny ve složených závorkách, filename:, category: a newer_than:/older_than: (d, m, y). Kategorie používají názvy z MailFlow. size: a larger: znamenají ostře větší než; smaller: znamená ostře menší než. label: vyhledává vlastní štítky MailFlow. Důležitost se neindexuje. Názvy souborů příloh a text zpráv závisí na synchronizovaném obsahu.",
+    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Spuštění na existujících zprávách zahrnuje pouze doručenou poštu a nespouští ostatní filtry. Akce s vlastními štítky MailFlow jsou vázané na konkrétní účet a nesynchronizují štítky poskytovatele. Podmínky podle štítků, důležitost a volbu nikdy neoznačovat jako spam pravidla MailFlow nepodporují. Přeposílání lze nastavit v pravidlech MailFlow."
   }
 }

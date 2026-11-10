@@ -1,3 +1,4 @@
+import { nativeLabelCondition } from './nativeLabelSearch.js';
 import { parseSearchExpression, SearchQueryError } from './searchExpression.js';
 
 // Postgres refuses to build a tsvector larger than ~1MB of packed lexemes
@@ -27,7 +28,9 @@ const escapeLike = value => value.replace(/[\\%_]/g, '\\$&');
 const negate = sql => `NOT COALESCE((${sql}), false)`;
 const CATEGORIES = new Set(['primary', 'newsletter', 'promotion', 'automated', 'social']);
 const SIZE_KEYS = new Set(['size', 'larger', 'smaller']);
-const hasSize = node => !!node && (node.type === 'filter' ? SIZE_KEYS.has(node.key) : node.type === 'not' ? hasSize(node.child) : !!node.children?.some(hasSize));
+const hasMetadata = (node, keys) => !!node && (node.type === 'filter' ? keys.has(node.key) : node.type === 'not' ? hasMetadata(node.child, keys) : !!node.children?.some(child => hasMetadata(child, keys)));
+const UNKNOWN_KEYS = new Set([...SIZE_KEYS, 'label']);
+const hasUnknown = node => hasMetadata(node, UNKNOWN_KEYS);
 
 // Typed suffixes deliberately use binary units, unlike the advanced form's
 // decimal KB/MB. BigInt rational arithmetic avoids rounding at safe-size bounds.
@@ -73,20 +76,22 @@ function relativeDate(value, now) {
 
 // Values are always parameters. The caller retains account ownership and
 // is_deleted predicates OUTSIDE this expression so OR can never bypass them.
-export function buildSearchConditions(raw, { folder = '', firstParam = 2, now = Date.now() } = {}) {
+export function buildSearchConditions(raw, { folder = '', firstParam = 2, now = Date.now(), nativeLabels = null } = {}) {
   const tree = parseSearchExpression(raw);
   const params = [];
-  const requiresSize = hasSize(tree);
+  const requiresSize = hasMetadata(tree, SIZE_KEYS);
+  const requiresLabels = hasMetadata(tree, new Set(['label']));
+  const requiresMetadata = hasUnknown(tree);
   let explicitFolder = false, includesTrash = false;
   const bind = value => { params.push(value); return `$${firstParam + params.length - 1}`; };
   const compile = (node, positive = true) => {
     const sql = compileNode(node, positive);
-    // Only size metadata is unknown evidence. Normalize ordinary subexpressions
-    // before composing them with size, without changing existing text searches.
-    return requiresSize && !hasSize(node) ? `COALESCE((${sql}), false)` : sql;
+    // Label identity and size are unknown evidence. Normalize ordinary
+    // subexpressions before composing, without changing text-only searches.
+    return requiresMetadata && !hasUnknown(node) ? `COALESCE((${sql}), false)` : sql;
   };
   const compileNode = (node, positive) => {
-    if (node.type === 'not') return hasSize(node.child) ? `NOT (${compile(node.child, !positive)})` : negate(compile(node.child, !positive));
+    if (node.type === 'not') return hasUnknown(node.child) ? `NOT (${compile(node.child, !positive)})` : negate(compile(node.child, !positive));
     if (node.type === 'and' || node.type === 'or') return `(${node.children.map(child => compile(child, positive)).join(node.type === 'and' ? ' AND ' : ' OR ')})`;
     if (node.type === 'term') {
       const like = bind(`%${escapeLike(node.value)}%`);
@@ -96,7 +101,8 @@ export function buildSearchConditions(raw, { folder = '', firstParam = 2, now = 
     }
     const { key, value } = node;
     if (SIZE_KEYS.has(key)) return `m.rfc822_size_bytes ${key === 'smaller' ? '<' : '>'} ${bind(parseSearchSize(value))}::bigint`;
-    if (['label', 'bcc'].includes(key)) throw new SearchQueryError(`${key}: is not available in MailFlow’s search index.`);
+    if (key === 'label') return nativeLabelCondition(nativeLabels?.byValue.get(value), bind);
+    if (key === 'bcc') throw new SearchQueryError(`${key}: is not available in MailFlow’s search index.`);
     if (key === 'from') { const p = bind(`%${escapeLike(value)}%`); return `(m.from_email ILIKE ${p} OR m.from_name ILIKE ${p})`; }
     if (key === 'subject') return `m.subject ILIKE ${bind(`%${escapeLike(value)}%`)}`;
     if (key === 'to' || key === 'cc') {
@@ -131,5 +137,5 @@ export function buildSearchConditions(raw, { folder = '', firstParam = 2, now = 
   };
   const conditions = tree ? [compile(tree)] : [];
   if (!explicitFolder && folder.trim()) conditions.push(`m.folder = ${bind(folder.trim())}`);
-  return { conditions, params, requiresSize, effectiveFolder: !explicitFolder ? folder.trim() : '', excludeTrash: !includesTrash && (explicitFolder || !folder.trim()) };
+  return { conditions, params, requiresSize, requiresLabels, effectiveFolder: !explicitFolder ? folder.trim() : '', excludeTrash: !includesTrash && (explicitFolder || !folder.trim()) };
 }

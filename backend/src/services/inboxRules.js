@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { mutateRuleMemberships } from './nativeLabelMemberships.js';
+import { nativeLabelDelta, verifyNativeLabelRule, NATIVE_LABEL_ACTIONS } from './nativeLabelRuleReferences.js';
 import { query } from './db.js';
 import { captureMessageSource } from './messageIdentity.js';
 import { withReadSourceIdentity } from './messageReadScope.js';
@@ -7,7 +10,7 @@ import { resolveArchiveFolder, isAllMailFolder, resolveTrashFolder, resolveAllTr
 
 async function getRulesForAccount(userId, accountId) {
   const result = await query(
-    `SELECT * FROM inbox_rules
+    `SELECT *,updated_at::text AS rule_revision FROM inbox_rules
      WHERE user_id = $1 AND enabled = true
        AND (account_id IS NULL OR account_id = $2)
      ORDER BY priority ASC, created_at ASC`,
@@ -158,6 +161,10 @@ export async function applyInboxRules(messages, account, imapManager, options = 
   const none = () => ({ remaining: messages, mutedIds: new Set(), notifyMessages: [] });
   if (!messages.length) return none();
 
+  // Proof and version came from persistence/sweep, before any queue or body wait.
+  // Never recapture a newer version here: that would adopt a concurrent decision.
+  const nativeProofs = new Map(messages.map(msg => [msg.id, msg._nativeLabelProof ? structuredClone(msg._nativeLabelProof) : null]));
+
   let rules;
   try {
     if (options.rule) {
@@ -174,6 +181,8 @@ export async function applyInboxRules(messages, account, imapManager, options = 
     if (options.rule) throw err;
     return none();
   }
+  rules = rules.filter(rule => !rule.account_id || rule.storage_generation === account.storage_generation);
+  if (options.rule && !rules.length) throw new Error('Rule belongs to a previous mailbox generation');
   if (!rules.length) return none();
 
   // If any rule matches on body, batch-fetch body_text from DB (it's not on the
@@ -216,21 +225,23 @@ export async function applyInboxRules(messages, account, imapManager, options = 
   let cancelled = false;
   const remaining = [...messages];
   const removedIds = new Set();
-  // A failed forward leaves the source in place for an intentional retry or
+  // A failed forward or native label decision leaves the source in place for
   // manual recovery. Keep every destination action blocked so nothing moves,
   // archives, or deletes that source out from under recovery.
   const destinationBlockedIds = new Set();
   const pendingIds = new Set();
+  const nativeLabelRecovery = [];
+  const uncertainNativeIds = new Set();
   // IDs of remaining-in-INBOX messages that had mark_read applied by a rule.
   // Used by the caller to skip sound/toast/push for mail the user chose to silence.
   const mutedIds = new Set();
   // Messages a matching rule asked to be notified about, and those a rule deleted (never alerted).
   const notifyIds = new Set();
   const deletedIds = new Set();
-  const lastForwardRuleIndex = rules.reduce(
+  const lastSourceDependentRuleIndex = rules.reduce(
     (lastIndex, rule, index) =>
       Array.isArray(rule.actions) &&
-      rule.actions.some(action => action?.type === 'forward')
+      rule.actions.some(action => action?.type === 'forward' || NATIVE_LABEL_ACTIONS.has(action?.type))
         ? index
         : lastIndex,
     -1
@@ -240,7 +251,7 @@ export async function applyInboxRules(messages, account, imapManager, options = 
     if (options.shouldContinue && !(await options.shouldContinue())) { cancelled = true; break; }
     processedCount++;
     const deferredDestinations = [];
-    let forwardBarrierPassed = lastForwardRuleIndex === -1;
+    let sourceBarrierPassed = lastSourceDependentRuleIndex === -1;
 
     const executeNonForwardAction = async (action, ruleId, isDest) => {
       try {
@@ -263,7 +274,7 @@ export async function applyInboxRules(messages, account, imapManager, options = 
         if (action.type === 'mark_read') mutedIds.add(msg.id);
       } catch (err) {
         failedCount++;
-        if (options.rule) destinationBlockedIds.add(msg.id);
+        if (options.rule || nativeProofs.get(msg.id)) destinationBlockedIds.add(msg.id);
         console.error(`inboxRules: action ${action.type} failed for msg ${msg.id}:`, err.message);
       }
     };
@@ -284,15 +295,15 @@ export async function applyInboxRules(messages, account, imapManager, options = 
       } catch (err) {
         failedCount++;
         console.error(`inboxRules: rule ${rule.id} evaluation error for msg ${msg.id}:`, err.message);
-        if (!forwardBarrierPassed && ruleIndex === lastForwardRuleIndex) {
-          forwardBarrierPassed = true;
+        if (!sourceBarrierPassed && ruleIndex === lastSourceDependentRuleIndex) {
+          sourceBarrierPassed = true;
           await flushDeferredDestinations();
         }
         continue;
       }
       if (!matches) {
-        if (!forwardBarrierPassed && ruleIndex === lastForwardRuleIndex) {
-          forwardBarrierPassed = true;
+        if (!sourceBarrierPassed && ruleIndex === lastSourceDependentRuleIndex) {
+          sourceBarrierPassed = true;
           await flushDeferredDestinations();
         }
         continue;
@@ -300,14 +311,46 @@ export async function applyInboxRules(messages, account, imapManager, options = 
 
       matchedIds.add(msg.id);
       const actions = Array.isArray(rule.actions) ? [...rule.actions] : [];
-      if (options.rule) {
+      {
         // Filing can remove the source row (Gmail All Mail) or leave its new UID
         // unknown. Finish flags/category while that source identity still exists.
         const destination = action => ['move', 'archive', 'delete'].includes(action.type);
         actions.sort((a, b) => Number(destination(a)) - Number(destination(b)));
       }
 
-      // Forward first within the matching rule. A failed attempt does not stop
+      const labelDelta = nativeLabelDelta(actions);
+      if ((labelDelta.addLabelIds.length || labelDelta.removeLabelIds.length) && !uncertainNativeIds.has(msg.id)) {
+        let attempt;
+        try {
+          const proof = nativeProofs.get(msg.id);
+          if (!proof || !rule.rule_revision) throw Object.assign(new Error('Native label identity snapshot is unavailable; no action was applied'), { code: 'identity_unavailable', status: 409 });
+          if (cancelled || (options.shouldContinue && !(await options.shouldContinue()))) { cancelled = true; break; }
+          attempt = { accountId: account.id, storageGeneration: account.storage_generation,
+            ruleId: rule.id, ruleRevision: rule.rule_revision, mutationId: randomUUID(),
+            source: proof.source, expectedMetadataVersion: proof.expectedMetadataVersion, ...labelDelta };
+          // Exactly one attempt. An uncertain commit is never retried with a fresh ID.
+          const { result } = await mutateRuleMemberships(account.user_id, attempt, {
+            verifyRule: verifyNativeLabelRule,
+            broadcast: imapManager.broadcast?.bind(imapManager),
+          });
+          const target = result.targets.find(item => item.entityId === proof.source.canonicalEntityId);
+          if (!target) throw new Error('Native label result needs recovery');
+          proof.expectedMetadataVersion = target.metadataVersion;
+        } catch (error) {
+          failedCount++;
+          destinationBlockedIds.add(msg.id);
+          // A connection/commit error is not proof of rollback. Keep this exact
+          // request for status/recovery; never make another native attempt here.
+          if (attempt && !error.status && !/^(stale_|rule_|identity_|invalid_|missing_|storage_generation_)/.test(error.code || '')) {
+            pendingIds.add(msg.id);
+            uncertainNativeIds.add(msg.id);
+            if (nativeLabelRecovery.length < 100) nativeLabelRecovery.push(structuredClone(attempt));
+          }
+          console.error(`inboxRules: native label action failed for msg ${msg.id}:`, error.message);
+        }
+      }
+
+      // Forward before provider filing within the matching rule. A failed attempt does not stop
       // independent forwards or non-destination actions, but it permanently
       // blocks relocation of this source for the remainder of the batch.
       for (const action of actions.filter(action => action.type === 'forward')) {
@@ -327,19 +370,19 @@ export async function applyInboxRules(messages, account, imapManager, options = 
         }
       }
 
-      // Once no later rule can run a forward, release destinations queued by
+      // Once no later rule can forward or label the original source, release destinations queued by
       // higher-priority rules before continuing this rule's ordinary actions.
       // A matching stop_processing rule also makes all later rules unreachable.
       if (
-        !forwardBarrierPassed &&
-        (ruleIndex === lastForwardRuleIndex || rule.stop_processing)
+        !sourceBarrierPassed &&
+        (ruleIndex === lastSourceDependentRuleIndex || rule.stop_processing)
       ) {
-        forwardBarrierPassed = true;
+        sourceBarrierPassed = true;
         await flushDeferredDestinations();
       }
 
       let destSeen = false;
-      for (const action of actions.filter(action => action.type !== 'forward')) {
+      for (const action of actions.filter(action => action.type !== 'forward' && !NATIVE_LABEL_ACTIONS.has(action.type))) {
         // "Notify me" does nothing to the message; it only marks it for an alert.
         if (action.type === 'notify') { notifyIds.add(msg.id); continue; }
         const isDest = action.type === 'move' || action.type === 'archive' || action.type === 'delete';
@@ -352,7 +395,7 @@ export async function applyInboxRules(messages, account, imapManager, options = 
         if (isDest && removedIds.has(msg.id)) continue;
         if (isDest && destinationBlockedIds.has(msg.id)) continue;
         if (isDest) destSeen = true;
-        if (isDest && !forwardBarrierPassed) {
+        if (isDest && !sourceBarrierPassed) {
           deferredDestinations.push({ action, ruleId: rule.id });
           continue;
         }
@@ -372,6 +415,7 @@ export async function applyInboxRules(messages, account, imapManager, options = 
     remaining: remaining.filter(m => !removedIds.has(m.id)),
     mutedIds,
     ...(pendingIds.size ? { identityPending: true, pendingIds: [...pendingIds] } : {}),
+    ...(nativeLabelRecovery.length ? { nativeLabelRecovery } : {}),
     notifyMessages: messages.filter(m => notifyIds.has(m.id) && removedIds.has(m.id) && !deletedIds.has(m.id)),
   };
 }

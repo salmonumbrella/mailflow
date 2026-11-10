@@ -190,7 +190,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
     updateMessage, removeMessage, removeMessages,
     decrementUnread, incrementUnread, addNotification, notifications, removeNotification,
     searchQuery, setSearchQuery, setIsSearching,
-    searchResults, searchSizeIndex, setSearchResults, openCompose, accountsReady, accounts,
+    searchResults, searchSizeIndex, searchLabelIndex, setSearchResults, openCompose, accountsReady, accounts,
     messagesRefreshToken, layout, setLayout, pageSize, setPageSize, scrollMode,
     setMobileSidebarOpen, unreadCounts, showContacts, setShowContacts,
     threadedView: threadedSetting, expandedThreadId, setExpandedThreadId,
@@ -718,7 +718,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       return;
     }
     setIsSearching(true);
-    useStore.setState({ searchSizeIndex: null });
+    useStore.setState({ searchSizeIndex: null, searchLabelIndex: null });
     setSearchHasMore(false);
     setSearchError(null);
     const seq = ++searchSeq.current;
@@ -727,7 +727,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         const data = await api.search(searchQuery, selectedAccountId || undefined, { offset: 0, limit: searchPageSize, folder: searchFolder });
         if (searchSeq.current !== seq) return;
         searchFetchedOffsetRef.current = data.messages.length;
-        setSearchResults(applyReadGuard(data.messages), data.sizeIndex || null);
+        setSearchResults(applyReadGuard(data.messages), data.sizeIndex || null, data.labelIndex || null);
         setSearchHasMore(data.messages.length === searchPageSize);
       } catch (err) {
         if (searchSeq.current === seq) {
@@ -775,7 +775,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       if (searchSeq.current !== seq || useStore.getState().searchQuery !== qSnapshot) return;
       searchFetchedOffsetRef.current = offset + data.messages.length;
       const current = useStore.getState().searchResults;
-      useStore.setState({ searchResults: [...current, ...applyReadGuard(data.messages)], searchSizeIndex: data.sizeIndex || null });
+      useStore.setState({ searchResults: [...current, ...applyReadGuard(data.messages)], searchSizeIndex: data.sizeIndex || null, searchLabelIndex: data.labelIndex || null });
       setSearchHasMore(data.messages.length === searchPageSize);
     } catch (err) {
       console.error('Search load more failed:', err);
@@ -792,7 +792,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
       const data = await api.search(qSnapshot, selectedAccountId || undefined, { offset, limit: searchPageSize, folder: searchFolder });
       if (searchSeq.current !== seq || useStore.getState().searchQuery !== qSnapshot) return;
       searchFetchedOffsetRef.current = Math.max(searchFetchedOffsetRef.current, offset + data.messages.length);
-      useStore.setState({ searchSizeIndex: data.sizeIndex || null });
+      useStore.setState({ searchSizeIndex: data.sizeIndex || null, searchLabelIndex: data.labelIndex || null });
       const additions = applyReadGuard(data.messages);
       if (!additions.length) {
         setSearchHasMore(data.messages.length === searchPageSize);
@@ -3675,6 +3675,13 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         </div>
       )}
 
+      {searchQuery.trim() && !isSearching && searchLabelIndex && <div role="status" style={{ padding: '8px 14px', fontSize: 12, color: 'var(--text-secondary)', flexShrink: 0 }}>
+        {searchLabelIndex.state === 'partial'
+          ? t('nativeLabelRules.partialCoverage', { defaultValue: 'Some cached messages have unverified label identities. Label results, including exclusions, may be incomplete. This does not search all mail on your provider.' })
+          : t('nativeLabelRules.cacheCoverage', { defaultValue: 'Labels are verified for this synchronized cache only. This does not search all mail on your provider.' })}
+        {' '}{t('nativeLabelRules.coverageCount', { defaultValue: 'Unverified identities: {{unavailable}} of {{total}} cached messages.', unavailable: searchLabelIndex.unavailable, total: searchLabelIndex.total })}
+      </div>}
+
       {searchQuery.trim() && !isSearching && searchSizeIndex && <div role="status" style={{ padding: '8px 14px', fontSize: 12, color: 'var(--text-secondary)', flexShrink: 0 }}>
         {searchSizeIndex.state === 'partial'
           ? t('messageList.partialSizeIndex', { defaultValue: 'Some messages in this synchronized cache have unknown sizes. Size results may be incomplete, including exclusions. This does not cover all mail on your provider.' })
@@ -4014,6 +4021,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
             searching={isSearching}
             searchError={searchError}
             partialSizeIndex={searchSizeIndex?.state === 'partial'}
+            partialLabelIndex={searchLabelIndex?.state === 'partial'}
             unreadOnly={unreadOnly}
             selectedFolder={selectedFolder}
             accounts={accounts}
@@ -4695,7 +4703,7 @@ function RowTime({ message }) {
   );
 }
 
-function EmptyState({ folderSyncing, searchQuery, searching, searchError, partialSizeIndex, unreadOnly, selectedFolder, accounts, category, otherCategoriesHaveMail, onClearSearch, onRetrySearch, onShowAll, onCompose }) {
+function EmptyState({ folderSyncing, searchQuery, searching, searchError, partialSizeIndex, partialLabelIndex, unreadOnly, selectedFolder, accounts, category, otherCategoriesHaveMail, onClearSearch, onRetrySearch, onShowAll, onCompose }) {
   const { t } = useTranslation();
 
   // A search still waiting for its debounce or its response has no results yet, not none (#592).
@@ -4741,7 +4749,7 @@ function EmptyState({ folderSyncing, searchQuery, searching, searchError, partia
           {searchError ? t('messageList.searchFailed') : t('messageList.noSearchResults')}
         </div>
         <div style={{ fontSize: 13, color: searchError ? 'var(--red)' : 'var(--text-tertiary)', marginBottom: 20 }}>
-          {searchError || (partialSizeIndex ? t('messageList.noMeasuredSizeResults', { defaultValue: 'No matches in the available indexed data. Messages with unknown sizes may still match.' }) : t('messageList.noSearchResultsDesc', { query: searchQuery }))}
+          {searchError || (partialLabelIndex ? t('nativeLabelRules.emptyPartial', { defaultValue: 'No matches in the available indexed data. Messages with unverified label identities may still match.' }) : partialSizeIndex ? t('messageList.noMeasuredSizeResults', { defaultValue: 'No matches in the available indexed data. Messages with unknown sizes may still match.' }) : t('messageList.noSearchResultsDesc', { query: searchQuery }))}
         </div>
         {searchError && (
           <button onClick={onRetrySearch} style={{

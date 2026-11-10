@@ -225,7 +225,10 @@ export async function writeObservedMessage(context, message, write) {
     [context.accountId, context.folderPath, uid, context.storageGeneration, context.uidValidity]);
     const saved = await write(client);
     const bound = await client.query(`UPDATE messages SET entity_id=$4,storage_generation=$5,uid_validity=$6
-      WHERE account_id=$1 AND folder=$2 AND uid=$3 RETURNING id,entity_id,storage_generation,uid_validity`,
+      WHERE account_id=$1 AND folder=$2 AND uid=$3 RETURNING id,entity_id,storage_generation,uid_validity,
+        (SELECT e.metadata_version::text FROM message_entities e WHERE e.id=messages.entity_id
+          AND e.account_id=messages.account_id AND e.storage_generation=messages.storage_generation
+          AND e.canonical_entity_id IS NULL) AS metadata_version`,
     [context.accountId, context.folderPath, uid, resolved.entityId, context.storageGeneration, context.uidValidity]);
     if (saved?.rows) for (const row of saved.rows) Object.assign(row, bound.rows.find(candidate => candidate.id === row.id) || {});
     return saved;

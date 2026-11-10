@@ -1,8 +1,9 @@
 import { hydrateNativeLabels } from '../services/nativeLabelReadModel.js';
 import { Router } from 'express';
 import { buildSearchConditions } from '../services/searchConditions.js';
-import { SearchQueryError } from '../services/searchExpression.js';
-import { query } from '../services/db.js';
+import { nativeLabelTerms, resolveNativeLabelSearch, nativeLabelIdentityAvailableSql } from '../services/nativeLabelSearch.js';
+import { parseSearchExpression, SearchQueryError } from '../services/searchExpression.js';
+import { query, withTransaction } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
 
@@ -88,61 +89,92 @@ router.get('/', searchLimiter, async (req, res) => {
     'SELECT id, include_in_unified_inbox FROM email_accounts WHERE user_id = $1 AND enabled = true',
     [req.session.userId]
   );
-  const { accountIds: targetIds } = resolveAccountScope(accountsResult.rows, accountId);
-  if (!targetIds.length) return res.json({ messages: [] });
+  let { accountIds: targetIds } = resolveAccountScope(accountsResult.rows, accountId);
 
   const cap = Math.max(1, Math.min(parseInt(limit) || 50, 200));
-  let search;
   try {
-    search = buildSearchConditions(trimmed, { folder: req.query.folder || '' });
+    const tree = parseSearchExpression(trimmed);
+    const requiresLabels = nativeLabelTerms(tree).length > 0;
+    // Keep new definition-resolution criteria closed until native-label query
+    // scopes have an explicit contract. Existing mail enrichment stays unchanged.
+    if (requiresLabels && req.apiToken) return res.status(403).json({
+      error: 'Native label search requires a browser session.', code: 'native_label_scope_required',
+    });
+    const run = async execute => {
+      if (requiresLabels) {
+        const accounts = await execute('SELECT id, include_in_unified_inbox FROM email_accounts WHERE user_id = $1 AND enabled = true', [req.session.userId]);
+        targetIds = resolveAccountScope(accounts.rows, accountId).accountIds;
+      }
+      const nativeLabels = requiresLabels ? await resolveNativeLabelSearch(req.session.userId, targetIds, tree, execute) : null;
+      const search = buildSearchConditions(trimmed, { folder: req.query.folder || '', nativeLabels });
+      if (!targetIds.length) return { messages: [] };
+      const conditions = search.conditions;
+      if (!conditions.length) return { messages: [], query: q };
+      if (search.excludeTrash) conditions.push(trashFolderExclusionCondition());
+      const params = [targetIds, ...search.params];
+      const p = params.length + 1;
+      params.push(cap, Math.max(0, parseInt(offset) || 0));
+      const result = await execute(`
+        SELECT
+          m.id, m.uid, m.folder, m.entity_id, m.storage_generation, m.uid_validity, m.message_id, m.subject, m.from_name, m.from_email,
+          m.to_addresses, m.cc_addresses, m.reply_to, m.delivery_addresses, m.thread_id,
+          m.in_reply_to, m.thread_references,
+          m.date, m.snippet, m.is_read, m.is_starred, m.has_attachments, m.account_id,
+          a.name as account_name, a.email_address as account_email, a.color as account_color
+        FROM messages m
+        JOIN email_accounts a ON m.account_id = a.id
+        WHERE m.account_id = ANY($1)
+          AND m.is_deleted = false
+          AND ${conditions.join('\n        AND ')}
+        ORDER BY m.date DESC, m.id DESC
+        LIMIT $${p} OFFSET $${p + 1}
+      `, params);
+
+      let sizeIndex;
+      if (search.requiresSize) {
+        // Coverage describes this authorized synchronized cache, not matching
+        // messages or all provider mail. EXISTS stops at the first unknown row.
+        const coverageParams = [targetIds];
+        const coverageScope = ['m.account_id = ANY($1)', 'm.is_deleted = false', 'm.rfc822_size_bytes IS NULL'];
+        if (search.effectiveFolder) { coverageParams.push(search.effectiveFolder); coverageScope.push('m.folder = $2'); }
+        if (search.excludeTrash) coverageScope.push(trashFolderExclusionCondition());
+        const coverage = await execute(`SELECT EXISTS (SELECT 1 FROM messages m WHERE ${coverageScope.join(' AND ')}) AS has_unknown`, coverageParams);
+        sizeIndex = {
+          state: coverage.rows[0]?.has_unknown === false ? 'complete-for-cache' : 'partial',
+          scope: search.effectiveFolder ? 'selected-folder-synchronized-cache' : 'selected-accounts-synchronized-cache',
+          providerComplete: false,
+        };
+      }
+
+      let labelIndex;
+      if (requiresLabels) {
+        const coverageParams = [targetIds];
+        const coverageScope = ['m.account_id = ANY($1)', 'm.is_deleted = false'];
+        if (search.effectiveFolder) { coverageParams.push(search.effectiveFolder); coverageScope.push('m.folder = $2'); }
+        if (search.excludeTrash) coverageScope.push(trashFolderExclusionCondition());
+        const { rows: [coverage] } = await execute(`SELECT count(*)::int AS total,
+          count(*) FILTER (WHERE ${nativeLabelIdentityAvailableSql()})::int AS known
+          FROM messages m WHERE ${coverageScope.join(' AND ')}`, coverageParams);
+        const total = coverage.total, known = coverage.known;
+        labelIndex = { state: total === known ? 'complete-for-cache' : 'partial',
+          scope: search.effectiveFolder ? 'selected-folder-synchronized-cache' : 'selected-accounts-synchronized-cache',
+          providerComplete: false, directMembershipOnly: true,
+          total, known, unavailable: total - known,
+          accounts: nativeLabels.accounts, resolvedReferences: nativeLabels.resolvedReferences };
+      }
+      const messages = await hydrateNativeLabels(req.session.userId, result.rows, execute);
+      return { messages, query: q, ...(sizeIndex ? { sizeIndex } : {}), ...(labelIndex ? { labelIndex } : {}) };
+    };
+    // Definition resolution, membership predicates, coverage, and hydration all
+    // observe one snapshot. A rename/delete/replacement cannot split this response.
+    const response = requiresLabels ? await withTransaction(async client => {
+      await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      return run(client.query.bind(client));
+    }) : await run(query);
+    res.json(response);
   } catch (err) {
-    if (err instanceof SearchQueryError) return res.status(400).json({ error: err.message });
-    throw err;
-  }
-  const conditions = search.conditions;
-  if (!conditions.length) return res.json({ messages: [], query: q });
-  if (search.excludeTrash) conditions.push(trashFolderExclusionCondition());
-  const params = [targetIds, ...search.params];
-  const p = params.length + 1;
-
-  const off = Math.max(0, parseInt(offset) || 0);
-  params.push(cap);
-  params.push(off);
-
-  try {
-    const result = await query(`
-      SELECT
-        m.id, m.uid, m.folder, m.entity_id, m.storage_generation, m.uid_validity, m.message_id, m.subject, m.from_name, m.from_email,
-        m.to_addresses, m.cc_addresses, m.reply_to, m.delivery_addresses, m.thread_id,
-        m.in_reply_to, m.thread_references,
-        m.date, m.snippet, m.is_read, m.is_starred, m.has_attachments, m.account_id,
-        a.name as account_name, a.email_address as account_email, a.color as account_color
-      FROM messages m
-      JOIN email_accounts a ON m.account_id = a.id
-      WHERE m.account_id = ANY($1)
-        AND m.is_deleted = false
-        AND ${conditions.join('\n        AND ')}
-      ORDER BY m.date DESC, m.id DESC
-      LIMIT $${p} OFFSET $${p + 1}
-    `, params);
-
-    let sizeIndex;
-    if (search.requiresSize) {
-      // Coverage describes this authorized synchronized cache, not matching
-      // messages or all provider mail. EXISTS stops at the first unknown row.
-      const coverageParams = [targetIds];
-      const coverageScope = ['m.account_id = ANY($1)', 'm.is_deleted = false', 'm.rfc822_size_bytes IS NULL'];
-      if (search.effectiveFolder) { coverageParams.push(search.effectiveFolder); coverageScope.push('m.folder = $2'); }
-      if (search.excludeTrash) coverageScope.push(trashFolderExclusionCondition());
-      const coverage = await query(`SELECT EXISTS (SELECT 1 FROM messages m WHERE ${coverageScope.join(' AND ')}) AS has_unknown`, coverageParams);
-      sizeIndex = {
-        state: coverage.rows[0]?.has_unknown === false ? 'complete-for-cache' : 'partial',
-        scope: search.effectiveFolder ? 'selected-folder-synchronized-cache' : 'selected-accounts-synchronized-cache',
-        providerComplete: false,
-      };
-    }
-    res.json({ messages: await hydrateNativeLabels(req.session.userId, result.rows), query: q, ...(sizeIndex ? { sizeIndex } : {}) });
-  } catch (err) {
+    if (err instanceof SearchQueryError) return res.status(400).json({ error: err.message,
+      ...(err.code ? { code: err.code } : {}), ...(err.candidates ? { candidates: err.candidates } : {}) });
     console.error('Search error:', err);
     res.status(500).json({ error: 'Search failed' });
   }

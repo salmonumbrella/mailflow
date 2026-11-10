@@ -92,11 +92,17 @@ export async function mutateMemberships(userId, raw) {
   const input = validateMembershipRequest(raw, true);
   // Preserve target order because it is part of the exact response contract.
   const hash = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+  return applyMembershipMutation(userId, input, hash);
+}
+
+// HTTP and internal rule decisions use one membership writer and one durable journal.
+async function applyMembershipMutation(userId, input, hash, verify = null) {
   return withTransaction(async client => {
     const account = await lockOwnedAccount(client, userId, input);
     const replay = await replayMutation(client, input, hash);
     if (replay) return replay;
     currentGeneration(account, input);
+    if (verify) await verify(client);
     const labelIds = [...input.addLabelIds, ...input.removeLabelIds];
     await lockLabels(client, input, labelIds);
     const resolved = await resolveTargets(client, input, true);
@@ -114,6 +120,82 @@ export async function mutateMemberships(userId, raw) {
     await recordMutation(client, input, hash, result, undoState);
     return { result, changed: true };
   });
+}
+
+// The original cache UUID is part of the proof. A newly cached row at the same UID
+// must never inherit a delayed rule decision, even when its entity happens to match.
+function sourceTuple(raw, captured = false) {
+  object(raw, ['id', 'account_id', 'entity_id', 'storage_generation', 'folder', 'uid_validity', 'uid', ...(captured ? ['canonicalEntityId'] : [])]);
+  const source = Object.fromEntries(['id', 'account_id', 'entity_id', 'storage_generation'].map(key => [key, uuid(raw[key], key)]));
+  if (typeof raw.folder !== 'string' || !raw.folder.length || raw.folder.length > 4096) invalid('Invalid source folder');
+  source.folder = raw.folder;
+  for (const key of ['uid_validity', 'uid']) {
+    const value = raw[key];
+    if (!(typeof value === 'string' || (typeof value === 'number' && Number.isSafeInteger(value)))
+      || !/^[1-9][0-9]{0,9}$/.test(String(value)) || BigInt(value) > 4294967295n) invalid(`Invalid source ${key}`);
+    source[key] = String(value);
+  }
+  if (captured) source.canonicalEntityId = uuid(raw.canonicalEntityId, 'canonicalEntityId');
+  return source;
+}
+async function verifySource(client, input, source) {
+  if (source.account_id !== input.accountId || source.storage_generation !== input.storageGeneration) invalid('Source scope does not match request');
+  // Hold the cache row against even non-identity cache deletion until our commit.
+  const { rows: [row] } = await client.query(`SELECT m.id FROM messages m
+    JOIN entity_locations l ON l.account_id=m.account_id AND l.storage_generation=m.storage_generation
+      AND l.entity_id=m.entity_id AND l.folder_path=m.folder AND l.uid_validity=m.uid_validity AND l.uid=m.uid
+    JOIN mailbox_identity_epochs ep ON ep.account_id=l.account_id AND ep.storage_generation=l.storage_generation
+      AND ep.folder_path=l.folder_path AND ep.uid_validity=l.uid_validity
+    WHERE m.id=$1 AND m.account_id=$2 AND m.storage_generation=$3 AND m.entity_id=$4
+      AND m.folder=$5 AND m.uid_validity=$6 AND m.uid=$7 AND NOT m.is_deleted AND l.status='present'
+    FOR SHARE OF m`, [source.id, input.accountId, input.storageGeneration, source.entity_id, source.folder, source.uid_validity, source.uid]);
+  if (!row) fail(409, 'rule_source_changed', 'The captured message location is no longer available');
+  const canonical = await resolveCanonicalEntity(client, input, source.entity_id);
+  if (source.canonicalEntityId && canonical !== source.canonicalEntityId) fail(409, 'rule_source_changed', 'Message identity changed since this rule was captured');
+  return canonical;
+}
+
+// Call before queueing or waiting for bodies. The caller must supply the persisted
+// tuple, never a UID-only lookup at execution time. No existing version is refreshed.
+export async function captureRuleMembershipSourceInTransaction(client, userId, raw) {
+  const source = sourceTuple(raw);
+  const input = { accountId: source.account_id, storageGeneration: source.storage_generation };
+  currentGeneration(await lockOwnedAccount(client, userId, input), input);
+  source.canonicalEntityId = await verifySource(client, input, source);
+  const resolved = await resolveTargets(client, { ...input, targets: [{ entityId: source.entity_id }] }, false);
+  const result = (await resultFor(client, input, resolved)).targets[0];
+  return { source, expectedMetadataVersion: result.metadataVersion, labelIds: result.labelIds };
+}
+export async function captureRuleMembershipSource(userId, raw) {
+  return withTransaction(client => captureRuleMembershipSourceInTransaction(client, userId, raw));
+}
+
+export async function mutateRuleMemberships(userId, raw, { verifyRule, broadcast } = {}) {
+  object(raw, ['accountId', 'storageGeneration', 'ruleId', 'ruleRevision', 'mutationId', 'source', 'expectedMetadataVersion', 'addLabelIds', 'removeLabelIds']);
+  if (typeof verifyRule !== 'function') invalid('Rule transaction verifier is required');
+  const source = sourceTuple(raw.source, true);
+  const ruleId = uuid(raw.ruleId, 'ruleId');
+  if (typeof raw.ruleRevision !== 'string' || !raw.ruleRevision.length || raw.ruleRevision.length > 128) invalid('A captured rule revision is required');
+  const input = validateMembershipRequest({ accountId: raw.accountId, storageGeneration: raw.storageGeneration,
+    mutationId: raw.mutationId, targets: [{ entityId: source.entity_id, expectedMetadataVersion: raw.expectedMetadataVersion }],
+    addLabelIds: raw.addLabelIds, removeLabelIds: raw.removeLabelIds }, true);
+  if (source.account_id !== input.accountId || source.storage_generation !== input.storageGeneration) invalid('Source scope does not match request');
+  const context = { ...input, ruleId, ruleRevision: raw.ruleRevision, source, expectedMetadataVersion: input.targets[0].expectedMetadataVersion };
+  const hash = createHash('sha256').update(JSON.stringify({ operation: 'rule', ...context })).digest('hex');
+  const outcome = await applyMembershipMutation(userId, input, hash, async client => {
+    await verifySource(client, input, source);
+    await verifyRule(client, { userId, input: context, source });
+  });
+  // A failed push is not a failed mutation. Replaying the durable request cannot
+  // apply it again or duplicate notifications. No provider or legacy-label writes.
+  if (outcome.changed && broadcast) {
+    try {
+      await broadcast({ type: 'label_memberships_changed', accountId: outcome.result.accountId,
+        storageGeneration: outcome.result.storageGeneration,
+        entityIds: [...new Set(outcome.result.targets.map(target => target.entityId))] }, userId);
+    } catch { console.warn('Rule label membership notification failed'); }
+  }
+  return outcome;
 }
 
 // Replays are historical results, checked before generation, labels and current versions.

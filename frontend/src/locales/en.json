@@ -2581,5 +2581,27 @@
       "undoNeedsVerification": "Label Undo needs verification",
       "undoUncertain": "Its outcome is unknown. The exact request has been retained; do not clear browser storage."
     }
+  },
+  "nativeLabelRules": {
+    "saveUncertain": "The save result is unknown. Check saved filters before creating another; no save or run was restarted.",
+    "searchAccount": "Label account",
+    "searchLabel": "MailFlow label",
+    "searchHelp": "label: accepts a label ID, exact full path, or unique short name. Only direct membership matches. Ambiguous or missing labels are errors. In unified search, exclusions can include verified messages from other accounts. Unverified identities remain unknown.",
+    "apply": "Apply MailFlow label",
+    "remove": "Remove MailFlow label",
+    "partialCoverage": "Some cached messages have unverified label identities. Label results, including exclusions, may be incomplete. This does not search all mail on your provider.",
+    "cacheCoverage": "Labels are verified for this synchronized cache only. This does not search all mail on your provider.",
+    "choose": "Choose a MailFlow label…",
+    "missing": "Missing label. Repair this rule before enabling it.",
+    "requiresAccount": "Choose an account to use native labels.",
+    "accountChanged": "The label account changed or is unavailable. Reopen the editor and choose its labels again.",
+    "unverified": "Label identities are not verified. Reload labels before saving.",
+    "conflicting": "A rule cannot apply and remove the same label.",
+    "coverageCount": "Unverified identities: {{unavailable}} of {{total}} cached messages.",
+    "emptyPartial": "No matches in the available indexed data. Messages with unverified label identities may still match."
+  },
+  "gmailSearch": {
+    "supportedSearchOperatorsWithSize": "MailFlow supports from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after:, and in:. OR, AND, parentheses, curly-brace groups, filename:, category: and newer_than:/older_than: (d, m, y) are supported. Categories use MailFlow’s names. size: and larger: mean strictly greater than; smaller: means strictly less than. label: searches native MailFlow labels. Importance is not indexed. Attachment filenames and body text depend on synced content.",
+    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Existing-message runs cover the Inbox only and do not run your other filters. Native MailFlow label actions are account-specific and do not sync provider labels. Label conditions, importance and never-spam are not supported by MailFlow’s rules engine. Forwarding can be configured in MailFlow Rules."
   }
 }

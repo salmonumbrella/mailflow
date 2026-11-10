@@ -2581,5 +2581,27 @@
       "undoNeedsVerification": "L’annullamento della modifica alle etichette deve essere verificato",
       "undoUncertain": "Il suo esito è sconosciuto. La richiesta esatta è stata conservata; non cancellare i dati archiviati dal browser."
     }
+  },
+  "nativeLabelRules": {
+    "saveUncertain": "Il risultato del salvataggio è sconosciuto. Controlla i filtri salvati prima di crearne un altro. Non è stato riavviato alcun salvataggio o esecuzione.",
+    "searchAccount": "Account dell’etichetta",
+    "searchLabel": "Etichetta MailFlow",
+    "searchHelp": "label: accetta un ID etichetta, un percorso completo esatto o un nome breve univoco. Corrispondono solo le assegnazioni dirette. Le etichette ambigue o mancanti causano errori. Nella ricerca unificata, le esclusioni possono includere messaggi verificati di altri account. Le identità non verificate rimangono sconosciute.",
+    "apply": "Applica etichetta MailFlow",
+    "remove": "Rimuovi etichetta MailFlow",
+    "partialCoverage": "Alcuni messaggi nella cache hanno identità non verificate per le etichette. I risultati per etichetta, incluse le esclusioni, potrebbero essere incompleti. Questa ricerca non copre tutta la posta presso il tuo provider.",
+    "cacheCoverage": "Le etichette sono verificate solo per questa cache sincronizzata. Questa ricerca non copre tutta la posta presso il tuo provider.",
+    "choose": "Scegli un’etichetta MailFlow…",
+    "missing": "Etichetta mancante. Correggi questa regola prima di abilitarla.",
+    "requiresAccount": "Scegli un account per usare le etichette native di MailFlow.",
+    "accountChanged": "L’account dell’etichetta è cambiato o non è disponibile. Riapri l’editor e scegli nuovamente le etichette di quell’account.",
+    "unverified": "Le identità per le etichette non sono verificate. Ricarica le etichette prima di salvare.",
+    "conflicting": "Una regola non può applicare e rimuovere la stessa etichetta.",
+    "coverageCount": "Identità non verificate: {{unavailable}} su {{total}} messaggi nella cache.",
+    "emptyPartial": "Nessuna corrispondenza nei dati indicizzati disponibili. I messaggi con identità non verificate per le etichette potrebbero comunque corrispondere."
+  },
+  "gmailSearch": {
+    "supportedSearchOperatorsWithSize": "MailFlow supporta from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: e in:. Sono supportati OR, AND, parentesi, gruppi tra parentesi graffe, filename:, category: e newer_than:/older_than: (d, m, y). Le categorie usano i nomi di MailFlow. size: e larger: significano strettamente maggiore di; smaller: significa strettamente minore di. label: cerca le etichette native di MailFlow. L’importanza non è indicizzata. I nomi dei file allegati e il testo dei messaggi dipendono dal contenuto sincronizzato.",
+    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Le esecuzioni sui messaggi esistenti riguardano solo la posta in arrivo e non eseguono gli altri filtri. Le azioni sulle etichette native di MailFlow sono specifiche per account e non sincronizzano le etichette del provider. Il motore di regole di MailFlow non supporta le condizioni sulle etichette, l’importanza e l’opzione di non contrassegnare mai come spam. L’inoltro può essere configurato nelle regole di MailFlow."
   }
 }

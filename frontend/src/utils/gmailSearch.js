@@ -2,7 +2,7 @@
 export const tokenizeSearch = query => String(query || '').match(/(?:[^\s"']|"[^"]*"|'[^']*')+/g) || [];
 const unquote = value => value?.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
 export const quoteSearch = value => /\s/.test(value) ? `"${value.replaceAll('"', '')}"` : value;
-export const emptySearchFields = () => ({ from: '', to: '', subject: '', words: '', without: '', folder: '', attachment: false, after: '', before: '', date: '', dateWithin: '7', sizeComparison: 'larger', sizeValue: '', sizeUnit: 'MB', extra: '' });
+export const emptySearchFields = () => ({ from: '', to: '', subject: '', words: '', without: '', folder: '', label: '', attachment: false, after: '', before: '', date: '', dateWithin: '7', sizeComparison: 'larger', sizeValue: '', sizeUnit: 'MB', extra: '' });
 
 // Keep aligned with backend searchConditions: typed suffixes are binary,
 // while advanced-form KB/MB are decimal. Reject sub-byte values, never round.
@@ -54,6 +54,7 @@ export function searchFieldsToQuery(fields, t = defaultTranslate) {
   if (fields.words.trim()) tokens.push(fields.words.trim());
   tokens.push(...tokenizeSearch(fields.without).map(word => `-${word.replace(/^-/, '')}`));
   if (fields.folder) tokens.push(`in:${quoteSearch(fields.folder)}`);
+  if (fields.label) tokens.push(`label:${quoteSearch(fields.label)}`);
   if (fields.attachment) tokens.push('has:attachment');
   if (fields.sizeValue !== undefined && fields.sizeValue !== '') {
     if (!['larger', 'smaller'].includes(fields.sizeComparison)) throw new Error(t('gmailSearch.invalidSizeComparison', { defaultValue: 'Choose a valid size comparison.' }));

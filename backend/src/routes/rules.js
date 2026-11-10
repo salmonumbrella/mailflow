@@ -7,6 +7,9 @@ import { requireAuth } from '../middleware/auth.js';
 import { accountJobGenerationConflict } from '../services/accountJobGeneration.js';
 import { applyInboxRules, isDangerousRegex, RULE_CATEGORIES } from '../services/inboxRules.js';
 
+import { extractNativeLabelReferences, nativeLabelDelta, validateNativeLabelRuleShape, NATIVE_LABEL_ACTIONS } from '../services/nativeLabelRuleReferences.js';
+import { saveNativeLabelRule, validateNativeRuleForRun } from '../services/nativeLabelRulePersistence.js';
+
 const router = Router();
 router.use(requireAuth);
 
@@ -21,7 +24,9 @@ const FIELDS_REQUIRING_VALUE = new Set(['from', 'to', 'subject', 'body', 'header
 // Validates condition shapes. Returns an error string on the first problem,
 // or null when all conditions are valid. Exported for unit testing.
 export function validateConditions(conditions) {
+  if (conditions.length > 200) return 'A rule may have at most 200 conditions';
   for (const cond of conditions) {
+    if (cond?.field === 'native_label') return 'Native label conditions are not supported yet';
     if (!cond || typeof cond.field !== 'string') {
       return 'Each condition must have a valid field';
     }
@@ -42,6 +47,8 @@ export function validateConditions(conditions) {
 }
 
 export function validateActions(actions) {
+  if (actions.length > 200) return 'A rule may have at most 200 actions';
+  try { nativeLabelDelta(actions); } catch (error) { return error.message; }
   for (const action of actions) {
     if (action.type === 'set_category' && !RULE_CATEGORIES.has(action.value)) {
       return 'Set category action requires one of: primary, newsletter, promotion, automated, social';
@@ -63,9 +70,15 @@ export function normalizeActions(actions) {
   let forwardSeen = false;
   let categorySeen = false;
   let notifySeen = false;
+  const labelsSeen = new Set();
   return actions
     .filter(a => {
       if (!a || typeof a.type !== 'string') return false;
+      if (NATIVE_LABEL_ACTIONS.has(a.type)) {
+        const key = `${a.type}:${String(a.value).toLowerCase()}`;
+        if (labelsSeen.has(key)) return false;
+        labelsSeen.add(key);
+      }
       if (DESTINATION_ACTIONS.has(a.type)) {
         if (destSeen) return false;
         destSeen = true;
@@ -89,7 +102,7 @@ export function normalizeActions(actions) {
     .map(a => (
       ['move', 'forward'].includes(a.type) && typeof a.value === 'string'
         ? { ...a, value: a.value.trim() }
-        : a
+        : NATIVE_LABEL_ACTIONS.has(a.type) && typeof a.value === 'string' ? { ...a, value: a.value.toLowerCase() } : a
     ));
 }
 
@@ -99,6 +112,14 @@ router.get('/', async (req, res) => {
       'SELECT * FROM inbox_rules WHERE user_id = $1 ORDER BY priority ASC, created_at ASC',
       [req.session.userId]
     );
+    const refs = result.rows.flatMap(rule => extractNativeLabelReferences(rule));
+    if (refs.length) {
+      const labels = await query('SELECT l.id,l.account_id,l.full_path FROM mail_labels l JOIN email_accounts a ON a.id=l.account_id WHERE a.user_id=$1 AND l.id=ANY($2::uuid[])', [req.session.userId, [...new Set(refs)]]);
+      for (const rule of result.rows) rule.nativeLabelReferences = extractNativeLabelReferences(rule).map(id => {
+        const label = labels.rows.find(row => row.id === id && row.account_id === rule.account_id);
+        return { id, path: label?.full_path ?? null, missing: !label };
+      });
+    }
     res.json(result.rows);
   } catch (err) {
     console.error('GET /rules error:', err.message);
@@ -285,15 +306,16 @@ router.post('/:id/run', async (req, res) => {
   const imapMgr = req.app.get('imapManager');
   if (!imapMgr) return res.status(503).json({ error: 'Mail engine is unavailable' });
   try {
-    const result = await query('SELECT * FROM inbox_rules WHERE id = $1 AND user_id = $2', [req.params.id, userId]);
+    const result = await query('SELECT *,updated_at::text AS rule_revision FROM inbox_rules WHERE id = $1 AND user_id = $2', [req.params.id, userId]);
     const rule = result.rows[0];
     if (!rule) return res.status(404).json({ error: 'Rule not found' });
     if (!rule.enabled) return res.status(400).json({ error: 'Enable the rule before applying it to existing mail.' });
-    const actions = new Set(['mark_read', 'star', 'archive', 'delete', 'move', 'set_category']);
+    const actions = new Set(['mark_read', 'star', 'archive', 'delete', 'move', 'set_category', 'apply_native_label', 'remove_native_label']);
     if (!Array.isArray(rule.conditions) || !rule.conditions.length || rule.conditions.some(c => !validHistoricalCondition(c)) ||
         !Array.isArray(rule.actions) || !rule.actions.length || rule.actions.some(a => !a || !actions.has(a.type) || (a.type === 'move' && (!rule.account_id || typeof a.value !== 'string' || !a.value.trim()))) || validateActions(rule.actions)) {
       return res.status(400).json({ error: 'This historical run supports sender, recipient, subject, attachment and read-status conditions, with read, star, archive, delete, move or category actions. Forwarding and body/header conditions are not supported.' });
     }
+    await validateNativeRuleForRun(userId, rule);
     const scope = await resolveRuleSearchAccounts(userId, req.body || {}, rule.account_id);
     if (scope.error) return res.status(scope.status).json({ error: scope.error });
     const accountIds = scope.accountIds;
@@ -306,7 +328,7 @@ router.post('/:id/run', async (req, res) => {
     (async () => {
       try {
         const totals = await runRulesSweep(userId, accountIds, imapMgr, rule, run);
-        Object.assign(run, totals, { status: totals.cancelled ? 'cancelled' : totals.failed ? 'failed' : totals.identityPending ? 'pending_recovery' : 'completed', finishedAt: new Date().toISOString() });
+        Object.assign(run, totals, { status: totals.cancelled ? 'cancelled' : totals.identityPending ? 'pending_recovery' : totals.failed ? 'failed' : 'completed', finishedAt: new Date().toISOString() });
         imapMgr.broadcast?.({ type: 'rules_run_complete', ok: run.status === 'completed', ...publicRun(run) }, userId);
       } catch (err) {
         console.error('Targeted rules sweep error:', err.message);
@@ -315,6 +337,7 @@ router.post('/:id/run', async (req, res) => {
       } finally { runInFlight.delete(userId); }
     })();
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
     console.error('POST /rules/:id/run error:', err.message);
     return res.status(500).json({ error: 'Failed to start the filter run' });
   }
@@ -324,7 +347,7 @@ router.post('/:id/run', async (req, res) => {
 // in-process work; a missing status must never be interpreted as permission to replay.
 const targetedRuns = new Map();
 const publicRun = run => {
-  return Object.fromEntries(Object.entries(run).filter(([key]) => key !== 'cancelRequested'));
+  return Object.fromEntries(Object.entries(run).filter(([key]) => !['cancelRequested', 'recoveryRequests'].includes(key)));
 };
 function cancelActiveRuleRun(userId, ruleId) {
   const run = targetedRuns.get(userId);
@@ -362,11 +385,11 @@ async function runRulesSweep(userId, accountIds, imapMgr, rule = null, run = nul
   let cancelled = false;
   const shouldContinue = async () => {
     if (run?.cancelRequested) { cancelled = true; return false; }
-    const current = await query('SELECT enabled, updated_at FROM inbox_rules WHERE id = $1 AND user_id = $2', [rule.id, userId]);
+    const current = await query('SELECT enabled, updated_at,updated_at::text AS rule_revision FROM inbox_rules WHERE id = $1 AND user_id = $2', [rule.id, userId]);
     const row = current.rows[0];
     // Cancellation may arrive while the revision read is in flight.
     if (run?.cancelRequested) { cancelled = true; return false; }
-    if (!row?.enabled || (rule.updated_at && new Date(row.updated_at).getTime() !== new Date(rule.updated_at).getTime())) {
+    if (!row?.enabled || (rule.rule_revision && row.rule_revision !== rule.rule_revision) || (rule.updated_at && new Date(row.updated_at).getTime() !== new Date(rule.updated_at).getTime())) {
       cancelled = true;
       return false;
     }
@@ -396,7 +419,9 @@ async function runRulesSweep(userId, accountIds, imapMgr, rule = null, run = nul
       while (true) {
         if (rule && !(await shouldContinue())) break;
         const msgResult = await query(
-          `SELECT id, uid, folder, from_email, from_name, to_addresses, subject, has_attachments, is_read
+          `SELECT id, uid, folder, account_id,entity_id,storage_generation,uid_validity,
+             (SELECT e.metadata_version::text FROM message_entities e WHERE e.id=messages.entity_id AND e.account_id=messages.account_id AND e.storage_generation=messages.storage_generation AND e.canonical_entity_id IS NULL) AS metadata_version,
+             from_email, from_name, to_addresses, subject, has_attachments, is_read
            FROM messages
            WHERE account_id = $1 AND lower(folder) = 'inbox' AND is_deleted = false
              ${lastId ? 'AND id > $3' : ''}
@@ -419,6 +444,8 @@ async function runRulesSweep(userId, accountIds, imapMgr, rule = null, run = nul
             }
           } catch { /* malformed to_addresses — leave toArr empty */ }
           return {
+            ...row,
+            _nativeLabelProof: row.entity_id && row.metadata_version != null ? { source: { id: row.id, account_id: row.account_id, entity_id: row.entity_id, canonicalEntityId: row.entity_id, storage_generation: row.storage_generation, folder: row.folder, uid_validity: String(row.uid_validity), uid: String(row.uid) }, expectedMetadataVersion: row.metadata_version } : null,
             id: row.id,
             uid: row.uid,
             folder: row.folder,
@@ -441,6 +468,9 @@ async function runRulesSweep(userId, accountIds, imapMgr, rule = null, run = nul
         matched += rule ? (result.matchedCount || 0) : before - result.remaining.length;
         failed += result.failedCount || 0;
         pendingCount += result.pendingIds?.length ? new Set(result.pendingIds).size : (result.identityPending ? 1 : 0);
+        if (run && result.nativeLabelRecovery?.length) {
+          run.recoveryRequests = [...(run.recoveryRequests || []), ...result.nativeLabelRecovery].slice(0, 100);
+        }
         cancelled ||= !!result.cancelled;
         if (run) Object.assign(run, { processed, matched, failed, pendingCount, identityPending: pendingCount > 0 });
 
@@ -463,6 +493,10 @@ router.post('/', async (req, res) => {
   if (!Array.isArray(conditions) || !Array.isArray(actions)) {
     return res.status(400).json({ error: 'conditions and actions must be arrays' });
   }
+  if (actions.some(action => NATIVE_LABEL_ACTIONS.has(action?.type))) {
+    try { validateNativeLabelRuleShape({ conditions, actions, condition_logic: conditionLogic }); }
+    catch (error) { return res.status(error.status).json({ error: error.message, code: error.code }); }
+  }
   const conditionError = validateConditions(conditions);
   if (conditionError) return res.status(400).json({ error: conditionError });
   let normalizedActions = normalizeActions(actions);
@@ -477,6 +511,10 @@ router.post('/', async (req, res) => {
       if (!accountId || scope.accountIds.length !== 1 || scope.accountIds[0] !== accountId) {
         return res.status(400).json({ error: 'Choose one displayed account for this filter.' });
       }
+    }
+    if (extractNativeLabelReferences({ conditions, actions: normalizedActions }).length) {
+      const saved = await saveNativeLabelRule(req.session.userId, null, { ...req.body, actions: normalizedActions });
+      return res.status(201).json(saved);
     }
     let storageGeneration = null;
     if (accountId) {
@@ -523,6 +561,7 @@ router.post('/', async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
     const conflict = accountJobGenerationConflict(err, 'rule');
     if (conflict) return res.status(409).json(conflict);
     console.error('POST /rules error:', err.message);
@@ -535,6 +574,10 @@ router.put('/:id', async (req, res) => {
   if (!Array.isArray(conditions) || !Array.isArray(actions)) {
     return res.status(400).json({ error: 'conditions and actions must be arrays' });
   }
+  if (actions.some(action => NATIVE_LABEL_ACTIONS.has(action?.type))) {
+    try { validateNativeLabelRuleShape({ conditions, actions, condition_logic: conditionLogic }); }
+    catch (error) { return res.status(error.status).json({ error: error.message, code: error.code }); }
+  }
   const conditionError = validateConditions(conditions);
   if (conditionError) return res.status(400).json({ error: conditionError });
   let normalizedActions = normalizeActions(actions);
@@ -543,6 +586,12 @@ router.put('/:id', async (req, res) => {
   normalizedActions = normalizedActions
     .filter(a => accountId || a.type !== 'move');
   try {
+    const previous = await query('SELECT * FROM inbox_rules WHERE id=$1 AND user_id=$2', [req.params.id, req.session.userId]);
+    if (extractNativeLabelReferences({ conditions, actions: normalizedActions }).length || (previous.rows[0] && extractNativeLabelReferences(previous.rows[0]).length)) {
+      const saved = await saveNativeLabelRule(req.session.userId, req.params.id, { ...req.body, actions: normalizedActions });
+      cancelActiveRuleRun(req.session.userId, req.params.id);
+      return res.json(saved);
+    }
     let storageGeneration = null;
     if (accountId) {
       const owned = await findOwnedAccount(req.session.userId, accountId, { columns: 'id, storage_generation' });
@@ -586,6 +635,7 @@ router.put('/:id', async (req, res) => {
     cancelActiveRuleRun(req.session.userId, req.params.id);
     res.json(result.rows[0]);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
     const conflict = accountJobGenerationConflict(err, 'rule');
     if (conflict) return res.status(409).json(conflict);
     console.error('PUT /rules/:id error:', err.message);

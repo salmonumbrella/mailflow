@@ -215,6 +215,7 @@ describe.skipIf(!databaseUrl)('async mail callers preserve captured mailbox iden
   });
 
   const starRule = () => ({ id: 'star-rule', user_id: account.user_id, account_id: account.id,
+    storage_generation: account.storage_generation,
     condition_logic: 'AND', conditions: [{ field: 'subject', operator: 'contains', value: 'viagra' }], actions: [{ type: 'star' }] });
 
   it.each(['generation', 'epoch'])('rule retries retain their original source after provider failure and %s change', async change => {

@@ -2581,5 +2581,27 @@
       "undoNeedsVerification": "标签撤销操作需要验证",
       "undoUncertain": "撤销结果未知。已原样保留该请求；请勿清除浏览器存储。"
     }
+  },
+  "nativeLabelRules": {
+    "saveUncertain": "保存结果未知。请先检查已保存的过滤器，再创建其他过滤器。未重新发起保存或运行。",
+    "searchAccount": "标签所属账户",
+    "searchLabel": "MailFlow 标签",
+    "searchHelp": "label: 接受标签 ID、准确的完整路径或唯一的短名称。仅匹配直接分配了该标签的邮件。标签名称有歧义或标签不存在时会报错。在统一搜索中，排除条件的结果可能包含其他账户中身份已验证的邮件。未验证的身份仍视为未知。",
+    "apply": "应用 MailFlow 标签",
+    "remove": "移除 MailFlow 标签",
+    "partialCoverage": "部分缓存邮件用于标签匹配的身份尚未验证。标签搜索结果（包括排除条件的结果）可能不完整。此搜索不会检索邮件服务商处的所有邮件。",
+    "cacheCoverage": "标签仅针对当前已同步的缓存完成了验证。此搜索不会检索邮件服务商处的所有邮件。",
+    "choose": "选择 MailFlow 标签…",
+    "missing": "标签缺失。请先修复此规则，再启用它。",
+    "requiresAccount": "请选择账户以使用 MailFlow 原生标签。",
+    "accountChanged": "标签所属账户已更改或不可用。请重新打开编辑器，并重新选择该账户的标签。",
+    "unverified": "用于标签匹配的身份尚未验证。请先重新加载标签，再保存。",
+    "conflicting": "一条规则不能同时应用和移除同一标签。",
+    "coverageCount": "身份未验证：{{total}} 封缓存邮件中有 {{unavailable}} 封。",
+    "emptyPartial": "可用的索引数据中没有匹配结果。用于标签匹配的身份尚未验证的邮件仍可能符合条件。"
+  },
+  "gmailSearch": {
+    "supportedSearchOperatorsWithSize": "MailFlow 支持 from:、to:、subject:、has:attachment、is:read/unread/starred、before:、after: 和 in:。还支持 OR、AND、圆括号、花括号分组、filename:、category: 和 newer_than:/older_than:（d、m、y）。分类使用 MailFlow 中的名称。size: 和 larger: 表示严格大于；smaller: 表示严格小于。label: 用于搜索 MailFlow 原生标签。不索引重要性。附件文件名和邮件正文的搜索取决于已同步的内容。",
+    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "对现有邮件运行过滤器时，仅处理收件箱，且不会运行其他过滤器。MailFlow 原生标签操作仅适用于指定账户，不会同步邮件服务商的标签。MailFlow 规则引擎不支持标签条件、重要性和“永不标记为垃圾邮件”。可在 MailFlow 规则中配置转发。"
   }
 }

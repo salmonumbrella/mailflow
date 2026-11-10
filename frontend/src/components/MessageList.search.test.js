@@ -313,7 +313,8 @@ describe('synchronized-cache size coverage', () => {
     await mount(); await search('-larger:2M'); await settle();
     await respond({ messages: [], sizeIndex: partialSizeIndex });
     assert.deepEqual(useStore.getState().searchSizeIndex, partialSizeIndex);
-    assert.match(text(), /unknown sizes/);
+    assert.match(text(), /Messages with unknown sizes may still match/);
+    assert.doesNotMatch(text(), /Messages with unverified label identities may still match/);
     assert.match(text(), /does not cover all mail on your provider/);
     assert.match(text(), /No matches in the available indexed data/);
     await search('subject:invoice');
@@ -337,5 +338,42 @@ describe('synchronized-cache size coverage', () => {
     await settle(); await respond({ messages: [], sizeIndex: partialSizeIndex });
     await React.act(async () => { stale.resolve({ messages: [], sizeIndex: completeSizeIndex }); await new Promise(r => setTimeout(r, 0)); });
     assert.deepEqual(useStore.getState().searchSizeIndex, partialSizeIndex);
+  });
+});
+
+const partialLabelIndex = { state: 'partial', scope: 'selected-folder-synchronized-cache', providerComplete: false, directMembershipOnly: true, total: 9, known: 7, unavailable: 2 };
+const completeLabelIndex = { ...partialLabelIndex, state: 'complete-for-cache', known: 9, unavailable: 0 };
+describe('native label cache search coverage', () => {
+  test('empty label results preserve the partial cache warning beside size coverage and clear both for new queries', async () => {
+    await mount(); await search('-label:Receipts larger:2M'); await settle();
+    await respond({ messages: [], labelIndex: partialLabelIndex, sizeIndex: partialSizeIndex });
+    assert.deepEqual(useStore.getState().searchLabelIndex, partialLabelIndex);
+    assert.match(text(), /unverified label identities/);
+    assert.match(text(), /unknown sizes/);
+    assert.match(text(), /Messages with unverified label identities may still match/);
+    assert.doesNotMatch(text(), /Messages with unknown sizes may still match/);
+    await search('from:alice');
+    assert.equal(useStore.getState().searchLabelIndex, null);
+    assert.equal(useStore.getState().searchSizeIndex, null);
+    await settle(); await respond({ messages: [] });
+  });
+  test('later empty pages update label coverage and stale account responses cannot overwrite it', async () => {
+    await mount();
+    await React.act(async () => useStore.setState({ pageSize: 1 }));
+    await search('label:Receipts'); await settle();
+    await respond({ messages: [hit('first')], labelIndex: partialLabelIndex });
+    const more = [...container().querySelectorAll('button')].find(b => /messageList\.loadMore/.test(b.textContent));
+    await React.act(async () => more.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })));
+    await respond({ messages: [], labelIndex: completeLabelIndex });
+    assert.deepEqual(useStore.getState().searchLabelIndex, completeLabelIndex);
+    assert.match(text(), /verified for this synchronized cache only/);
+    await search('-label:Receipts'); await settle();
+    const stale = pending.shift();
+    await React.act(async () => useStore.setState({ selectedAccountId: null }));
+    await settle(); await respond({ messages: [], labelIndex: partialLabelIndex });
+    await React.act(async () => { stale.resolve({ messages: [], labelIndex: completeLabelIndex }); await new Promise(resolve => setTimeout(resolve, 0)); });
+    assert.deepEqual(useStore.getState().searchLabelIndex, partialLabelIndex);
+    assert.match(text(), /Messages with unverified label identities may still match/);
+    assert.doesNotMatch(text(), /Messages with unknown sizes may still match/);
   });
 });

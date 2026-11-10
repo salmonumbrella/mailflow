@@ -33,7 +33,8 @@ import { usePushNotifications } from '../hooks/usePushNotifications.js';
 import SignatureEditor from './SignatureEditor.jsx';
 import DiagnosticsReportModal from './DiagnosticsReportModal.jsx';
 import { getEffectiveShortcuts, getGroupedActions, getShortcutConflicts, shortcutActionText, shortcutBindingFromEvent, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
-import { isValidForwardAddress } from '../utils/ruleActions.js';
+import { isValidForwardAddress, isNativeLabelAction, nativeRuleActionError, ruleActionsForAccount } from '../utils/ruleActions.js';
+import NativeRuleLabelSelect from './NativeRuleLabelSelect.jsx';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import AdminUserEditor from './AdminUserEditor.jsx';
 import AccountErrorCallout from './AccountErrorCallout.jsx';
@@ -6023,6 +6024,8 @@ function RulesTab() {
   const [formData, setFormData] = useState(null);
   const [formError, setFormError] = useState('');
   const [formSaving, setFormSaving] = useState(false);
+  const savingRule = useRef(false);
+  const [ruleError, setRuleError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [runningRules, setRunningRules] = useState(false);
   const [runResult, setRunResult] = useState(null);
@@ -6119,6 +6122,7 @@ function RulesTab() {
     setFormData({
       name: rule.name,
       accountId: rule.account_id || '',
+      expectedStorageGeneration: rule.storage_generation,
       conditionLogic: rule.condition_logic || 'AND',
       conditions: Array.isArray(rule.conditions) ? rule.conditions : [],
       actions,
@@ -6138,11 +6142,14 @@ function RulesTab() {
   }
 
   async function handleToggle(rule) {
+    if (savingRule.current) return;
+    savingRule.current = true; setRuleError('');
     const updated = { ...rule, enabled: !rule.enabled };
     try {
       const saved = await api.updateRule(rule.id, {
         name: rule.name,
         accountId: rule.account_id || null,
+        expectedStorageGeneration: rule.storage_generation,
         conditionLogic: rule.condition_logic,
         conditions: rule.conditions,
         actions: rule.actions,
@@ -6150,7 +6157,8 @@ function RulesTab() {
         stopProcessing: rule.stop_processing,
       });
       setRules(prev => prev.map(r => r.id === rule.id ? saved : r));
-    } catch { /* intentional */ }
+    } catch (error) { setRuleError(error.message || t('admin.rules.errorSave')); }
+    finally { savingRule.current = false; }
   }
 
   async function handleDelete(id) {
@@ -6162,6 +6170,7 @@ function RulesTab() {
   }
 
   async function handleSave() {
+    if (savingRule.current) return;
     const { name, conditionLogic, conditions, actions, accountId, enabled, stopProcessing } = formData;
     if (!name.trim() || conditions.length === 0 || actions.length === 0) {
       setFormError(t('admin.rules.errorRequired'));
@@ -6177,11 +6186,15 @@ function RulesTab() {
       setFormError(t('admin.rules.errorForwardEmail'));
       return;
     }
-    setFormSaving(true);
+    const state = useStore.getState();
+    const nativeError = nativeRuleActionError({ actions, accountId, expectedStorageGeneration: formData.expectedStorageGeneration, accounts: state.accounts, snapshots: state.nativeLabelSnapshots });
+    if (nativeError) { setFormError(t(nativeError)); return; }
+    savingRule.current = true; setFormSaving(true);
     setFormError('');
     try {
       const payload = {
         name: name.trim(),
+        expectedStorageGeneration: formData.expectedStorageGeneration,
         accountId: accountId || null,
         conditionLogic,
         conditions,
@@ -6197,10 +6210,10 @@ function RulesTab() {
         setRules(prev => prev.map(r => r.id === formId ? updated : r));
       }
       closeForm();
-    } catch {
-      setFormError(t('admin.rules.errorSave'));
+    } catch (error) {
+      setFormError(error.message || t('admin.rules.errorSave'));
     } finally {
-      setFormSaving(false);
+      savingRule.current = false; setFormSaving(false);
     }
   }
 
@@ -6276,6 +6289,15 @@ function RulesTab() {
     const labels = { mark_read: t('admin.rules.actionMarkRead'), star: t('admin.rules.actionStar'), forward: t('admin.rules.actionForward'), archive: t('admin.rules.actionArchive'), delete: t('admin.rules.actionDelete'), move: t('admin.rules.actionMove'), set_category: t('admin.rules.actionSetCategory'), notify: t('admin.rules.actionNotify') };
     // Show the move destination and the category so same-named rules are tellable apart at a glance.
     return acts.map(a => {
+      if (isNativeLabelAction(a)) {
+        const snapshot = useStore.getState().nativeLabelSnapshots[rule.account_id];
+        const verified = snapshot?.storageGeneration === rule.storage_generation;
+        const live = verified && snapshot.labels.find(label => label.id === a.value);
+        const ref = rule.nativeLabelReferences?.find(item => item.id === a.value);
+        const path = verified ? live?.path || live?.name : ref?.path;
+        const missing = verified ? !live : ref?.missing;
+        return `${a.type === 'apply_native_label' ? t('nativeLabelRules.apply', { defaultValue: 'Apply MailFlow label' }) : t('nativeLabelRules.remove', { defaultValue: 'Remove MailFlow label' })} → ${path || (missing ? t('nativeLabelRules.missing', { defaultValue: 'Missing label. Repair this rule before enabling it.' }) : a.value)}`;
+      }
       if (a.type === 'move' && a.value) return `${labels.move} → ${a.value}`;
       if (a.type === 'set_category' && a.value) return `${labels.set_category} → ${t(`messageList.categories.${a.value}`)}`;
       return labels[a.type] || a.type;
@@ -6301,6 +6323,8 @@ function RulesTab() {
   const HEADER_OPERATORS = [...OPERATORS, { value: 'regex', label: t('admin.rules.opRegex') }];
   const RULE_CATEGORIES = ['primary', 'newsletter', 'promotion', 'automated', 'social'];
   const ACTION_TYPES = [
+    { type: 'apply_native_label', label: t('nativeLabelRules.apply', { defaultValue: 'Apply MailFlow label' }) },
+    { type: 'remove_native_label', label: t('nativeLabelRules.remove', { defaultValue: 'Remove MailFlow label' }) },
     { type: 'mark_read', label: t('admin.rules.actionMarkRead') },
     { type: 'star',      label: t('admin.rules.actionStar') },
     { type: 'forward',   label: t('admin.rules.actionForward') },
@@ -6342,9 +6366,8 @@ function RulesTab() {
               return {
                 ...p,
                 accountId: newAccountId,
-                actions: newAccountId
-                  ? p.actions.map(a => a.type === 'move' ? { ...a, value: '' } : a)
-                  : p.actions.filter(a => a.type !== 'move'),
+                expectedStorageGeneration: accounts.find(account => account.id === newAccountId)?.storage_generation || null,
+                actions: ruleActionsForAccount(p.actions, newAccountId),
               };
             })}
           >
@@ -6466,7 +6489,8 @@ function RulesTab() {
           {ACTION_TYPES.map(({ type, label }) => {
             const checked = fd.actions.some(a => a.type === type);
             const moveVal = fd.actions.find(a => a.type === 'move')?.value || '';
-            const moveDisabled = type === 'move' && !fd.accountId;
+            const native = isNativeLabelAction({ type });
+            const moveDisabled = (type === 'move' || native) && !fd.accountId;
             return (
               <div key={type} style={{ marginBottom: 8 }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: moveDisabled ? 'default' : 'pointer', fontSize: 13, opacity: moveDisabled ? 0.45 : 1 }}>
@@ -6475,9 +6499,10 @@ function RulesTab() {
                 </label>
                 {moveDisabled && (
                   <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginLeft: 22, marginTop: 2 }}>
-                    {t('admin.rules.actionMoveRequiresAccount')}
+                    {native ? t('nativeLabelRules.requiresAccount', { defaultValue: 'Choose an account to use native labels.' }) : t('admin.rules.actionMoveRequiresAccount')}
                   </div>
                 )}
+                {native && checked && fd.actions.map((action, index) => action.type === type && <NativeRuleLabelSelect key={index} accountId={fd.accountId} label={label} value={action.value} onChange={value => setFormData(current => ({ ...current, actions: current.actions.map((item, i) => i === index ? { ...item, value } : item) }))} style={{ ...inputStyle, marginTop: 6, marginLeft: 22 }} />)}
                 {type === 'move' && checked && (() => {
                   const allFolders = fd.accountId ? (storeFolders[fd.accountId] || []) : [];
                   const movableFolders = allFolders.filter(f => f.path && f.path !== 'INBOX');
@@ -6618,6 +6643,7 @@ function RulesTab() {
           {t('admin.rules.runResult', { matched: runResult.matched, processed: runResult.processed })}
         </div>
       )}
+      {ruleError && <div role="alert" style={{ fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>{ruleError}</div>}
       {runError && (
         <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>{runError}</div>
       )}
@@ -6698,6 +6724,7 @@ function RulesTab() {
                 </label>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{rule.name || '(unnamed)'}</div>
+                  {rule.nativeLabelReferences?.some(ref => ref.missing) && <div role="status" style={{ color: 'var(--red)', fontSize: 12 }}>{t('nativeLabelRules.missing', { defaultValue: 'Missing label. Repair this rule before enabling it.' })}</div>}
                   <div style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {conditionSummary(rule)} → {actionSummary(rule)}
                   </div>

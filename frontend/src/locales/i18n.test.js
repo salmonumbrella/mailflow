@@ -944,7 +944,8 @@ describe('i18n locale files', () => {
   });
 
   it('every native-label source key has a translation with matching interpolation in every locale', () => {
-    const sourceKeys = loadLiteralSourceTranslationKeys(['gmail.nativeLabels.', 'gmail.memberships.', 'gmail.labelNavigation.']);
+    const sourceKeys = loadLiteralSourceTranslationKeys(['gmail.nativeLabels.', 'gmail.memberships.', 'gmail.labelNavigation.', 'nativeLabelRules.', 'gmailSearch.supportedSearchOperatorsWithSize', 'gmailSearch.existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules']);
+    assert.ok(sourceKeys.includes('nativeLabelRules.coverageCount'), 'native search coverage strings must be translated');
     assert.ok(sourceKeys.length > 100, 'native-label coverage must include definition, membership, navigation and recovery strings');
     const placeholders = text => [...new Set([...text.matchAll(/{{\s*([\w]+)\s*}}/g)].map(match => match[1]))].sort();
     for (const key of sourceKeys) {

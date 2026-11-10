@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { searchQueryToFields, searchFieldsToQuery, searchQueryToRule, rememberSearch } from './gmailSearch.js';
+import { searchQueryToFields, searchFieldsToQuery, searchQueryToRule, rememberSearch, emptySearchFields } from './gmailSearch.js';
 
 test('advanced builder preserves repeated, negated and unfamiliar operators', () => {
   const query = 'from:"Alice Smith" from:bob -from:spam subject:"Quarterly report" has:attachment is:starred filename:pdf invoice -draft';
@@ -81,4 +81,12 @@ test('invalid size form values never disappear or round silently', () => {
 test('adding a size restriction constrains every branch of a preserved Boolean query', () => {
   const fields = { ...searchQueryToFields('from:alice OR from:bob'), sizeValue: '2', sizeUnit: 'MB' };
   assert.equal(searchFieldsToQuery(fields), 'larger:2000000 (from:alice OR from:bob)');
+});
+
+test('label criteria round-trip intact and unsupported native conditions never broaden saved filters', () => {
+  for (const query of ['label:00000000-0000-4000-8000-000000000001', 'label:"Parent/Child"', '-label:"Child"', 'from:alice OR label:one', 'from:alice label:one']) {
+    assert.equal(searchFieldsToQuery(searchQueryToFields(query)), query);
+    assert.throws(() => searchQueryToRule(query));
+  }
+  assert.equal(searchFieldsToQuery({ ...emptySearchFields(), label: '00000000-0000-4000-8000-000000000001' }), 'label:00000000-0000-4000-8000-000000000001');
 });

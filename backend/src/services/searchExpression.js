@@ -54,7 +54,9 @@ export function parseSearchExpression(raw) {
       let argument = match[2];
       if (argument.startsWith('"') && argument.endsWith('"')) argument = argument.slice(1, -1);
       if (!argument.trim()) throw new SearchQueryError('Search operators need a value.');
-      node = { type: 'filter', key: match[1].toLowerCase(), value: argument.toLowerCase().trim() };
+      const key = match[1].toLowerCase();
+      node = { type: 'filter', key, value: key === 'label'
+        ? argument.normalize('NFC').toLowerCase().normalize('NFC').trim() : argument.toLowerCase().trim() };
     } else {
       const phrase = value.startsWith('"') && value.endsWith('"');
       if (phrase) value = value.slice(1, -1);

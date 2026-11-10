@@ -2581,5 +2581,27 @@
       "undoNeedsVerification": "Das Rückgängigmachen der Labeländerung muss überprüft werden",
       "undoUncertain": "Das Ergebnis ist unbekannt. Die genaue Anfrage wurde aufbewahrt; lösche den Browserspeicher nicht."
     }
+  },
+  "nativeLabelRules": {
+    "saveUncertain": "Das Ergebnis des Speicherns ist unbekannt. Prüfe die gespeicherten Filter, bevor du einen weiteren erstellst. Weder das Speichern noch die Ausführung wurde erneut gestartet.",
+    "searchAccount": "Labelkonto",
+    "searchLabel": "MailFlow-Label",
+    "searchHelp": "label: akzeptiert eine Label-ID, den genauen vollständigen Pfad oder einen eindeutigen Kurznamen. Es werden nur direkte Zuordnungen gefunden. Mehrdeutige oder fehlende Labels führen zu Fehlern. Bei der kontenübergreifenden Suche können Ausschlüsse verifizierte Nachrichten anderer Konten einschließen. Nicht verifizierte Identitäten bleiben unbekannt.",
+    "apply": "MailFlow-Label zuweisen",
+    "remove": "MailFlow-Label entfernen",
+    "partialCoverage": "Bei einigen zwischengespeicherten Nachrichten sind die Identitäten für Labels nicht verifiziert. Label-Suchergebnisse einschließlich Ausschlüssen können unvollständig sein. Dabei werden nicht alle E-Mails bei deinem Anbieter durchsucht.",
+    "cacheCoverage": "Labels sind nur für diesen synchronisierten Cache verifiziert. Dabei werden nicht alle E-Mails bei deinem Anbieter durchsucht.",
+    "choose": "MailFlow-Label auswählen…",
+    "missing": "Label fehlt. Korrigiere diese Regel, bevor du sie aktivierst.",
+    "requiresAccount": "Wähle ein Konto aus, um MailFlow-eigene Labels zu verwenden.",
+    "accountChanged": "Das Labelkonto hat sich geändert oder ist nicht verfügbar. Öffne den Editor erneut und wähle die Labels dieses Kontos noch einmal aus.",
+    "unverified": "Die Identitäten für Labels sind nicht verifiziert. Lade die Labels vor dem Speichern erneut.",
+    "conflicting": "Eine Regel kann nicht dasselbe Label zuweisen und entfernen.",
+    "coverageCount": "Nicht verifizierte Identitäten: {{unavailable}} von {{total}} zwischengespeicherten Nachrichten.",
+    "emptyPartial": "Keine Treffer in den verfügbaren indexierten Daten. Nachrichten mit nicht verifizierten Identitäten für Labels könnten dennoch passen."
+  },
+  "gmailSearch": {
+    "supportedSearchOperatorsWithSize": "MailFlow unterstützt from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: und in:. OR, AND, Klammern, Gruppen in geschweiften Klammern, filename:, category: und newer_than:/older_than: (d, m, y) werden unterstützt. Kategorien verwenden die Namen aus MailFlow. size: und larger: bedeuten strikt größer als; smaller: bedeutet strikt kleiner als. label: durchsucht MailFlow-eigene Labels. Wichtigkeit wird nicht indexiert. Dateinamen von Anhängen und Nachrichtentext hängen von den synchronisierten Inhalten ab.",
+    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "Ausführungen auf vorhandenen Nachrichten erfassen nur den Posteingang und führen keine anderen Filter aus. Aktionen für MailFlow-eigene Labels sind kontospezifisch und synchronisieren keine Labels des Anbieters. Labelbedingungen, Wichtigkeit und „Nie als Spam markieren“ werden von der Regelverarbeitung in MailFlow nicht unterstützt. Weiterleitungen können in den MailFlow-Regeln eingerichtet werden."
   }
 }

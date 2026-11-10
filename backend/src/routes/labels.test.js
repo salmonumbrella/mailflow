@@ -84,7 +84,10 @@ describe('native label route security and validation', () => {
     expect(index.indexOf('mountApiAuth(app,')).toBeLessThan(index.indexOf("app.use('/api/labels', labelRoutes)"));
     const service = readFileSync(new URL('../services/nativeLabelDefinitions.js', import.meta.url), 'utf8');
     const imports = service.split('\n').filter(line => line.startsWith('import '));
-    expect(imports).toEqual(["import { createHash, randomUUID } from 'crypto';", "import { query, withTransaction } from './db.js';"]);
+    expect(imports).toEqual(["import { createHash, randomUUID } from 'crypto';", "import { query, withTransaction } from './db.js';", "import { findLabelRuleReferences } from './nativeLabelRuleReferences.js';"]);
+    const refs = readFileSync(new URL('../services/nativeLabelRuleReferences.js', import.meta.url), 'utf8');
+    expect(refs).not.toMatch(/(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:messages|folders)\b/i);
+    expect(refs).not.toMatch(/import .*?(?:imapManager|mailEngine|mailUtils)/);
     expect(service).not.toMatch(/(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:messages|folders)\b/i);
   });
 });

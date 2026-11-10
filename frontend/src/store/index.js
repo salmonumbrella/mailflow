@@ -168,7 +168,7 @@ export const useStore = create((set, get) => ({
       // preferences seeded from localStorage until loadPreferences ran.
       ...(state.user && state.user.id !== user?.id ? {
         activeLabel: null, nativeLabelFeed: null, nativeLabelSnapshots: {},
-        messages: [], searchResults: [], searchSizeIndex: null, searchQuery: '', selectedMessageId: null,
+        messages: [], searchResults: [], searchSizeIndex: null, searchLabelIndex: null, searchQuery: '', selectedMessageId: null,
         threadMessages: {}, expandedThreadId: null,
         accounts: [], accountsReady: false, folders: {},
         notifications: [], backfillProgress: {},
@@ -249,7 +249,7 @@ export const useStore = create((set, get) => ({
         serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
         isLocked: true,
         activeLabel: null, nativeLabelFeed: null, nativeLabelSnapshots: {},
-        messages: [], searchResults: [], searchSizeIndex: null, searchQuery: '',
+        messages: [], searchResults: [], searchSizeIndex: null, searchLabelIndex: null, searchQuery: '',
         accounts: [], accountsReady: false,
         folders: {}, selectedMessageId: null,
         unreadCounts: { total: 0, byAccount: {} },
@@ -330,7 +330,7 @@ export const useStore = create((set, get) => ({
     localStorage.setItem('mailflow_selected_account', view.accountId);
     localStorage.setItem('mailflow_selected_folder', 'INBOX');
     set(state => ({ activeLabel: { ...view }, labelNavigationReplace: false, selectedAccountId: view.accountId, selectedFolder: null,
-      searchQuery: '', searchResults: [], searchSizeIndex: null, selectedMessageId: null,
+      searchQuery: '', searchResults: [], searchSizeIndex: null, searchLabelIndex: null, selectedMessageId: null,
       messages: [], messagesTotal: 0, messagesOffset: 0, hasMoreMessages: true, nativeLabelFeed: null,
       expandedThreadId: null, threadMessages: {}, activeGtdTab: null, showContacts: false,
       messagesRefreshToken: state.messagesRefreshToken + 1,
@@ -747,14 +747,14 @@ export const useStore = create((set, get) => ({
   })),
   closeAllMessageWindows: () => set({ messageWindows: [] }),
   searchQuery: '',
-  setSearchQuery: (q) => set(state => q === state.searchQuery ? {} : { searchQuery: q, searchSizeIndex: null,
+  setSearchQuery: (q) => set(state => q === state.searchQuery ? {} : { searchQuery: q, searchSizeIndex: null, searchLabelIndex: null,
     ...(q.trim() && state.activeLabel ? { activeLabel: null, nativeLabelFeed: null, selectedFolder: 'INBOX', messages: [], selectedMessageId: null, messagesRefreshToken: state.messagesRefreshToken + 1 } : {}),
     replyDrafts: {}, replyDraftRevision: state.replyDraftRevision + 1 }),
   isSearching: false,
   setIsSearching: (v) => set({ isSearching: v }),
   searchResults: [],
-  searchSizeIndex: null,
-  setSearchResults: (r, sizeIndex = null) => set({ searchResults: r, searchSizeIndex: sizeIndex }),
+  searchSizeIndex: null, searchLabelIndex: null,
+  setSearchResults: (r, sizeIndex = null, labelIndex = null) => set({ searchResults: r, searchSizeIndex: sizeIndex, searchLabelIndex: labelIndex }),
 
   // Loading
   loadingMessages: false,

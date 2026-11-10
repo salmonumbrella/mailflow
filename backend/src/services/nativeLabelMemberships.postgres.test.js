@@ -10,10 +10,11 @@ vi.mock('./db.js', () => ({
     catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   },
 }));
+import { verifyNativeLabelRule } from './nativeLabelRuleReferences.js';
 import { runMigrations } from './migrations.js';
 import { readMailboxIdentity, observeMailboxIdentity, writeObservedMessage } from './messageIdentity.js';
 import { createDefinition, deleteDefinition, previewDeletion, updateDefinition } from './nativeLabelDefinitions.js';
-import { mutateMemberships, queryMemberships, validateMembershipRequest, undoMemberships, validateUndoRequest } from './nativeLabelMemberships.js';
+import { mutateMemberships, queryMemberships, validateMembershipRequest, undoMemberships, validateUndoRequest, captureRuleMembershipSource, mutateRuleMemberships } from './nativeLabelMemberships.js';
 const ADMIN_URL = process.env.MAILFLOW_TEST_DATABASE_URL;
 describe('native membership input boundaries', () => {
   it('rejects caller-provided Undo state and malformed identities before database access', () => {
@@ -61,6 +62,137 @@ describe.skipIf(!ADMIN_URL)('native label membership transactions on PostgreSQL'
   const request = (extra = {}) => ({ accountId: account.id, storageGeneration: account.storage_generation, targets: [{ entityId: message.entity_id, expectedMetadataVersion: '0' }], addLabelIds: [label.id], removeLabelIds: [], mutationId: randomUUID(), ...extra });
   const query = (targets = [message.entity_id]) => queryMemberships(user, { accountId: account.id, storageGeneration: account.storage_generation, targets: targets.map(entityId => ({ entityId })) });
   const version = async id => (await h.pool.query('SELECT metadata_version FROM message_entities WHERE id=$1', [id])).rows[0].metadata_version;
+  const originalTuple = (row = message) => Object.fromEntries(['id', 'account_id', 'entity_id', 'storage_generation', 'folder', 'uid_validity', 'uid'].map(key => [key, row[key]]));
+  const capture = () => captureRuleMembershipSource(user, originalTuple());
+  const ruleRequest = async (extraLabels = []) => {
+    const snapshot = await capture();
+    const { rows: [rule] } = await h.pool.query(`INSERT INTO inbox_rules(user_id,account_id,name,storage_generation,actions,conditions)
+      VALUES ($1,$2,'Captured',$3,$4::jsonb,'[{"field":"subject","operator":"contains","value":"Same"}]'::jsonb) RETURNING id,updated_at::text AS revision`,
+    [user, account.id, account.storage_generation, JSON.stringify([label.id, ...extraLabels].map(value => ({ type: 'apply_native_label', value })))]);
+    return { accountId: account.id, storageGeneration: account.storage_generation, ruleId: rule.id, ruleRevision: rule.revision,
+      mutationId: randomUUID(), source: snapshot.source, expectedMetadataVersion: snapshot.expectedMetadataVersion,
+      addLabelIds: [label.id, ...extraLabels], removeLabelIds: [] };
+  };
+  const verifyRule = verifyNativeLabelRule;
+  const mutateRule = (input, options = {}) => mutateRuleMemberships(user, input, { verifyRule, ...options });
+  const blockRuleOnAccount = async (input, change) => {
+    const blocker = await h.pool.connect();
+    await blocker.query('BEGIN');
+    await blocker.query('SELECT id FROM email_accounts WHERE id=$1 FOR UPDATE', [account.id]);
+    const pending = mutateRule(input).then(result => ({ result }), error => ({ error }));
+    try {
+      let waiting = 0;
+      for (let i = 0; i < 100; i++) {
+        waiting = Number((await h.pool.query(`SELECT COUNT(*) FROM pg_stat_activity
+          WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%FROM email_accounts%'`)).rows[0].count);
+        if (waiting) break;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBeGreaterThan(0);
+      await change(blocker);
+      await blocker.query('COMMIT');
+    } finally { await blocker.query('ROLLBACK'); blocker.release(); }
+    return pending;
+  };
+  it('captures exact persisted source and preserves grouped rule decisions, no-ops and confirmed versions', async () => {
+    expect(message.metadata_version).toBe('0');
+    const snap = await capture();
+    expect(snap).toMatchObject({ source: { id: message.id, entity_id: message.entity_id, canonicalEntityId: message.entity_id, uid_validity: '123', uid: '1' }, expectedMetadataVersion: '0', labelIds: [] });
+    const extra = (await createDefinition(user, { accountId: account.id, mutationId: randomUUID(), name: 'Other' })).result.label;
+    const input = await ruleRequest([extra.id]);
+    const before = (await h.pool.query('SELECT * FROM messages ORDER BY id')).rows;
+    const result = await mutateRule(input);
+    expect(result.result.targets[0]).toMatchObject({ metadataVersion: '1', labelIds: [label.id, extra.id].sort() });
+    expect((await h.pool.query('SELECT * FROM messages ORDER BY id')).rows).toEqual(before);
+    expect((await h.pool.query('SELECT * FROM mail_identity_operations')).rows).toHaveLength(0);
+    const noop = { ...input, mutationId: randomUUID(), expectedMetadataVersion: result.result.targets[0].metadataVersion };
+    expect((await mutateRule(noop)).result.targets[0].metadataVersion).toBe('2');
+    await expect(mutateRule({ ...input, mutationId: randomUUID() })).rejects.toMatchObject({ code: 'stale_metadata_version' });
+  });
+  it('rejects reuse of the original UID after cache replacement even when durable entity survives', async () => {
+    const input = await ruleRequest();
+    await h.pool.query('DELETE FROM messages WHERE id=$1', [message.id]);
+    const replacement = await observe(account, 1);
+    expect(replacement.entity_id).toBe(message.entity_id); expect(replacement.id).not.toBe(message.id);
+    await expect(mutateRule(input)).rejects.toMatchObject({ code: 'rule_source_changed' });
+    await expect(capture()).rejects.toMatchObject({ code: 'rule_source_changed' });
+    expect(await version(message.entity_id)).toBe('0');
+    expect((await h.pool.query('SELECT * FROM native_label_mutations')).rows).toHaveLength(0);
+  });
+  it.each(['id', 'account_id', 'entity_id', 'storage_generation', 'folder', 'uid_validity', 'uid', 'canonicalEntityId'])('refuses changed captured source field %s', async field => {
+    const input = await ruleRequest();
+    input.source[field] = ['folder'].includes(field) ? 'Archive' : ['uid', 'uid_validity'].includes(field) ? '999' : randomUUID();
+    await expect(mutateRule(input)).rejects.toMatchObject({ code: ['account_id', 'storage_generation'].includes(field) ? 'invalid_membership_request' : 'rule_source_changed' });
+    expect(await version(message.entity_id)).toBe('0');
+  });
+  it('validates source, rule status and metadata after winning the account lock', async () => {
+    const input = await ruleRequest();
+    const disabled = await blockRuleOnAccount(input, client => client.query('UPDATE inbox_rules SET enabled=false WHERE id=$1', [input.ruleId]));
+    expect(disabled.error).toMatchObject({ code: 'rule_changed' });
+    await h.pool.query('UPDATE inbox_rules SET enabled=true WHERE id=$1', [input.ruleId]);
+    const edited = await blockRuleOnAccount(input, client => client.query('UPDATE message_entities SET metadata_version=metadata_version+1 WHERE id=$1', [message.entity_id]));
+    expect(edited.error).toMatchObject({ code: 'stale_metadata_version' });
+    const removed = await blockRuleOnAccount(input, client => client.query('DELETE FROM messages WHERE id=$1', [message.id]));
+    expect(removed.error).toMatchObject({ code: 'rule_source_changed' });
+    expect((await h.pool.query('SELECT * FROM native_label_mutations')).rows).toHaveLength(0);
+  });
+  it('rejects exact revision, account ownership and persisted action drift through the real verifier', async () => {
+    const input = await ruleRequest();
+    await expect(mutateRule({ ...input, ruleRevision: `${input.ruleRevision}0` })).rejects.toMatchObject({ code: 'rule_changed' });
+    await expect(mutateRule({ ...input, ruleId: randomUUID() })).rejects.toMatchObject({ code: 'rule_changed' });
+    await expect(mutateRuleMemberships(stranger, input, { verifyRule })).rejects.toMatchObject({ code: 'not_found' });
+    await expect(mutateRule({ ...input, addLabelIds: [], removeLabelIds: [label.id] })).rejects.toMatchObject({ code: 'rule_changed' });
+    const changed = await blockRuleOnAccount(input, client => client.query("UPDATE inbox_rules SET updated_at=updated_at+INTERVAL '1 microsecond' WHERE id=$1", [input.ruleId]));
+    expect(changed.error).toMatchObject({ code: 'rule_changed' });
+    expect(await version(message.entity_id)).toBe('0');
+    expect((await h.pool.query('SELECT * FROM native_label_mutations')).rows).toHaveLength(0);
+  });
+  it('refuses late canonical alias changes and stale epochs instead of retargeting rules', async () => {
+    const input = await ruleRequest();
+    await h.pool.query('UPDATE message_entities SET canonical_entity_id=$2 WHERE id=$1', [message.entity_id, second.entity_id]);
+    await expect(mutateRule(input)).rejects.toMatchObject({ code: 'rule_source_changed' });
+    await h.pool.query('UPDATE message_entities SET canonical_entity_id=NULL WHERE id=$1', [message.entity_id]);
+    await h.pool.query('UPDATE mailbox_identity_epochs SET uid_validity=124 WHERE account_id=$1', [account.id]);
+    await expect(mutateRule(input)).rejects.toMatchObject({ code: 'rule_source_changed' });
+    expect(await version(message.entity_id)).toBe('0'); expect(await version(second.entity_id)).toBe('0');
+  });
+  it('replays exact rule journals once with owner-scoped postcommit invalidation and permanent tombstones', async () => {
+    const input = await ruleRequest();
+    const broadcast = vi.fn(async (event, owner) => {
+      expect(owner).toBe(user);
+      expect(event).toEqual({ type: 'label_memberships_changed', accountId: account.id, storageGeneration: account.storage_generation, entityIds: [message.entity_id] });
+      expect((await h.pool.query('SELECT response FROM native_label_mutations WHERE mutation_id=$1', [input.mutationId])).rows).toHaveLength(1);
+    });
+    const [a, b] = await Promise.all([mutateRule(input, { broadcast }), mutateRule(input, { broadcast })]);
+    expect(a.result).toEqual(b.result); expect([a.changed, b.changed].sort()).toEqual([false, true]); expect(broadcast).toHaveBeenCalledTimes(1);
+    await h.pool.query('DELETE FROM messages WHERE id=$1', [message.id]);
+    await h.pool.query('UPDATE inbox_rules SET enabled=false,updated_at=NOW() WHERE id=$1', [input.ruleId]);
+    await h.pool.query('UPDATE email_accounts SET storage_generation=$2 WHERE id=$1', [account.id, randomUUID()]);
+    expect((await mutateRule(input, { broadcast })).result).toEqual(a.result);
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    await expect(mutateRule({ ...input, ruleRevision: 'different' })).rejects.toMatchObject({ code: 'mutation_conflict' });
+    await expect(mutateMemberships(user, request({ mutationId: input.mutationId }))).rejects.toMatchObject({ code: 'mutation_conflict' });
+    await h.pool.query('UPDATE native_label_mutations SET response=NULL,undo_state=NULL WHERE mutation_id=$1', [input.mutationId]);
+    await expect(mutateRule(input)).rejects.toMatchObject({ code: 'mutation_expired' });
+    expect(await version(message.entity_id)).toBe('1');
+  });
+  it('keeps committed rule writes successful when notification fails and rejects unverified adapters', async () => {
+    const input = await ruleRequest();
+    await expect(mutateRuleMemberships(user, input)).rejects.toMatchObject({ code: 'invalid_membership_request' });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await mutateRule(input, { broadcast: () => { throw new Error('push failed'); } });
+    expect(result.changed).toBe(true); expect(await version(message.entity_id)).toBe('1');
+    expect(warning).toHaveBeenCalledOnce(); warning.mockRestore();
+  });
+  it('rejects captured old generation and deleted labels atomically', async () => {
+    const input = await ruleRequest();
+    await h.pool.query('UPDATE email_accounts SET storage_generation=$2 WHERE id=$1', [account.id, randomUUID()]);
+    await expect(mutateRule(input)).rejects.toMatchObject({ code: 'stale_generation' });
+    await h.pool.query('UPDATE email_accounts SET storage_generation=$2 WHERE id=$1', [account.id, account.storage_generation]);
+    await h.pool.query('DELETE FROM mail_labels WHERE id=$1', [label.id]);
+    await expect(mutateRule(input)).rejects.toMatchObject({ code: 'missing_label_reference' });
+    expect(await version(message.entity_id)).toBe('0');
+  });
   it('assigns only explicit entities and preserves exact large versions', async () => {
     await h.pool.query('UPDATE message_entities SET metadata_version=9007199254740993 WHERE id=$1', [message.entity_id]);
     const result = await mutateMemberships(user, request({ targets: [{ entityId: message.entity_id, expectedMetadataVersion: '9007199254740993' }] }));
@@ -107,7 +239,9 @@ describe.skipIf(!ADMIN_URL)('native label membership transactions on PostgreSQL'
     await h.pool.query('TRUNCATE messages, folders');
     expect((await query()).targets[0]).toMatchObject({ available: false, labelIds: [label.id], metadataVersion: '2' });
     await expect(mutateMemberships(user, request({ targets: [{ entityId: message.entity_id, expectedMetadataVersion: '2' }] }))).rejects.toMatchObject({ code: 'identity_unavailable' });
-    expect((await observe(account, 1)).entity_id).toBe(message.entity_id); expect((await query()).targets[0].available).toBe(true);
+    const rebound = await observe(account, 1);
+    expect(rebound.entity_id).toBe(message.entity_id); expect(rebound.metadata_version).toBe('2');
+    expect((await query()).targets[0].available).toBe(true);
   });
   it('checks current epochs and deleted source instead of trusting entity UUIDs', async () => {
     await h.pool.query('UPDATE messages SET is_deleted=true WHERE id=$1', [message.id]);

@@ -26,7 +26,7 @@ describe('search expression HTTP boundary', () => {
     expect(sql).toContain('AND m.is_deleted = false');
     expect(params).toEqual([['owned'], '%alice%', '%bob%', 50, 0]);
   });
-  it.each(['is:important', 'label:work', 'subject:invoice OR', 'after:2026-02-31'])('returns a useful 400 without querying messages for %s', async q => {
+  it.each(['is:important', 'subject:invoice OR', 'after:2026-02-31'])('returns a useful 400 without querying messages for %s', async q => {
     const response = await fetch(`${base}?${new URLSearchParams({ q })}`);
     expect(response.status).toBe(400);
     expect((await response.json()).error).toBeTruthy();

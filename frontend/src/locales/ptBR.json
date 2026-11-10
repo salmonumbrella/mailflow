@@ -2581,5 +2581,27 @@
       "undoNeedsVerification": "É necessário verificar a ação de desfazer marcadores",
       "undoUncertain": "O resultado é desconhecido. A solicitação exata foi mantida; não limpe o armazenamento do navegador."
     }
+  },
+  "nativeLabelRules": {
+    "saveUncertain": "O resultado do salvamento é desconhecido. Confira os filtros salvos antes de criar outro. Nenhum salvamento ou execução foi reiniciado.",
+    "searchAccount": "Conta do marcador",
+    "searchLabel": "Marcador do MailFlow",
+    "searchHelp": "label: aceita um ID de marcador, um caminho completo exato ou um nome curto exclusivo. Apenas associações diretas correspondem. Marcadores ambíguos ou ausentes geram erros. Na pesquisa unificada, as exclusões podem incluir mensagens verificadas de outras contas. Identidades não verificadas permanecem desconhecidas.",
+    "apply": "Aplicar marcador do MailFlow",
+    "remove": "Remover marcador do MailFlow",
+    "partialCoverage": "Algumas mensagens em cache têm identidades não verificadas para os marcadores. Os resultados por marcador, incluindo exclusões, podem estar incompletos. Esta pesquisa não abrange todos os e-mails no seu provedor.",
+    "cacheCoverage": "Os marcadores são verificados apenas para este cache sincronizado. Esta pesquisa não abrange todos os e-mails no seu provedor.",
+    "choose": "Escolha um marcador do MailFlow…",
+    "missing": "Marcador ausente. Corrija esta regra antes de ativá-la.",
+    "requiresAccount": "Escolha uma conta para usar os marcadores nativos do MailFlow.",
+    "accountChanged": "A conta do marcador mudou ou está indisponível. Abra o editor novamente e escolha outra vez os marcadores dessa conta.",
+    "unverified": "As identidades para os marcadores não foram verificadas. Recarregue os marcadores antes de salvar.",
+    "conflicting": "Uma regra não pode aplicar e remover o mesmo marcador.",
+    "coverageCount": "Identidades não verificadas: {{unavailable}} de {{total}} mensagens em cache.",
+    "emptyPartial": "Nenhuma correspondência nos dados indexados disponíveis. Mensagens com identidades não verificadas para os marcadores ainda podem corresponder."
+  },
+  "gmailSearch": {
+    "supportedSearchOperatorsWithSize": "O MailFlow oferece suporte a from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after: e in:. Também são aceitos OR, AND, parênteses, grupos entre chaves, filename:, category: e newer_than:/older_than: (d, m, y). As categorias usam os nomes do MailFlow. size: e larger: significam estritamente maior que; smaller: significa estritamente menor que. label: pesquisa marcadores nativos do MailFlow. A importância não é indexada. Os nomes dos arquivos anexos e o texto das mensagens dependem do conteúdo sincronizado.",
+    "existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules": "As execuções em mensagens existentes abrangem apenas a caixa de entrada e não executam seus outros filtros. As ações com marcadores nativos do MailFlow são específicas de cada conta e não sincronizam os marcadores do provedor. O mecanismo de regras do MailFlow não oferece suporte a condições de marcadores, importância nem à opção de nunca marcar como spam. O encaminhamento pode ser configurado nas regras do MailFlow."
   }
 }

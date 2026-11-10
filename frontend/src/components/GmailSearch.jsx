@@ -2,6 +2,8 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import NativeRuleLabelSelect from './NativeRuleLabelSelect.jsx';
+import { nativeRuleActionError } from '../utils/ruleActions.js';
 import { GMAIL_SENDER_FILTER_EVENT, gmailSenderFilterDetails } from '../utils/gmailSenderFilter.js';
 import { quoteSearch, refineSearchQuery, hasSearchRefinement, rememberSearch, searchFieldsToQuery, searchQueryToFields, searchQueryToRule } from '../utils/gmailSearch.js';
 
@@ -43,6 +45,10 @@ export default function GmailSearch({ query, onChange, inputRef }) {
   const [senderScope, setSenderScope] = useState(null);
   const [filterQuery, setFilterQuery] = useState('');
   const [busy, setBusy] = useState(false);
+  const saving = useRef(false);
+  const [saveUncertain, setSaveUncertain] = useState(false);
+  const [searchLabelAccount, setSearchLabelAccount] = useState(accountId || '');
+  const [filterGeneration, setFilterGeneration] = useState(null);
   const [applyExisting, setApplyExisting] = useState(false);
   const [savedRuleId, setSavedRuleId] = useState(null);
   const [filterScope, setFilterScope] = useState({ accounts: [], scopeAccountId: null });
@@ -74,7 +80,7 @@ export default function GmailSearch({ query, onChange, inputRef }) {
     try { rememberRun(await api.cancelRuleRun(run.ruleId, run.runId)); }
     catch (error) { rememberRun({ ...run, status: 'unknown', error: error.message }); }
   };
-  const [actions, setActions] = useState({ archive: false, mark_read: false, star: false, delete: false, category: '', move: '' });
+  const [actions, setActions] = useState({ archive: false, mark_read: false, star: false, delete: false, category: '', move: '', apply_native_label: '', remove_native_label: '' });
   const [name, setName] = useState('');
   const suggestions = [
     ...history.filter(item => !query || item.toLowerCase().includes(query.toLowerCase())).map(value => ({ value, history: true })),
@@ -108,7 +114,7 @@ export default function GmailSearch({ query, onChange, inputRef }) {
   const saveHistory = next => { setHistory(next); try { localStorage.setItem(historyKey, JSON.stringify(next)); } catch { /* Search still works without storage. */ } };
   const close = () => { setSenderScope(null); setOpen(null); input.current?.focus(); };
   const submit = value => { onChange(value); saveHistory(rememberSearch(history, value)); setOpen(null); input.current?.focus(); };
-  const advanced = () => { setSenderScope(null); setFields(searchQueryToFields(query)); setNotice(''); setOpen('advanced'); };
+  const advanced = () => { setSearchLabelAccount(accountId || ''); setSenderScope(null); setFields(searchQueryToFields(query)); setNotice(''); setOpen('advanced'); };
   useEffect(() => {
     const openSenderFilter = event => {
       if (busy || event.defaultPrevented) return;
@@ -136,16 +142,19 @@ export default function GmailSearch({ query, onChange, inputRef }) {
       if ((senderScope && senderScope.userId !== userId) || (scopeAccountId && !displayed.length)) throw new Error('The filter account is no longer available in this scope.');
       setFilterScope({ accounts: displayed, scopeAccountId, userId });
       setFilterAccountId(scopeAccountId || (displayed.length === 1 ? displayed[0].id : ''));
+      setFilterGeneration(displayed.find(account => account.id === (scopeAccountId || (displayed.length === 1 ? displayed[0].id : '')))?.storage_generation || null);
+      setSaveUncertain(false);
       runAttempt.current = null;
-      setFilterQuery(value); setName(value); setApplyExisting(false); setSavedRuleId(null); setActions({ archive: false, mark_read: false, star: false, delete: false, category: '', move: '' }); setNotice(''); setOpen('filter'); }
+      setFilterQuery(value); setName(value); setApplyExisting(false); setSavedRuleId(null); setActions({ archive: false, mark_read: false, star: false, delete: false, category: '', move: '', apply_native_label: '', remove_native_label: '' }); setNotice(''); setOpen('filter'); }
     catch (error) { setNotice(error.message); }
   };
   const saveFilter = async event => {
     event.preventDefault();
-    if (busy) return;
+    if (saving.current || busy || saveUncertain || (runAttempt.current && run?.runId === runAttempt.current)) return;
     const selected = ['archive', 'mark_read', 'star', 'delete'].filter(key => actions[key]).map(type => ({ type }));
     if (actions.category) selected.push({ type: 'set_category', value: actions.category });
     if (actions.move && filterAccountId) selected.push({ type: 'move', value: actions.move });
+    for (const type of ['apply_native_label', 'remove_native_label']) if (actions[type]) selected.push({ type, value: actions[type] });
     selected.sort((a, b) => Number(['archive', 'delete', 'move'].includes(a.type)) - Number(['archive', 'delete', 'move'].includes(b.type)));
     if (!filterAccountId) { setNotice('Choose an account from this search for the filter.'); return; }
     // Recheck the captured scope at submission: account removal/disablement while this dialog
@@ -157,12 +166,14 @@ export default function GmailSearch({ query, onChange, inputRef }) {
       || (filterScope.scopeAccountId ? filterScope.scopeAccountId !== filterAccountId : liveAccount.include_in_unified_inbox === false)) {
       setNotice('The filter account is no longer available in this scope.'); return;
     }
+    const nativeError = nativeRuleActionError({ actions: selected, accountId: filterAccountId, expectedStorageGeneration: filterGeneration, accounts: current.accounts, snapshots: current.nativeLabelSnapshots });
+    if (nativeError) { setNotice(t(nativeError)); return; }
     if (!selected.length) { setNotice('Select at least one filter action.'); return; }
-    setBusy(true); setNotice('');
+    saving.current = true; setBusy(true); setNotice('');
     try {
       let ruleId = savedRuleId;
       if (!ruleId) {
-        const rule = await api.createRule({ name: name.trim() || filterQuery, accountId: filterAccountId, searchScope: { accountIds: [filterAccountId], scopeAccountId: filterScope.scopeAccountId }, conditionLogic: 'AND', conditions: searchQueryToRule(filterQuery), actions: selected, enabled: true, stopProcessing: false });
+        const rule = await api.createRule({ name: name.trim() || filterQuery, accountId: filterAccountId, expectedStorageGeneration: filterGeneration, searchScope: { accountIds: [filterAccountId], scopeAccountId: filterScope.scopeAccountId }, conditionLogic: 'AND', conditions: searchQueryToRule(filterQuery), actions: selected, enabled: true, stopProcessing: false });
         ruleId = rule.id;
         setSavedRuleId(ruleId);
       }
@@ -187,8 +198,11 @@ export default function GmailSearch({ query, onChange, inputRef }) {
       }
       useStore.getState().addNotification({ title: 'Filter saved', body: applyExisting ? 'It will apply to new mail. The existing Inbox run has started; its result will appear when finished.' : 'It will apply to new incoming mail.' });
       close();
-    } catch (error) { setNotice(error.message || 'Could not save filter. Try again.'); }
-    finally { setBusy(false); }
+    } catch (error) {
+      const uncertain = !savedRuleId && !(error.status >= 400 && error.status < 500 && error.status !== 408);
+      if (uncertain) setSaveUncertain(true);
+      setNotice(uncertain ? `${error.message || ''} ${t('nativeLabelRules.saveUncertain', { defaultValue: 'The save result is unknown. Check saved filters before creating another; no save or run was restarted.' })}` : error.message);
+    } finally { saving.current = false; setBusy(false); }
   };
 
   return <div ref={root} className="mailflow-mail-search mailflow-gmail-search" onKeyDown={event => {
@@ -234,9 +248,12 @@ export default function GmailSearch({ query, onChange, inputRef }) {
       <label><span>{t("gmailSearch.dateWithin", { defaultValue: "Date within" })}</span><select aria-label={t("gmailSearch.dateWithin", { defaultValue: "Date within" })} value={fields.dateWithin} onChange={event => setField('dateWithin', event.target.value)}>{[['1', '1 day'], ['3', '3 days'], ['7', '1 week'], ['14', '2 weeks'], ['30', '1 month'], ['60', '2 months'], ['180', '6 months'], ['365', '1 year']].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><input type="date" aria-label={t("gmailSearch.date", { defaultValue: "Date" })} value={fields.date} onChange={event => setField('date', event.target.value)} /></label>
       {!fields.date && (fields.after || fields.before) && <div className="gmail-search-date-bounds"><label>{t("gmailSearch.after", { defaultValue: "After" })}<input aria-label={t("gmailSearch.after", { defaultValue: "After" })} type="date" value={fields.after} onChange={event => setField('after', event.target.value)}/></label><label>{t("gmailSearch.before", { defaultValue: "Before" })}<input aria-label={t("gmailSearch.before", { defaultValue: "Before" })} type="date" value={fields.before} onChange={event => setField('before', event.target.value)}/></label></div>}
       <label><span>{t("gmailSearch.search", { defaultValue: "Search" })}</span><select aria-label={t("gmailSearch.searchFolder", { defaultValue: "Search folder" })} value={fields.folder} onChange={event => setField('folder', event.target.value)}><option value="">{t("gmailSearch.currentSearchScope", { defaultValue: "Current search scope" })}</option><option value="all">{t("gmailSearch.allMailExceptTrash", { defaultValue: "All Mail (except Trash)" })}</option>{folderPaths.map(path => <option key={path} value={path}>{path}</option>)}</select></label>
+      <label><span>{t('nativeLabelRules.searchAccount', { defaultValue: 'Label account' })}</span><select aria-label={t('nativeLabelRules.searchAccount', { defaultValue: 'Label account' })} value={searchLabelAccount} onChange={event => { setSearchLabelAccount(event.target.value); setField('label', ''); }}><option value="">{t('gmailSearch.chooseAnAccount', { defaultValue: 'Choose an account…' })}</option>{accounts.filter(account => account.enabled !== false && (accountId ? account.id === accountId : account.include_in_unified_inbox !== false)).map(account => <option key={account.id} value={account.id}>{account.email_address || account.name || account.id}</option>)}</select></label>
+      <label><span>{t('nativeLabelRules.searchLabel', { defaultValue: 'MailFlow label' })}</span><NativeRuleLabelSelect accountId={searchLabelAccount} value={fields.label} label={t('nativeLabelRules.searchLabel', { defaultValue: 'MailFlow label' })} onChange={value => setField('label', value)} /></label>
+      <p className="gmail-search-note">{t('nativeLabelRules.searchHelp', { defaultValue: 'label: accepts a label ID, exact full path, or unique short name. Only direct membership matches. Ambiguous or missing labels are errors. In unified search, exclusions can include verified messages from other accounts. Unverified identities remain unknown.' })}</p>
       <label className="gmail-search-check"><input type="checkbox" checked={fields.attachment} onChange={event => setField('attachment', event.target.checked)} />{t("gmailSearch.hasAttachment", { defaultValue: "Has attachment" })}</label>
       {fields.extra && <label><span>{t("gmailSearch.otherTerms", { defaultValue: "Other terms" })}</span><input aria-label={t("gmailSearch.otherSearchTerms", { defaultValue: "Other search terms" })} value={fields.extra} onChange={event => setField('extra', event.target.value)} /></label>}
-      <p className="gmail-search-note">{t("gmailSearch.supportedSearchOperatorsWithSize", { defaultValue: "MailFlow supports from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after:, and in:. OR, AND, parentheses, curly-brace groups, filename:, category: and newer_than:/older_than: (d, m, y) are supported. Categories use MailFlow’s names. size: and larger: mean strictly greater than; smaller: means strictly less than. Labels and importance are not yet indexed. Attachment filenames and body text depend on synced content." })}</p>
+      <p className="gmail-search-note">{t("gmailSearch.supportedSearchOperatorsWithSize", { defaultValue: "MailFlow supports from:, to:, subject:, has:attachment, is:read/unread/starred, before:, after:, and in:. OR, AND, parentheses, curly-brace groups, filename:, category: and newer_than:/older_than: (d, m, y) are supported. Categories use MailFlow’s names. size: and larger: mean strictly greater than; smaller: means strictly less than. label: searches native MailFlow labels. Importance is not indexed. Attachment filenames and body text depend on synced content." })}</p>
       {notice && <p role="alert">{notice}</p>}
       <div className="gmail-search-actions"><button type="button" onClick={() => { close(); useStore.getState().setAdminTab('rules'); useStore.getState().setShowAdmin(true); }}>{t("gmailSearch.manageFilters", { defaultValue: "Manage filters" })}</button><button type="button" onClick={close}>{t("gmailSearch.cancel", { defaultValue: "Cancel" })}</button><button type="button" onClick={createFilter}>{t("gmailSearch.createFilter", { defaultValue: "Create filter" })}</button><button type="submit" className="gmail-search-primary">{t("gmailSearch.search", { defaultValue: "Search" })}</button></div>
     </form>}
@@ -244,20 +261,21 @@ export default function GmailSearch({ query, onChange, inputRef }) {
       <button type="button" disabled={busy || !!savedRuleId} onClick={() => { setNotice(''); setOpen('advanced'); }}>{t("gmailSearch.backToSearchOptions", { defaultValue: "‹ Back to search options" })}</button>
       <p>{t("gmailSearch.whenANewIncomingMessageMatches", { defaultValue: "When a new incoming message matches:" })}</p><p className="gmail-search-query">{filterQuery}</p>
       <fieldset disabled={busy || !!savedRuleId} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
-      <label>{t("gmailSearch.filterAccount", { defaultValue: "Filter account" })}<select aria-label={t("gmailSearch.filterAccount", { defaultValue: "Filter account" })} value={filterAccountId} onChange={event => { setFilterAccountId(event.target.value); setActions(current => ({ ...current, move: '' })); }}><option value="">{t("gmailSearch.chooseAnAccount", { defaultValue: "Choose an account…" })}</option>{filterScope.accounts.map(account => <option key={account.id} value={account.id}>{account.email_address || account.name || account.id}</option>)}</select></label>
+      <label>{t("gmailSearch.filterAccount", { defaultValue: "Filter account" })}<select aria-label={t("gmailSearch.filterAccount", { defaultValue: "Filter account" })} value={filterAccountId} onChange={event => { setFilterAccountId(event.target.value); setFilterGeneration(filterScope.accounts.find(account => account.id === event.target.value)?.storage_generation || null); setActions(current => ({ ...current, move: '', apply_native_label: '', remove_native_label: '' })); }}><option value="">{t("gmailSearch.chooseAnAccount", { defaultValue: "Choose an account…" })}</option>{filterScope.accounts.map(account => <option key={account.id} value={account.id}>{account.email_address || account.name || account.id}</option>)}</select></label>
       <p className="gmail-search-note">{t("gmailSearch.thisFilterAppliesOnlyToTheSelectedAccountForBothNewMailAndAnyExistingMessageRun", { defaultValue: "This filter applies only to the selected account, for both new mail and any existing-message run." })}</p>
       <label>{t("gmailSearch.filterName", { defaultValue: "Filter name" })}<input value={name} onChange={event => setName(event.target.value)} /></label>
       {[['archive', 'Skip the Inbox (Archive it)'], ['mark_read', 'Mark as read'], ['star', 'Star it'], ['delete', 'Delete it']].map(([key, label]) => <label className="gmail-search-check" key={key}><input type="checkbox" checked={actions[key]} onChange={event => setActions(current => ({ ...current, [key]: event.target.checked, ...(event.target.checked && ['archive', 'delete'].includes(key) ? { [key === 'archive' ? 'delete' : 'archive']: false, move: '' } : {}) }))}/>{label}</label>)}
       <label>{t("gmailSearch.moveToFolder", { defaultValue: "Move to folder" })}<select aria-label={t("gmailSearch.filterDestination", { defaultValue: "Filter destination" })} disabled={!filterAccountId} value={actions.move} onChange={event => setActions(current => ({ ...current, move: event.target.value, archive: false, delete: false }))}><option value="">{t("gmailSearch.chooseFolder", { defaultValue: "Choose folder…" })}</option>{(folders[filterAccountId] || []).filter(folder => !folder.no_select).map(folder => <option key={folder.path} value={folder.path}>{folder.path}</option>)}</select></label>
       {!filterAccountId && <p className="gmail-search-note">{t("gmailSearch.selectAnAccountToMoveIncomingMailToAFolder", { defaultValue: "Select an account to move incoming mail to a folder." })}</p>}
+      {['apply_native_label', 'remove_native_label'].map(type => <label key={type}><span>{type === 'apply_native_label' ? t('nativeLabelRules.apply', { defaultValue: 'Apply MailFlow label' }) : t('nativeLabelRules.remove', { defaultValue: 'Remove MailFlow label' })}</span><NativeRuleLabelSelect accountId={filterAccountId} value={actions[type]} label={type === 'apply_native_label' ? t('nativeLabelRules.apply', { defaultValue: 'Apply MailFlow label' }) : t('nativeLabelRules.remove', { defaultValue: 'Remove MailFlow label' })} onChange={value => setActions(current => ({ ...current, [type]: value }))} /></label>)}
       <label>{t("gmailSearch.categorizeAs", { defaultValue: "Categorize as" })}<select aria-label={t("gmailSearch.filterCategory", { defaultValue: "Filter category" })} value={actions.category} onChange={event => setActions(current => ({ ...current, category: event.target.value }))}><option value="">{t("gmailSearch.chooseCategory", { defaultValue: "Choose category…" })}</option>{['primary', 'newsletter', 'promotion', 'automated', 'social'].map(category => <option key={category} value={category}>{category}</option>)}</select></label>
       <label className="gmail-search-check"><input type="checkbox" checked={applyExisting} onChange={event => setApplyExisting(event.target.checked)}/>{t("gmailSearch.alsoApplyOnlyThisFilterToExistingMatchingInboxMessages", { defaultValue: "Also apply only this filter to existing matching Inbox messages" })}</label>
       </fieldset>
       <button type="button" disabled={busy} onClick={() => { close(); useStore.getState().setAdminTab('rules'); useStore.getState().setShowAdmin(true); }}>{t("gmailSearch.manageSavedFiltersInMailFlowRules", { defaultValue: "Manage saved filters in MailFlow Rules" })}</button>
-      <p className="gmail-search-note">{t("gmailSearch.existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules", { defaultValue: "Existing-message runs cover the Inbox only and do not run your other filters. Labels, importance and never-spam are not supported by MailFlow’s rules engine. Forwarding can be configured in MailFlow Rules." })}</p>
+      <p className="gmail-search-note">{t("gmailSearch.existingMessageRunsCoverTheInboxOnlyAndDoNotRunYourOtherFiltersLabelsImportanceAndNeverSpamAreNotSupportedByMailFlowSRulesEngineForwardingCanBeConfiguredInMailFlowRules", { defaultValue: "Existing-message runs cover the Inbox only and do not run your other filters. Native MailFlow label actions are account-specific and do not sync provider labels. Label conditions, importance and never-spam are not supported by MailFlow’s rules engine. Forwarding can be configured in MailFlow Rules." })}</p>
       {notice && <p role="alert">{notice}</p>}
       {run && run.runId === runAttempt.current && <div className="gmail-search-actions"><button type="button" onClick={() => checkRun(run)}>{t("gmailSearch.checkRunStatus", { defaultValue: "Check run status" })}</button>{['running', 'cancelling', 'unknown'].includes(run.status) && <button type="button" disabled={run.status === 'cancelling'} onClick={stopRun}>{t("gmailSearch.stopRun", { defaultValue: "Stop run" })}</button>}</div>}
-      <div className="gmail-search-actions"><button type="button" disabled={busy} onClick={close}>{t("gmailSearch.cancel", { defaultValue: "Cancel" })}</button><button type="submit" className="gmail-search-primary" disabled={busy || (!!runAttempt.current && run?.runId === runAttempt.current)}>{busy ? 'Saving…' : savedRuleId ? 'Retry applying filter' : 'Create filter'}</button></div>
+      <div className="gmail-search-actions"><button type="button" disabled={busy} onClick={close}>{t("gmailSearch.cancel", { defaultValue: "Cancel" })}</button><button type="submit" className="gmail-search-primary" disabled={busy || saveUncertain || (!!runAttempt.current && run?.runId === runAttempt.current)}>{busy ? 'Saving…' : savedRuleId ? 'Retry applying filter' : 'Create filter'}</button></div>
     </form>}
   </div>;
 }
