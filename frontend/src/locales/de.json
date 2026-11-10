@@ -2618,7 +2618,7 @@
       "close": "Schnelleinstellungen schließen",
       "see_all": "Alle Einstellungen anzeigen",
       "density": "Anzeigedichte",
-      "density_note": "Standard und Komfortabel verwenden derzeit denselben Zeilenabstand. Anhangvorschauen sind noch nicht verfügbar.",
+      "density_note": "Standard und Komfortabel verwenden derzeit denselben Zeilenabstand.",
       "local_preferences": "Einstellungen werden auf diesem Gerät sofort angewendet. Die Synchronisierung mit Ihrem Konto erfordert eine Verbindung.",
       "density_pending": "Anzeigedichte wird mit Ihrem Konto synchronisiert…",
       "density_failed": "Die Anzeigedichte ist auf diesem Gerät eingestellt, konnte aber nicht mit Ihrem Konto synchronisiert werden.",
@@ -2664,7 +2664,14 @@
     },
     "attachments": {
       "cachedDetails": "Zwischengespeicherte Anhänge nur für diese Nachricht; Angaben können unvollständig sein.",
-      "someNotShown": "Weitere Angaben zu zwischengespeicherten Anhängen werden nicht angezeigt."
+      "someNotShown": "Weitere Angaben zu zwischengespeicherten Anhängen werden nicht angezeigt.",
+      "previewFile": "Vorschau von {{name}} öffnen",
+      "downloadFile": "{{name}} herunterladen",
+      "unavailable": "Dieser Anhang wurde geändert oder ist nicht mehr verfügbar. Aktualisieren Sie die Liste und prüfen Sie sie, bevor Sie es erneut versuchen.",
+      "tooLarge": "Dieser Anhang ist zu groß zum Herunterladen.",
+      "failed": "Dieser Anhang konnte nicht heruntergeladen werden. Versuchen Sie es erneut.",
+      "retry": "Erneut versuchen",
+      "previewTooLarge": "Diese Datei ist zu groß für die Vorschau. Sie können sie stattdessen herunterladen."
     }
   },
   "nativeLabelRules": {

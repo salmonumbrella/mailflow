@@ -6,6 +6,7 @@ import { createNativeLabelFeed } from '../utils/nativeLabelFeed.js';
 import { labelViewKey, NATIVE_LABELS_CHANGED, nativeLabelActionsBlocked } from '../utils/nativeLabelNavigation.js';
 import NativeLabelChips from './NativeLabelChips.jsx';
 import GmailAttachmentChips from './GmailAttachmentChips.jsx';
+import { GmailAttachmentActionsProvider } from './GmailAttachmentActions.jsx';
 import GmailToolbar from './GmailToolbar.jsx';
 import { openGmailSenderFilter } from '../utils/gmailSenderFilter.js';
 import { quoteSearch } from '../utils/gmailSearch.js';
@@ -3475,6 +3476,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
   );
 
   return (
+    <GmailAttachmentActionsProvider listRef={listRef} viewKey={JSON.stringify([activeCategory, unreadOnly, currentPage])}>
     <div className="mailflow-message-list" style={{
       width: isMobile || isColumn || listFirst ? '100%' : 'var(--list-width)',
       minWidth: isMobile ? undefined : (isColumn ? undefined : 180),
@@ -5035,6 +5037,7 @@ function MailboxList({ gmailSearchTarget = null, focusSearchOnMount = false }) {
         </div>
       )}
     </div>
+    </GmailAttachmentActionsProvider>
   );
 }
 

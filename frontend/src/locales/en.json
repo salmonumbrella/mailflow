@@ -2618,7 +2618,7 @@
       "close": "Close quick settings",
       "see_all": "See all settings",
       "density": "Density",
-      "density_note": "Default and Comfortable currently use the same row spacing. Attachment previews are not yet available.",
+      "density_note": "Default and Comfortable currently use the same row spacing.",
       "local_preferences": "Preferences apply on this device immediately. Syncing them to your account requires a connection.",
       "density_pending": "Syncing density to your account…",
       "density_failed": "Density is applied on this device, but could not be synced to your account.",
@@ -2664,7 +2664,14 @@
     },
     "attachments": {
       "cachedDetails": "Cached attachments for this message only; details may be incomplete.",
-      "someNotShown": "Additional cached attachment details are not shown."
+      "someNotShown": "Additional cached attachment details are not shown.",
+      "previewFile": "Preview {{name}}",
+      "downloadFile": "Download {{name}}",
+      "unavailable": "This attachment changed or is no longer available. Refresh the list and review it before trying again.",
+      "tooLarge": "This attachment is too large to download.",
+      "failed": "Could not download this attachment. Try again.",
+      "retry": "Try again",
+      "previewTooLarge": "This file is too large to preview. You can download it instead."
     }
   },
   "nativeLabelRules": {

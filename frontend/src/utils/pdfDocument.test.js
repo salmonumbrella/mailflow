@@ -41,7 +41,7 @@ registerHooks({
 });
 
 globalThis.window = { location: { origin: 'https://mail.test' } };
-globalThis.Worker = class { constructor() {} };
+globalThis.Worker = class { constructor() {} terminate() {} };
 
 const { openPdf } = await import('./pdfDocument.js');
 const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);

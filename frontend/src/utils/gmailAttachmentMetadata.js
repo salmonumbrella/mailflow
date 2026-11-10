@@ -1,4 +1,5 @@
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { copyAttachmentSource, attachmentSourceMatchesRow } from './attachmentSource.js';
+
 const PART = /^[1-9]\d*(?:\.[1-9]\d*)*$/;
 const MIME = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/;
 const CALENDAR_TYPES = new Set(['text/calendar', 'text/x-vcalendar', 'application/ics',
@@ -7,37 +8,16 @@ const CALENDAR_TYPES = new Set(['text/calendar', 'text/x-vcalendar', 'applicatio
 // eslint-disable-next-line no-control-regex
 const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const boundedText = (value, limit) => typeof value === 'string' && value.length <= limit ? value : null;
-const uuid = value => typeof value === 'string' && UUID.test(value) ? value.toLowerCase() : null;
-const protocolNumber = value => {
-  if (typeof value !== 'string' && typeof value !== 'number') return null;
-  const text = String(value);
-  return /^[1-9]\d{0,9}$/.test(text) && Number(text) <= 4294967295 ? text : null;
-};
 const partNumber = value => boundedText(value, 128) && PART.test(value) ? value : null;
-
-function matchesSource(message, source) {
-  if (!source || typeof source !== 'object' || Array.isArray(source)) return false;
-  // Camel-case entityId/storageGeneration belong to native-label canonicalization,
-  // not necessarily this physical row. Only compare the projected snake-case fields.
-  const fields = [
-    ['messageId', 'id', uuid], ['accountId', 'account_id', uuid],
-    ['storageGeneration', 'storage_generation', uuid], ['entityId', 'entity_id', uuid],
-    ['folder', 'folder', value => boundedText(value, 500) || null],
-    ['uidValidity', 'uid_validity', protocolNumber], ['uid', 'uid', protocolNumber],
-  ];
-  return fields.every(([key, field, normalize]) => {
-    const expected = normalize(source[key]);
-    return typeof source[key] === 'string' && expected !== null && normalize(message[field]) === expected;
-  });
-}
 
 // List metadata is deliberately separate from body-reader attachments: only this
 // verified physical message can supply its filenames. Nothing here fetches parts.
 export function gmailAttachmentMetadata(message) {
   const metadata = message?.attachmentMetadata;
+  const source = copyAttachmentSource(metadata?.source);
   if (!metadata || metadata.state !== 'partial' || metadata.scope !== 'message'
     || metadata.providerComplete !== false || metadata.inlineClassification !== 'partial'
-    || !Array.isArray(metadata.items) || !matchesSource(message, metadata.source)) return null;
+    || !Array.isArray(metadata.items) || !source || !attachmentSourceMatchesRow(source, message)) return null;
 
   const entries = metadata.items.slice(0, 100);
   const counts = new Map();
@@ -62,5 +42,5 @@ export function gmailAttachmentMetadata(message) {
   if (!items.length) return null;
   // The server's omitted count includes inline, invalid and unscanned entries.
   // It cannot be advertised as a number of additional files.
-  return { items, hasMore: metadata.items.length > items.length || metadata.omittedCount !== 0 };
+  return { source, items, hasMore: metadata.items.length > items.length || metadata.omittedCount !== 0 };
 }

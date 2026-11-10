@@ -153,6 +153,8 @@ function noteRemoved(state, ids) {
 export const useStore = create((set, get) => ({
   // Auth
   user: null,
+  attachmentSessionEpoch: 0,
+  attachmentSignOutPending: false,
   setUser: (user) => {
     const densityIdentityChanged = get().user?.id !== user?.id;
     // On a real identity change (login, logout, account switch) drop any queued preference
@@ -181,6 +183,7 @@ export const useStore = create((set, get) => ({
     }
     set(state => ({
       user,
+      attachmentSessionEpoch: state.attachmentSessionEpoch + (state.user?.id !== user?.id ? 1 : 0),
       ...(state.user?.id !== user?.id ? {
         gmailDensity: readDensityCache(localStorage, user?.id)?.value || normalizeGmailDensity(localStorage.getItem('mailflow_gmail_density')),
         gmailDensitySaveState: pendingGmailDensity(user?.id) ? 'pending' : 'idle',
@@ -225,21 +228,27 @@ export const useStore = create((set, get) => ({
   updateUser: (updates) => set(state => ({ user: state.user ? { ...state.user, ...updates } : state.user })),
   // The sidebar and the lock screen sign out here, through the shared helper (#523, #310).
   signOut: async () => {
+    if (get().attachmentSignOutPending) return;
+    set(state => ({ attachmentSignOutPending: true, attachmentSessionEpoch: state.attachmentSessionEpoch + 1 }));
     // Before the request, not after it: if the page reloads while the request is out and the
     // server did sign out, the next load clears the lock with no user signed in, which reopens
     // this message for whoever signs in next.
     localStorage.removeItem('mailflow_locked_message');
     let loggedOut = false;
-    await signOutAndLeave({
-      setUser: get().setUser,
-      logout: async () => { const res = await api.logout(); loggedOut = true; return res; },
-      navigate: (url) => {
-        // If the sign-out failed, the session may still be alive, and unlocked if the lock
-        // request failed too. Keep the lock then, so the next load sends it again.
-        if (loggedOut) get().setLocked(false);
-        window.location.href = url;
-      },
-    });
+    try {
+      await signOutAndLeave({
+        setUser: get().setUser,
+        logout: async () => { const res = await api.logout(); loggedOut = true; return res; },
+        navigate: (url) => {
+          // If the sign-out failed, the session may still be alive, and unlocked if the lock
+          // request failed too. Keep the lock then, so the next load sends it again.
+          if (loggedOut) get().setLocked(false);
+          window.location.href = url;
+        },
+      });
+    } finally {
+      set({ attachmentSignOutPending: false });
+    }
   },
 
   // Plugin activation — the per-user set of activated plugin ids (users.preferences.enabledPlugins).

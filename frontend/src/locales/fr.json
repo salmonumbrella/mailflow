@@ -2618,7 +2618,7 @@
       "close": "Fermer la configuration rapide",
       "see_all": "Voir tous les paramètres",
       "density": "Densité d’affichage",
-      "density_note": "Par défaut et Confortable utilisent actuellement le même espacement entre les lignes. L’aperçu des pièces jointes n’est pas encore disponible.",
+      "density_note": "Par défaut et Confortable utilisent actuellement le même espacement entre les lignes.",
       "local_preferences": "Les préférences s’appliquent immédiatement sur cet appareil. Leur synchronisation avec votre compte nécessite une connexion.",
       "density_pending": "Synchronisation de la densité avec votre compte…",
       "density_failed": "La densité est appliquée sur cet appareil, mais n’a pas pu être synchronisée avec votre compte.",
@@ -2664,7 +2664,14 @@
     },
     "attachments": {
       "cachedDetails": "Pièces jointes en cache pour ce message uniquement ; les détails peuvent être incomplets.",
-      "someNotShown": "Des détails supplémentaires sur les pièces jointes en cache ne sont pas affichés."
+      "someNotShown": "Des détails supplémentaires sur les pièces jointes en cache ne sont pas affichés.",
+      "previewFile": "Afficher l’aperçu de {{name}}",
+      "downloadFile": "Télécharger {{name}}",
+      "unavailable": "Cette pièce jointe a changé ou n’est plus disponible. Actualisez la liste et vérifiez-la avant de réessayer.",
+      "tooLarge": "Cette pièce jointe est trop volumineuse pour être téléchargée.",
+      "failed": "Impossible de télécharger cette pièce jointe. Réessayez.",
+      "retry": "Réessayer",
+      "previewTooLarge": "Ce fichier est trop volumineux pour afficher un aperçu. Vous pouvez le télécharger à la place."
     }
   },
   "nativeLabelRules": {

@@ -2618,7 +2618,7 @@
       "close": "Fechar configurações rápidas",
       "see_all": "Ver todas as configurações",
       "density": "Densidade",
-      "density_note": "Padrão e Confortável usam atualmente o mesmo espaçamento entre linhas. As prévias de anexos ainda não estão disponíveis.",
+      "density_note": "Padrão e Confortável usam atualmente o mesmo espaçamento entre linhas.",
       "local_preferences": "As preferências são aplicadas imediatamente neste dispositivo. A sincronização com sua conta requer uma conexão.",
       "density_pending": "Sincronizando a densidade com sua conta…",
       "density_failed": "A densidade foi aplicada neste dispositivo, mas não foi possível sincronizá-la com sua conta.",
@@ -2664,7 +2664,14 @@
     },
     "attachments": {
       "cachedDetails": "Anexos em cache apenas desta mensagem; os detalhes podem estar incompletos.",
-      "someNotShown": "Detalhes adicionais dos anexos em cache não são exibidos."
+      "someNotShown": "Detalhes adicionais dos anexos em cache não são exibidos.",
+      "previewFile": "Visualizar {{name}}",
+      "downloadFile": "Baixar {{name}}",
+      "unavailable": "Este anexo foi alterado ou não está mais disponível. Atualize a lista e confira os detalhes antes de tentar novamente.",
+      "tooLarge": "Este anexo é grande demais para baixar.",
+      "failed": "Não foi possível baixar este anexo. Tente novamente.",
+      "retry": "Tentar novamente",
+      "previewTooLarge": "Este arquivo é grande demais para visualizar. Você pode baixá-lo em vez de visualizá-lo."
     }
   },
   "nativeLabelRules": {

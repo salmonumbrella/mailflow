@@ -1,4 +1,4 @@
-/* These are static cached details, not preview/download controls. */
+/* Only verified cached details receive source-bound actions. */
 html[data-mailflow-layout="gmail"] .mailflow-gmail-attachment-chips {
   grid-column: 1 / -1;
   display: flex;
@@ -66,4 +66,26 @@ html[data-mailflow-layout="gmail"] .mailflow-gmail-attachment-overflow {
       grid-column: 1 / -1;
     }
   }
+}
+
+html[data-mailflow-layout="gmail"] .mailflow-gmail-attachment-entry {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+html[data-mailflow-layout="gmail"] button.mailflow-gmail-attachment-chip {
+  cursor: pointer;
+  font-family: inherit;
+  text-align: start;
+}
+
+html[data-mailflow-layout="gmail"] button.mailflow-gmail-attachment-chip:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--text-tertiary);
+}
+
+html[data-mailflow-layout="gmail"] button.mailflow-gmail-attachment-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

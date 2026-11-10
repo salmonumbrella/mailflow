@@ -2637,7 +2637,7 @@
       "close": "Zavřít rychlá nastavení",
       "see_all": "Zobrazit všechna nastavení",
       "density": "Hustota zobrazení",
-      "density_note": "Možnosti Výchozí a Pohodlné nyní používají stejné rozestupy řádků. Náhledy příloh zatím nejsou dostupné.",
+      "density_note": "Možnosti Výchozí a Pohodlné nyní používají stejné rozestupy řádků.",
       "local_preferences": "Nastavení se na tomto zařízení použije okamžitě. Synchronizace s účtem vyžaduje připojení.",
       "density_pending": "Synchronizace hustoty zobrazení s účtem…",
       "density_failed": "Hustota zobrazení je na tomto zařízení nastavena, ale nepodařilo se ji synchronizovat s účtem.",
@@ -2683,7 +2683,14 @@
     },
     "attachments": {
       "cachedDetails": "Přílohy uložené v mezipaměti pouze pro tuto zprávu; údaje mohou být neúplné.",
-      "someNotShown": "Další údaje o přílohách uložených v mezipaměti nejsou zobrazeny."
+      "someNotShown": "Další údaje o přílohách uložených v mezipaměti nejsou zobrazeny.",
+      "previewFile": "Zobrazit náhled {{name}}",
+      "downloadFile": "Stáhnout {{name}}",
+      "unavailable": "Tato příloha se změnila nebo již není dostupná. Než to zkusíte znovu, obnovte seznam a zkontrolujte jej.",
+      "tooLarge": "Tato příloha je příliš velká ke stažení.",
+      "failed": "Tuto přílohu se nepodařilo stáhnout. Zkuste to znovu.",
+      "retry": "Zkusit znovu",
+      "previewTooLarge": "Tento soubor je příliš velký pro náhled. Můžete si ho místo toho stáhnout."
     }
   },
   "nativeLabelRules": {

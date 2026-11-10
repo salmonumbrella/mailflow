@@ -1,6 +1,7 @@
 import { orderedRead } from './readOrder.js';
 
-const BASE = '/api';
+export const API_BASE = '/api';
+const BASE = API_BASE;
 
 // Sent on every /api request so the backend CSRF guard accepts it. A cross-site
 // form/navigation cannot set a custom header, and a cross-origin fetch that tries

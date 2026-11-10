@@ -31,7 +31,7 @@ function assertDefaults(fields) {
   for (const key of Object.keys(fields)) assert.deepEqual(s()[key], useStore.getInitialState()[key], key);
 }
 
-beforeEach(() => { s().setUser({ id: 'alice' }); });
+beforeEach(() => { useStore.setState({ attachmentSignOutPending: false }); s().setUser({ id: 'alice' }); });
 afterEach(() => { s().setUser(null); mem.clear(); });
 
 test('the next user is not shown the compose that was left open', () => {

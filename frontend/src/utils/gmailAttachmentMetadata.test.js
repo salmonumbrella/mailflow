@@ -17,7 +17,7 @@ const row = (items = [file], metadata = {}) => ({
 test('reads only bounded cached attachment metadata, not flags or body-reader attachments', () => {
   const original = row();
   const snapshot = structuredClone(original);
-  assert.deepEqual(gmailAttachmentMetadata(original), { items: [file], hasMore: false });
+  assert.deepEqual(gmailAttachmentMetadata(original), { source, items: [file], hasMore: false });
   assert.deepEqual(original, snapshot, 'normalization does not mutate cached rows');
   for (const input of [null, {}, { has_attachments: true }, { ...row(), attachmentMetadata: undefined, attachments: [file] }]) {
     assert.equal(gmailAttachmentMetadata(input), null);
@@ -111,4 +111,25 @@ test('bounds processing and visible files without turning omitted cache entries 
   assert.equal(gmailAttachmentMetadata(row([file], { omittedCount: 0 })).hasMore, false);
   assert.equal(gmailAttachmentMetadata(row([{ ...file, filename: '<img src=x onerror=alert(1)>.pdf' }])).items[0].filename,
     '<img src=x onerror=alert(1)>.pdf', 'escape as text at rendering, not HTML');
+});
+
+
+test('action metadata rejects unencoded or extra-key proofs and freezes the exact source', () => {
+  const input = row();
+  const result = gmailAttachmentMetadata(input);
+  assert.ok(Object.isFrozen(result.source));
+  assert.notEqual(result.source, source);
+  assert.deepEqual(result.source, source);
+  for (const proof of [
+    { ...source, extra: 'not part of the proof' },
+    { ...source, folder: 'INBOX\u0000' },
+    { ...source, folder: '\ud800' },
+    { ...source, uid: '03' }, { ...source, uidValidity: '09' },
+  ]) {
+    const input = row([file], { source: proof });
+    input.folder = proof.folder;
+    input.uid = proof.uid;
+    input.uid_validity = proof.uidValidity;
+    assert.equal(gmailAttachmentMetadata(input), null);
+  }
 });

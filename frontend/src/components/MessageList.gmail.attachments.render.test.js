@@ -137,7 +137,7 @@ for (const threadedView of [false, true]) {
     assert.deepEqual(names(element), [file.filename]);
     assert.equal(element.querySelector('.mailflow-gmail-attachment-chips').getAttribute('aria-label'),
       'Cached attachments for this message only; details may be incomplete.');
-    assert.equal(element.querySelector('.mailflow-gmail-attachment-chips').querySelectorAll('button,a,[tabindex]').length, 0);
+    assert.equal(element.querySelector('.mailflow-gmail-attachment-chips').querySelectorAll('button').length, 1);
     assert.equal(element.getAttribute('draggable'), 'true');
     for (const density of ['comfortable', 'compact', 'default']) {
       await React.act(async () => useStore.setState({ gmailDensity: density }));

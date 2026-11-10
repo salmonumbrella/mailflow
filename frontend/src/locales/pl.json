@@ -2637,7 +2637,7 @@
       "close": "Zamknij szybkie ustawienia",
       "see_all": "Zobacz wszystkie ustawienia",
       "density": "Gęstość wyświetlania",
-      "density_note": "Tryby Domyślny i Wygodny używają obecnie takich samych odstępów między wierszami. Podglądy załączników nie są jeszcze dostępne.",
+      "density_note": "Tryby Domyślny i Wygodny używają obecnie takich samych odstępów między wierszami.",
       "local_preferences": "Ustawienia są stosowane na tym urządzeniu natychmiast. Synchronizacja z kontem wymaga połączenia.",
       "density_pending": "Synchronizowanie gęstości wyświetlania z kontem…",
       "density_failed": "Gęstość wyświetlania została zastosowana na tym urządzeniu, ale nie udało się jej zsynchronizować z kontem.",
@@ -2683,7 +2683,14 @@
     },
     "attachments": {
       "cachedDetails": "Załączniki zapisane w pamięci podręcznej tylko dla tej wiadomości; szczegóły mogą być niepełne.",
-      "someNotShown": "Dodatkowe szczegóły załączników zapisanych w pamięci podręcznej nie są wyświetlane."
+      "someNotShown": "Dodatkowe szczegóły załączników zapisanych w pamięci podręcznej nie są wyświetlane.",
+      "previewFile": "Wyświetl podgląd {{name}}",
+      "downloadFile": "Pobierz {{name}}",
+      "unavailable": "Ten załącznik uległ zmianie lub nie jest już dostępny. Odśwież listę i sprawdź ją przed ponowną próbą.",
+      "tooLarge": "Ten załącznik jest zbyt duży, aby go pobrać.",
+      "failed": "Nie udało się pobrać tego załącznika. Spróbuj ponownie.",
+      "retry": "Spróbuj ponownie",
+      "previewTooLarge": "Ten plik jest zbyt duży, aby wyświetlić podgląd. Możesz go zamiast tego pobrać."
     }
   },
   "nativeLabelRules": {

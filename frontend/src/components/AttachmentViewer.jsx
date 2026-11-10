@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  sniffPreview, nextZoom, fitScale, canvasPixelRatio, printDocumentHtml, passwordReason,
+  PREVIEW_MAX_BYTES, sniffPreview, nextZoom, fitScale, canvasPixelRatio, printDocumentHtml, passwordReason,
 } from '../utils/attachmentPreview.js';
+
+import { useStore } from '../store/index.js';
+import { createAttachmentSessionScope } from '../utils/attachmentActions.js';
+import { fetchAttachmentBytes, fetchLegacyAttachmentBytes, downloadAttachmentBytes } from '../utils/attachmentTransport.js';
 
 // Full-screen preview of a message's PDF and image attachments, with Download and Print, so a
 // boleto or a photo can be read without saving a copy to the computer first.
@@ -15,6 +19,7 @@ import {
 // delete a message the user can no longer see.
 
 const loadPdfModule = () => import('../utils/pdfDocument.js');
+const LOADING_FILE = Object.freeze({ status: 'loading' });
 
 const CHROME = {
   bar: 'rgba(18, 18, 22, 0.94)',
@@ -24,54 +29,107 @@ const CHROME = {
   backdrop: 'rgba(8, 8, 12, 0.9)',
 };
 
-export default function AttachmentViewer({ messageId, attachments, startIndex = 0, onClose, onDownloadFallback }) {
+export default function AttachmentViewer({ messageId, attachments, startIndex = 0, onClose, source = null, scope = null, restoreFocus }) {
   const { t } = useTranslation();
   const [index, setIndex] = useState(() => Math.min(Math.max(startIndex, 0), Math.max(attachments.length - 1, 0)));
   const att = attachments[index];
   const part = att?.part;
-  const [file, setFile] = useState({ status: 'loading' });
+  const [loaded, setFile] = useState(null);
   const [zoom, setZoom] = useState(1);
   const [printing, setPrinting] = useState(null);
   const [area, setArea] = useState({ width: 0, height: 0 });
-  const [pdf, setPdf] = useState(null);
-  // An encrypted PDF's password lives only here, for as long as this attachment is on screen.
-  // prompt is null, 'required' or 'incorrect'; attempt remounts the PDF for each try.
+  const [openedPdf, setPdf] = useState(null);
   const [unlock, setUnlock] = useState({ password: null, prompt: null, attempt: 0 });
+  const [retry, setRetry] = useState(0);
+  const [legacyOwner, setLegacyOwner] = useState(null);
+  const [invalidated, setInvalidated] = useState(false);
   const contentRef = useRef(null);
   const dialogRef = useRef(null);
-  // Synchronous, unlike the printing state: a second Ctrl+P can arrive before a render.
-  const printBusy = useRef(false);
+  const activeResource = useRef(null);
+  const closing = useRef(false);
+  const allowRestore = useRef(false);
+  const printBusy = useRef(null);
   const cancelPrint = useRef(null);
+  const callbacks = useRef({});
+  callbacks.current = { onClose, restoreFocus };
+
+  // Legacy readers have not yet associated their body attachment list with a source envelope.
+  // They keep their headerless API, but no longer outlive the session which opened this viewer.
+  useEffect(() => {
+    const owner = scope || createAttachmentSessionScope({ store: useStore });
+    setLegacyOwner({ owner, messageId, scope });
+    setInvalidated(false);
+    const remove = owner.addCleanup(() => {
+      closing.current = true;
+      allowRestore.current = false;
+      setInvalidated(true);
+      callbacks.current.onClose?.();
+    });
+    return () => {
+      remove();
+      if (!scope) owner.dispose();
+    };
+  }, [scope, messageId]);
+  const owner = scope || (legacyOwner?.messageId === messageId && legacyOwner.scope === scope ? legacyOwner.owner : null);
+  const sourceKey = JSON.stringify(source);
+  const itemKey = JSON.stringify([part, att?.filename, att?.type, att?.size]);
+  // This is checked during render and by every callback, before effects can reset old state.
+  const resourceKey = useMemo(() => ({ messageId, sourceKey, itemKey, scope, index, retry }), [messageId, sourceKey, itemKey, scope, index, retry]);
+  const currentKey = useRef(resourceKey);
+  currentKey.current = resourceKey;
+  const file = loaded?.key === resourceKey && loaded.resource.current() && !closing.current
+    ? loaded : LOADING_FILE;
+  const pdf = openedPdf?.key === resourceKey ? openedPdf.handle : null;
 
   useEffect(() => {
-    if (part === undefined) return undefined;
-    const controller = new AbortController();
-    let url = null;
+    if (part === undefined || !owner?.current() || closing.current) return undefined;
+    const operation = owner.fork();
+    const resource = {
+      ...operation,
+      current: () => operation.current() && currentKey.current === resourceKey && !closing.current,
+    };
+    activeResource.current = resource;
+    let mounted = true;
+    const remove = resource.addCleanup(() => {
+      if (mounted && currentKey.current === resourceKey) {
+        setFile(null);
+        setPdf(null);
+        setUnlock({ password: null, prompt: null, attempt: 0 });
+        setPrinting(null);
+      }
+    });
     setPdf(null);
     setUnlock({ password: null, prompt: null, attempt: 0 });
-    setFile({ status: 'loading' });
+    setFile(null);
     setZoom(1);
     (async () => {
       try {
-        const res = await fetch(`/api/mail/messages/${messageId}/attachments/${encodeURIComponent(part)}`, {
-          credentials: 'include', signal: controller.signal,
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const bytes = new Uint8Array(await res.arrayBuffer());
-        if (controller.signal.aborted) return;
+        const bytes = await (source != null
+          ? fetchAttachmentBytes({ source, part, scope: resource })
+          : fetchLegacyAttachmentBytes({ messageId, part, scope: resource }));
+        if (!resource.current()) return;
+        if (bytes.byteLength > PREVIEW_MAX_BYTES) {
+          setFile({ key: resourceKey, resource, status: 'error', reason: 'too-large', bytes });
+          return;
+        }
         const preview = sniffPreview(bytes);
-        if (!preview) { setFile({ status: 'error', reason: 'unsupported', bytes }); return; }
-        if (preview.kind === 'image') url = URL.createObjectURL(new Blob([bytes], { type: preview.type }));
-        setFile({ status: 'ready', bytes, preview, url });
-      } catch {
-        if (!controller.signal.aborted) setFile({ status: 'error', reason: 'failed' });
+        if (!preview) { setFile({ key: resourceKey, resource, status: 'error', reason: 'unsupported', bytes }); return; }
+        const url = preview.kind === 'image' ? resource.createObjectURL(new Blob([bytes], { type: preview.type })) : null;
+        if (!resource.current()) { if (url) resource.revokeObjectURL(url); return; }
+        setFile({ key: resourceKey, resource, status: 'ready', bytes, preview, url });
+      } catch (error) {
+        if (resource.current() && error?.name !== 'AbortError') {
+          setFile({ key: resourceKey, resource, status: 'error', reason: 'failed', error });
+        }
       }
     })();
     return () => {
-      controller.abort();
-      if (url) URL.revokeObjectURL(url);
+      mounted = false;
+      remove();
+      resource.dispose();
+      if (activeResource.current === resource) activeResource.current = null;
     };
-  }, [messageId, part]);
+  }, [resourceKey, owner, messageId, part, source]);
 
   useEffect(() => {
     const el = contentRef.current;
@@ -103,33 +161,51 @@ export default function AttachmentViewer({ messageId, attachments, startIndex = 
       observer.disconnect();
       quieted.forEach(node => node.removeAttribute('inert'));
       cancelPrint.current?.();
-      returnTo?.focus?.({ preventScroll: true });
+      if (callbacks.current.restoreFocus) callbacks.current.restoreFocus();
+      else if (returnTo?.isConnected && allowRestore.current) returnTo.focus?.({ preventScroll: true });
     };
+  }, []);
+
+  const close = useCallback(() => {
+    allowRestore.current = !!activeResource.current?.current();
+    closing.current = true;
+    activeResource.current?.dispose();
+    cancelPrint.current?.();
+    callbacks.current.onClose?.();
   }, []);
 
   const go = useCallback(step => {
     const target = index + step;
-    if (target < 0 || target >= attachments.length) return false;
+    if (target < 0 || target >= attachments.length || !owner?.current() || closing.current) return false;
+    activeResource.current?.dispose();
     setIndex(target);
     return true;
-  }, [index, attachments.length]);
+  }, [index, attachments.length, owner]);
 
   const download = useCallback(() => {
-    if (!att) return;
-    if (file.bytes) saveBytes(file.bytes, att.filename, file.preview?.type);
-    else onDownloadFallback?.(att);
-  }, [att, file, onDownloadFallback]);
+    if (!att || file.key !== resourceKey || !file.resource?.current() || !file.bytes) return;
+    downloadAttachmentBytes(file.resource, file.bytes, att.filename, file.preview?.type);
+  }, [att, file, resourceKey]);
 
   const print = useCallback(async () => {
-    if (file.status !== 'ready' || printBusy.current || !att) return;
+    if (file.key !== resourceKey || file.status !== 'ready' || !file.resource.current() || printBusy.current || !att) return;
     if (file.preview.kind === 'pdf' && !pdf) return;
-    printBusy.current = true;
+    const operation = file.resource.fork();
+    const current = () => operation.current() && file.resource.current();
+    printBusy.current = operation;
+    const stop = operation.addCleanup(() => {
+      if (printBusy.current === operation) {
+        printBusy.current = null;
+        setPrinting(null);
+      }
+    });
     const toPaper = urls => {
-      const job = printImages(urls, att.filename, dialogRef.current);
+      if (!current() || !dialogRef.current?.isConnected) return Promise.resolve();
+      const job = printImages(urls, att.filename, dialogRef.current, current);
       cancelPrint.current = job.cancel;
+      operation.addCleanup(job.cancel);
       return job.done;
     };
-    let urls = [];
     try {
       if (file.preview.kind === 'image') {
         await toPaper([file.url]);
@@ -137,21 +213,32 @@ export default function AttachmentViewer({ messageId, attachments, startIndex = 
       }
       setPrinting({ done: 0, total: pdf.doc.numPages });
       const { renderPagesForPrint } = await loadPdfModule();
-      urls = await renderPagesForPrint(pdf, { onProgress: (done, total) => setPrinting({ done, total }) });
+      if (!current()) return;
+      const urls = await renderPagesForPrint(pdf, {
+        isCancelled: () => !current(),
+        signal: operation.signal,
+        createObjectURL: blob => operation.createObjectURL(blob),
+        revokeObjectURL: url => operation.revokeObjectURL(url),
+        onProgress: (done, total) => { if (current()) setPrinting({ done, total }); },
+      });
+      if (!current()) { urls.forEach(url => operation.revokeObjectURL(url)); return; }
       await toPaper(urls);
     } catch (err) {
-      console.error('Print failed:', err);
+      if (current()) console.error('Print failed:', err);
     } finally {
-      urls.forEach(url => URL.revokeObjectURL(url));
-      cancelPrint.current = null;
-      printBusy.current = false;
-      setPrinting(null);
+      if (printBusy.current === operation) {
+        cancelPrint.current = null;
+        printBusy.current = null;
+        if (file.resource.current()) setPrinting(null);
+      }
+      stop();
+      operation.dispose();
     }
-  }, [att, file, pdf]);
+  }, [att, file, pdf, resourceKey]);
 
   // Refs keep the capture-phase listener installed once for the viewer's lifetime.
   const actions = useRef({});
-  actions.current = { onClose, go, print };
+  actions.current = { onClose: close, go, print };
   useEffect(() => {
     const onKey = e => {
       const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
@@ -174,10 +261,18 @@ export default function AttachmentViewer({ messageId, attachments, startIndex = 
 
   const narrow = area.width > 0 && area.width < 640;
   const ready = file.status === 'ready';
-  const errorText = file.reason === 'unsupported' ? t('message.preview.unsupported') : t('message.preview.failed');
+  const errorText = previewErrorText(t, file);
+  const canDownload = !!file.bytes && file.key === resourceKey && !!file.resource?.current();
+  const canRetry = file.reason === 'failed' && ![400, 404, 409].includes(file.error?.status);
+
+  if (invalidated) return null;
 
   return createPortal(
     <div
+      onClick={e => e.stopPropagation()}
+      onDoubleClick={e => e.stopPropagation()}
+      onMouseDown={e => e.stopPropagation()}
+      onContextMenu={e => e.stopPropagation()}
       ref={dialogRef}
       role="dialog"
       aria-modal="true"
@@ -239,12 +334,12 @@ export default function AttachmentViewer({ messageId, attachments, startIndex = 
             </ToolbarButton>
           </>
         )}
-        <ToolbarButton label={t('message.preview.download')} text={narrow ? null : t('message.preview.download')} onClick={download} disabled={!att}>
+        <ToolbarButton label={t('message.preview.download')} text={narrow ? null : t('message.preview.download')} onClick={download} disabled={!canDownload}>
           <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
           <polyline points="7 10 12 15 17 10"/>
           <line x1="12" y1="15" x2="12" y2="3"/>
         </ToolbarButton>
-        <ToolbarButton label={t('message.preview.close')} onClick={onClose}>
+        <ToolbarButton label={t('message.preview.close')} onClick={close}>
           <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
         </ToolbarButton>
       </div>
@@ -259,38 +354,39 @@ export default function AttachmentViewer({ messageId, attachments, startIndex = 
                 background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)',
               }}>
                 <div style={{ fontSize: 13, lineHeight: 1.5, marginBottom: 14 }}>{errorText}</div>
-                <button type="button" onClick={download} style={{
+                <button type="button" onClick={canDownload ? download : canRetry ? () => setRetry(n => n + 1) : close} style={{
                   padding: '8px 16px', borderRadius: 8, border: 'none', cursor: 'pointer',
                   background: 'var(--accent)', color: '#fff', fontSize: 13, fontWeight: 500,
                 }}>
-                  {t('message.preview.download')}
+                  {canDownload ? t('message.preview.download') : canRetry ? t('gmail.attachments.retry', 'Try again') : t('message.preview.close')}
                 </button>
               </div>
             </Centered>
           )}
           {ready && file.preview.kind === 'image' && (
             <ImageView
-              key={part}
+              key={itemKey}
               url={file.url}
               alt={att?.filename ?? ''}
               zoom={zoom}
               area={area}
               padding={narrow ? 12 : 28}
               onToggleZoom={() => setZoom(z => (z === 1 ? 2 : 1))}
-              onError={() => setFile(f => ({ ...f, status: 'error', reason: 'unsupported' }))}
+              onError={() => { if (file.resource.current()) setFile(f => f?.key === resourceKey ? { ...f, status: 'error', reason: 'unsupported' } : f); }}
             />
           )}
           {ready && file.preview.kind === 'pdf' && unlock.prompt && (
             <PasswordPrompt
               key={unlock.attempt}
               incorrect={unlock.prompt === 'incorrect'}
-              onSubmit={password => setUnlock(u => ({ password, prompt: null, attempt: u.attempt + 1 }))}
+              onSubmit={password => { if (file.resource.current()) setUnlock(u => ({ password, prompt: null, attempt: u.attempt + 1 })); }}
               onDownload={download}
             />
           )}
           {ready && file.preview.kind === 'pdf' && !unlock.prompt && (
             <PdfView
-              key={`${part}:${unlock.attempt}`}
+              key={`${itemKey}:${unlock.attempt}`}
+              scope={file.resource}
               bytes={file.bytes}
               password={unlock.password}
               zoom={zoom}
@@ -298,11 +394,12 @@ export default function AttachmentViewer({ messageId, attachments, startIndex = 
               padding={narrow ? 8 : 24}
               scrollRoot={contentRef}
               loadingLabel={t('common.loading')}
-              onOpen={setPdf}
+              onOpen={handle => { if (file.resource.current()) setPdf({ key: resourceKey, handle }); else handle.destroy(); }}
               onError={err => {
+                if (!file.resource.current()) return;
                 const reason = passwordReason(err);
                 if (reason) setUnlock(u => ({ ...u, prompt: reason }));
-                else setFile(f => ({ ...f, status: 'error', reason: 'failed' }));
+                else setFile(f => f?.key === resourceKey ? { ...f, status: 'error', reason: 'failed' } : f);
               }}
             />
           )}
@@ -408,25 +505,29 @@ function ImageView({ url, alt, zoom, area, padding, onToggleZoom, onError }) {
   );
 }
 
-function PdfView({ bytes, password, zoom, area, padding, scrollRoot, loadingLabel, onOpen, onError }) {
+function PdfView({ scope, bytes, password, zoom, area, padding, scrollRoot, loadingLabel, onOpen, onError }) {
   const [pdf, setPdf] = useState(null);
   const [sizes, setSizes] = useState(null);
   const callbacks = useRef({});
   callbacks.current = { onOpen, onError };
 
   useEffect(() => {
-    let cancelled = false;
+    const operation = scope.fork();
+    const current = () => operation.current() && scope.current();
     let handle = null;
+    const destroy = () => { handle?.destroy(); handle = null; };
+    const remove = operation.addCleanup(destroy);
     (async () => {
       try {
         const { openPdf } = await loadPdfModule();
-        const opened = await openPdf(bytes, { password });
-        if (cancelled) { opened.destroy(); return; }
+        if (!current()) return;
+        const opened = await openPdf(bytes, { password, signal: operation.signal, isCancelled: () => !current() });
+        if (!current()) { opened.destroy(); return; }
         handle = opened;
         const list = [];
         for (let n = 1; n <= opened.doc.numPages; n++) {
           const page = await opened.doc.getPage(n);
-          if (cancelled) return;
+          if (!current()) { page.cleanup?.(); return; }
           const viewport = page.getViewport({ scale: 1 });
           list.push({ width: viewport.width, height: viewport.height });
         }
@@ -434,14 +535,15 @@ function PdfView({ bytes, password, zoom, area, padding, scrollRoot, loadingLabe
         setSizes(list);
         callbacks.current.onOpen(opened);
       } catch (err) {
-        if (!cancelled) callbacks.current.onError(err);
+        if (current() && err?.name !== 'AbortError') callbacks.current.onError(err);
       }
     })();
     return () => {
-      cancelled = true;
-      handle?.destroy();
+      remove();
+      operation.dispose();
+      destroy();
     };
-  }, [bytes, password]);
+  }, [bytes, password, scope]);
 
   // Waits for the first measurement too, or every page would be drawn once at the wrong size.
   if (!pdf || !sizes || !(area.width > 0)) return <Centered>{loadingLabel}</Centered>;
@@ -453,7 +555,7 @@ function PdfView({ bytes, password, zoom, area, padding, scrollRoot, loadingLabe
       display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12,
     }}>
       {sizes.map((size, i) => (
-        <PdfPage key={i} pdf={pdf} number={i + 1} size={size} scale={scale} scrollRoot={scrollRoot} />
+        <PdfPage key={i} scope={scope} pdf={pdf} number={i + 1} size={size} scale={scale} scrollRoot={scrollRoot} />
       ))}
     </div>
   );
@@ -515,7 +617,7 @@ function PasswordPrompt({ incorrect, onSubmit, onDownload }) {
   );
 }
 
-function PdfPage({ pdf, number, size, scale, scrollRoot }) {
+function PdfPage({ scope, pdf, number, size, scale, scrollRoot }) {
   const pageRef = useRef(null);
   const canvasHostRef = useRef(null);
   const textRef = useRef(null);
@@ -539,27 +641,42 @@ function PdfPage({ pdf, number, size, scale, scrollRoot }) {
       releasePage(canvasHostRef.current, textRef.current);
       return undefined;
     }
-    let cancelled = false;
+    const operation = scope.fork();
+    const current = () => operation.current() && scope.current();
     const cssWidth = size.width * scale;
     const cssHeight = size.height * scale;
-    // Drawn off to the side and swapped in when finished, so zooming never flashes a blank page.
+    const canvasHost = canvasHostRef.current;
+    const textHost = textRef.current;
     const canvas = document.createElement('canvas');
+    const textContainer = document.createElement('div');
     canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
-    const job = loadPdfModule().then(({ renderPage }) => {
-      if (cancelled) return null;
-      return renderPage(pdf, number, {
-        canvas, textContainer: textRef.current, scale,
+    let task = null;
+    const remove = operation.addCleanup(() => {
+      task?.cancel();
+      canvas.width = 0;
+      canvas.height = 0;
+      textContainer.replaceChildren();
+      releasePage(canvasHost, textHost);
+    });
+    (async () => {
+      const { renderPage } = await loadPdfModule();
+      if (!current()) return;
+      task = renderPage(pdf, number, {
+        canvas, textContainer, scale, isCancelled: () => !current(),
         pixelRatio: canvasPixelRatio(cssWidth, cssHeight, window.devicePixelRatio),
       });
-    });
-    job.then(task => task?.done).then(() => {
-      if (!cancelled) canvasHostRef.current?.replaceChildren(canvas);
-    }).catch(err => console.warn(`PDF page ${number} failed to render:`, err));
+      await task.done;
+      if (!current()) return;
+      releasePage(canvasHost, textHost);
+      canvasHost?.replaceChildren(canvas);
+      textHost?.style.setProperty('--total-scale-factor', textContainer.style.getPropertyValue('--total-scale-factor'));
+      textHost?.replaceChildren(...textContainer.childNodes);
+    })().catch(err => { if (current()) console.warn(`PDF page ${number} failed to render:`, err); });
     return () => {
-      cancelled = true;
-      job.then(task => task?.cancel());
+      operation.dispose();
+      remove();
     };
-  }, [pdf, number, near, scale, size.width, size.height]);
+  }, [pdf, number, near, scale, size.width, size.height, scope]);
 
   return (
     <div
@@ -590,23 +707,13 @@ function releasePage(canvasHost, textLayer) {
   textLayer?.replaceChildren();
 }
 
-function saveBytes(bytes, filename, type) {
-  const url = URL.createObjectURL(new Blob([bytes], { type: type || 'application/octet-stream' }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename || '';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
-}
-
 // Prints the given images, one per sheet, from a hidden same-origin frame: no pop-up to be
 // blocked, and nothing of the app around them on paper. The frame goes inside the viewer, which is
 // the one part of the page that is not inert. Returns { done, cancel }.
-function printImages(urls, title, container) {
+export function printImages(urls, title, container, isCurrent = () => true) {
   let cancel = () => {};
   const done = new Promise(resolve => {
+    if (!isCurrent() || !container?.isConnected) { resolve(); return; }
     const frame = document.createElement('iframe');
     frame.setAttribute('aria-hidden', 'true');
     frame.tabIndex = -1;
@@ -623,17 +730,28 @@ function printImages(urls, title, container) {
     };
     cancel = finish;
     frame.addEventListener('load', () => {
+      if (finished || !isCurrent() || !container.isConnected || !frame.isConnected) { finish(); return; }
       const win = frame.contentWindow;
       if (!win) { finish(); return; }
       win.addEventListener('afterprint', () => setTimeout(finish, 0), { once: true });
       win.focus();
+      if (finished || !isCurrent() || !container.isConnected) { finish(); return; }
       win.print();
+      if (finished) return;
       // Chrome blocks inside print() until the dialog closes; a browser that never fires
       // afterprint still gets its frame removed.
       fallback = setTimeout(finish, 60_000);
     }, { once: true });
     frame.srcdoc = printDocumentHtml(title, urls);
-    (container ?? document.body).appendChild(frame);
+    container.appendChild(frame);
   });
   return { done, cancel };
+}
+
+function previewErrorText(t, file) {
+  if (file.reason === 'unsupported') return t('message.preview.unsupported');
+  if (file.reason === 'too-large') return t('gmail.attachments.previewTooLarge', 'This file is too large to preview. You can download it instead.');
+  if ([400, 404, 409].includes(file.error?.status)) return t('gmail.attachments.unavailable', 'This attachment changed or is no longer available. Refresh the list and review it before trying again.');
+  if (file.error?.status === 413) return t('gmail.attachments.tooLarge', 'This attachment is too large to download.');
+  return t('message.preview.failed');
 }

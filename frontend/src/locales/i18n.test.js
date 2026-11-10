@@ -1045,7 +1045,7 @@ describe('i18n locale files', () => {
     }
   });
 
-  it('every Gmail attachment source key has a nonempty static translation in every locale', () => {
+  it('every Gmail attachment source key preserves its intended interpolation in every locale', () => {
     const sourceKeys = loadLiteralSourceTranslationKeys(['gmail.attachments.']);
     for (const key of ['cachedDetails', 'someNotShown']) {
       assert.ok(sourceKeys.includes(`gmail.attachments.${key}`), `Gmail attachment ${key} must be covered`);
@@ -1055,7 +1055,12 @@ describe('i18n locale files', () => {
       for (const lang of langs) {
         assert.equal(typeof locales[lang][key], 'string', `${lang} translation missing: ${key}`);
         assert.ok(locales[lang][key].trim(), `${lang} translation empty: ${key}`);
-        assert.doesNotMatch(locales[lang][key], /{{|}}/, `${lang} attachment label must not interpolate counts: ${key}`);
+        const placeholders = locales[lang][key].match(/{{.*?}}/g) || [];
+        const expected = ['gmail.attachments.previewFile', 'gmail.attachments.downloadFile'].includes(key)
+          ? ['{{name}}'] : [];
+        assert.deepEqual(placeholders, expected, `${lang} attachment interpolation differs: ${key}`);
+        assert.doesNotMatch(locales[lang][key].replace('{{name}}', ''), /{{|}}/,
+          `${lang} attachment label contains an unexpected placeholder: ${key}`);
       }
     }
   });

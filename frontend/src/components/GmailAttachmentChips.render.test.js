@@ -8,7 +8,7 @@ import { transform } from 'sucrase';
 registerHooks({
   load(url, context, nextLoad) {
     if (url.endsWith('react-i18next/dist/es/index.js') || url.endsWith('/react-i18next')) {
-      return { format: 'module', shortCircuit: true, source: 'export const useTranslation = () => ({ t: (_key, fallback) => fallback });' };
+      return { format: 'module', shortCircuit: true, source: 'export const useTranslation = () => ({ t: (key, fallback) => typeof fallback === "string" ? fallback : (fallback?.defaultValue ?? key).replace(/{{(\\w+)}}/g, (_, name) => fallback[name]) });'  };
     }
     if (url.endsWith('.jsx')) {
       const code = transform(readFileSync(new URL(url), 'utf8'), { transforms: ['jsx'], jsxRuntime: 'automatic', filePath: url }).code;
@@ -23,6 +23,7 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document,
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const GmailAttachmentChips = (await import('./GmailAttachmentChips.jsx')).default;
+const { GmailAttachmentContext } = await import('./GmailAttachmentContext.js');
 const source = { messageId: '11111111-1111-4111-8111-111111111111', accountId: '22222222-2222-4222-8222-222222222222',
   storageGeneration: '33333333-3333-4333-8333-333333333333', entityId: '44444444-4444-4444-8444-444444444444',
   folder: 'INBOX', uidValidity: '9', uid: '3' };
@@ -121,4 +122,38 @@ test('refresh, pointer/keyboard events and replacement metadata cannot start att
   assert.equal(container.querySelector('.mailflow-gmail-attachment-name').textContent, 'Replacement.pdf');
   await render({ ...row(), uid: 4 }, 'default', true);
   assert.equal(container.querySelector('ul'), null);
+});
+
+
+test('actionable buttons snapshot displayed metadata once for Enter and Space and contain every row gesture', async () => {
+  let parentActions = 0;
+  const activations = [];
+  const input = row();
+  root = createRoot(container);
+  await React.act(async () => root.render(React.createElement(GmailAttachmentContext.Provider,
+    { value: (...args) => activations.push(args) },
+    React.createElement('div', { onClick: () => parentActions++, onDoubleClick: () => parentActions++,
+      onContextMenu: () => parentActions++, onKeyDown: () => parentActions++, onDragStart: () => parentActions++ },
+    React.createElement(GmailAttachmentChips, { message: input, density: 'default' })))));
+  const button = container.querySelector('button');
+  assert.ok(button);
+  assert.equal(button.getAttribute('aria-label'), 'Preview Actual report.pdf');
+  assert.equal(container.querySelector('a'), null);
+  for (const key of ['Enter', ' ']) {
+    await React.act(async () => button.dispatchEvent(new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })));
+    await React.act(async () => button.dispatchEvent(new window.KeyboardEvent('keydown', { key, repeat: true, bubbles: true, cancelable: true })));
+    await React.act(async () => button.dispatchEvent(new window.KeyboardEvent('keyup', { key, bubbles: true, cancelable: true })));
+  }
+  assert.equal(activations.length, 2);
+  assert.equal(activations[0][1].source.messageId, source.messageId);
+  assert.deepEqual(activations[0][2], file);
+  assert.equal(activations[0][3], button);
+  for (const type of ['dblclick', 'contextmenu', 'auxclick', 'dragstart']) {
+    await React.act(async () => button.dispatchEvent(new window.MouseEvent(type, { bubbles: true, cancelable: true })));
+  }
+  for (const modifier of ['ctrlKey', 'metaKey', 'altKey', 'shiftKey']) {
+    await React.act(async () => button.dispatchEvent(new window.MouseEvent('click', { [modifier]: true, bubbles: true, cancelable: true })));
+  }
+  assert.equal(activations.length, 2);
+  assert.equal(parentActions, 0);
 });

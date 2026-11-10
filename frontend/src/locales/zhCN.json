@@ -2618,7 +2618,7 @@
       "close": "关闭快捷设置",
       "see_all": "查看所有设置",
       "density": "显示密度",
-      "density_note": "“默认”和“舒适”目前使用相同的行间距。附件预览尚不可用。",
+      "density_note": "“默认”和“舒适”目前使用相同的行间距。",
       "local_preferences": "偏好设置会立即在此设备上生效。同步到账户需要网络连接。",
       "density_pending": "正在将显示密度同步到账户…",
       "density_failed": "显示密度已在此设备上生效，但未能同步到账户。",
@@ -2664,7 +2664,14 @@
     },
     "attachments": {
       "cachedDetails": "仅限此邮件的缓存附件；详细信息可能不完整。",
-      "someNotShown": "其他缓存附件详细信息未显示。"
+      "someNotShown": "其他缓存附件详细信息未显示。",
+      "previewFile": "预览 {{name}}",
+      "downloadFile": "下载 {{name}}",
+      "unavailable": "此附件已更改或不再可用。请刷新并检查列表后再重试。",
+      "tooLarge": "此附件过大，无法下载。",
+      "failed": "无法下载此附件。请重试。",
+      "retry": "重试",
+      "previewTooLarge": "此文件过大，无法预览。您可以改为下载。"
     }
   },
   "nativeLabelRules": {
