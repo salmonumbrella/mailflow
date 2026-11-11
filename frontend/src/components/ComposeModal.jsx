@@ -1,6 +1,3 @@
-import ComposeOpenActivity from './ComposeOpenActivity.jsx';
-import { introRecipients, isInstantIntroShortcut, replyArchiveContext, captureReplyArchive, finishReplyArchive } from '../utils/composeActions.js';
-import { initialOpenActivityChoice } from '../utils/openActivity.js';
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, forwardRef } from 'react';
 import { flushSync } from 'react-dom';
 import { createComposeSwitch } from '../utils/composeSwitch.js';
@@ -45,10 +42,6 @@ import {
   openScheduledView, scheduleErrorText, sendNowUndoMs, undoSchedule, undoSendNow, withScheduledAttachments,
 } from '../utils/scheduledCompose.js';
 import { ComposeQuestion, ScheduledStrip, SendLaterIcon, SendLaterMenu, SendLaterSheet } from './SendLater.jsx';
-import { SnippetsDialog } from './SnippetsPanel.jsx';
-import ComposeAvailability from './ComposeAvailability.jsx';
-import { QUICK_REPLIES } from '../utils/composeAvailability.js';
-import { insertSnippetText, snippetContent, isSnippetShortcut } from '../utils/mailSnippets.js';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -221,8 +214,6 @@ export default function ComposeModal() {
   const { closeCompose, composeData, accounts, addNotification, plaintextEmail, setThreadMessages, setPrepareComposeSwitch, updateComposePersistedKey } = useStore();
   const composeSession = useRef(useStore.getState().composeSession).current;
   const composeOwner = useRef(useStore.getState().user?.id).current;
-  const archiveContext = useRef(replyArchiveContext(composeData)).current;
-  const superhuman = useStore(state => state.layout === 'superhuman');
   const isMobile = useMobile();
   const uiScale = useUiScale();
 
@@ -231,8 +222,6 @@ export default function ComposeModal() {
   // A scheduled message opened to change it (#543, utils/scheduledCompose.js): held while it is
   // open, saved with Update, and never autosaved to Drafts.
   const scheduledEdit = isScheduledEdit(composeData) ? composeData.scheduled : null;
-  const [trackOpens, setTrackOpens] = useState(() => initialOpenActivityChoice(composeData));
-  useEffect(() => { if (plaintextEmail) setTrackOpens(false); }, [plaintextEmail]);
 
   // Precedence lives in resolveInitialFrom, which is unit tested. The rung that matters
   // here is the configured default sender: in the unified inbox there is no selected
@@ -289,10 +278,6 @@ export default function ComposeModal() {
   const [attachWarnDraftCloseAfter, setAttachWarnDraftCloseAfter] = useState(false);
   const [showPrioritySheet, setShowPrioritySheet] = useState(false);
   const [showCcBccMenu, setShowCcBccMenu] = useState(false);
-  const [snippetsOpen, setSnippetsOpen] = useState(false);
-  const [availabilityOpen, setAvailabilityOpen] = useState(() => Boolean(composeData?.availability));
-  const [introNotice, setIntroNotice] = useState(false);
-  const snippetCursorRef = useRef(null);
   const [ccBccMenuPos, setCcBccMenuPos] = useState(null);
   const ccBccMenuBtnRef = useRef(null);
   const [draftUid, setDraftUid] = useState(() => composeData?.draftUid ?? null);
@@ -342,7 +327,6 @@ export default function ComposeModal() {
   const unsavedRestoreRef = useRef(!!composeData?.restored);
   const [showCc, setShowCc] = useState(autoInit.cc.length > 0);
   const [showBcc, setShowBcc] = useState(autoInit.bcc.length > 0);
-  const toInputRef = useRef(null);
   const ccInputRef = useRef(null);
   const bccInputRef = useRef(null);
   // A row opened from its button takes the cursor; one that opens by itself (an automatic Cc or
@@ -416,13 +400,23 @@ export default function ComposeModal() {
   // attempt, reused across retries (so a retry after a lost response dedupes rather than
   // double-sending), and cleared on success. Fixes audit finding [1].
   const idempotencyKeyRef = useRef(null);
-  const archivePlanRef = useRef(undefined);
   const replyTypeRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
   const signatureRef = useRef(null);
   const quotedHtmlRef = useRef(null);
+  // Minimize removes the editable subtree. Keep its latest HTML independently of the DOM,
+  // then repopulate each new node without resetting edits on ordinary renders.
+  const quotedContentRef = useRef(null);
+  if (quotedContentRef.current === null) {
+    quotedContentRef.current = sanitizeEmailForApp(quotedBodyHtml || '', { FORBID_TAGS: ['style'] });
+  }
+  const attachQuotedEditor = useCallback(node => {
+    if (quotedHtmlRef.current) quotedContentRef.current = quotedHtmlRef.current.innerHTML;
+    quotedHtmlRef.current = node;
+    if (node) node.innerHTML = quotedContentRef.current;
+  }, []);
   const composeWindowRef = useRef(null);
   const posRef = useRef(null);
   const customSizeRef = useRef(null);
@@ -836,17 +830,6 @@ export default function ComposeModal() {
     if (next.bcc.length) setShowBcc(true);
   }, [fromAccount?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- reacts to the From account only; the chips and baselines are read as they stand at that moment
 
-  // Initialise quoted HTML contentEditable once on mount (ref-based to avoid React cursor conflicts)
-  useEffect(() => {
-    if (quotedHtmlRef.current && quotedBodyHtml) {
-      // Strip <style> blocks — marketing emails use global rules like "div { margin: 0 !important }"
-      // that leak out of contentEditable into the app UI. Inline style attributes are preserved.
-      // Images load only through MailFlow (utils/appEmailHtml.js): this is the app's page, not the
-      // email frame, and its CSP would let a sender's image through.
-      quotedHtmlRef.current.innerHTML = sanitizeEmailForApp(quotedBodyHtml, { FORBID_TAGS: ['style'] });
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   // Chrome re-evaluates spell check state for all contentEditable elements whenever new ones
   // are added to the DOM (e.g. signature + quoted body divs in reply/forward). Setting the
   // IDL property directly after all elements are mounted is more reliable than the HTML
@@ -925,65 +908,8 @@ export default function ComposeModal() {
     </div>
   );
 
-  const rememberInsertionCursor = () => {
-    snippetCursorRef.current = plaintextEmail ? textareaRef.current?.selectionStart ?? body.length : editor?.state.selection.from;
-  };
-  const openSnippets = () => {
-    if (htmlMode || sending || useStore.getState().user?.id !== composeOwner) return;
-    rememberInsertionCursor();
-    setSnippetsOpen(true);
-  };
-  const openAvailability = () => {
-    if (htmlMode || sending || useStore.getState().user?.id !== composeOwner) return;
-    rememberInsertionCursor();
-    setAvailabilityOpen(true);
-  };
-  const closeSnippets = () => {
-    setSnippetsOpen(false);
-    setAvailabilityOpen(false);
-    if (useStore.getState().user?.id !== composeOwner) return;
-    if (plaintextEmail) textareaRef.current?.focus();
-    else editor?.commands.focus();
-  };
-  const insertSnippet = snippet => {
-    if (useStore.getState().user?.id !== composeOwner || htmlMode || sending) throw new Error(t("compose.snippets.unavailable", "This draft is no longer available for snippet insertion."));
-    if (plaintextEmail) {
-      const next = insertSnippetText(body, snippet.body, snippetCursorRef.current);
-      flushSync(() => { setBody(next.text); setSnippetsOpen(false); setAvailabilityOpen(false); });
-      textareaRef.current?.focus();
-      textareaRef.current?.setSelectionRange(next.cursor, next.cursor);
-    } else {
-      if (!editor || editor.isDestroyed) throw new Error('The message editor is not ready.');
-      const at = Math.max(1, Math.min(editor.state.doc.content.size - 1, snippetCursorRef.current ?? editor.state.selection.from));
-      // A collapsed range intentionally keeps any text the user had selected.
-      if (!editor.chain().focus().insertContentAt(at, snippetContent(snippet.body)).run()) throw new Error(t("compose.snippets.insertFailed", "The snippet could not be inserted here."));
-      setSnippetsOpen(false);
-      setAvailabilityOpen(false);
-    }
-  };
-
-  const handleInstantIntro = () => {
-    if (sending || sendingRef.current || useStore.getState().user?.id !== composeOwner) return;
-    const to = parseChips([...toChips, toInput]);
-    if (!to.length) return;
-    const bcc = introRecipients(to, parseChips([...bccChips, bccInput]));
-    flushSync(() => { setToChips([]); setToInput(''); setBccChips(bcc); setBccInput(''); setShowBcc(true); setIntroNotice(true); });
-    toInputRef.current?.focus();
-  };
-
-  const composeShortcutBlocked = e => snippetsOpen || availabilityOpen || sendLaterOpen || scheduleQuestion || showCloseDialog || showDiscardSheet || showEmptySubjectWarn || showForgottenAttachWarn || aiPanel || e.target?.closest?.('[role=dialog], [role=menu]');
-  const handleComposeKeyDownCapture = e => {
-    // TipTap treats Ctrl+Shift+I as italic. Handle only this opt-in compose action before its
-    // keymap, so the recipient move never changes formatting or text in the rich editor.
-    if (!composeShortcutBlocked(e) && isInstantIntroShortcut(e, useStore.getState().layout, useStore.getState().shortcuts)) {
-      e.preventDefault(); e.stopPropagation(); handleInstantIntro();
-    }
-  };
   const handleKeyDown = (e) => {
-    if (e.isComposing || e.nativeEvent?.isComposing || e.keyCode === 229 || composeShortcutBlocked(e)) return;
-    if (isSnippetShortcut(e)) {
-      e.preventDefault(); e.stopPropagation(); openSnippets();
-    } else if (isComposeSendShortcut(e)) {
+    if (isComposeSendShortcut(e)) {
       e.preventDefault();
       e.stopPropagation();
       handleSend();
@@ -1191,7 +1117,7 @@ export default function ComposeModal() {
     // Taken with the recipients it describes: From stays usable while the request is out.
     const autoAtSend = autoRef.current;
     const sentQuotedHtml = !plaintextEmail && (quotedBodyHtml != null || quotedHtmlRef.current)
-      ? (quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedBodyHtml)
+      ? (quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedContentRef.current)
       : null;
     const savedDraft = draftPointerRef.current;
     const hasDraft = savedDraft.uid != null && savedDraft.folder != null && savedDraft.accountId;
@@ -1205,7 +1131,6 @@ export default function ComposeModal() {
       // Images shown through MailFlow's proxy go out as the email's own references.
       body: plaintextEmail ? bodyToSend : unproxyImages(bodyToSend),
       bodyIsHtml: !plaintextEmail,
-      trackOpens: trackOpens && !plaintextEmail,
       ...(quotedBody ? { quotedBody } : {}),
       ...(sentQuotedHtml != null ? { quotedBodyHtml: unproxyImages(sentQuotedHtml) } : {}),
       // Off sends an empty override, or the server would add the account's signature.
@@ -1240,8 +1165,6 @@ export default function ComposeModal() {
   // `built` is buildSendPayload's result.
   const buildRestoreData = ({ accountId, aliasId, toFinal, ccFinal, bccFinal, bodyToSend, sentQuotedHtml, autoAtSend, savedDraft, hasDraft }) => ({
     ...composeData,
-    ...(archiveContext ? { replyArchiveContext: archiveContext } : {}),
-    availability: undefined,
     // A sender chosen since opening a draft from an address MailFlow cannot send as replaces it.
     unsupportedFrom: unsupportedSenderRef.current ? composeData?.unsupportedFrom : undefined,
     accountId,
@@ -1264,7 +1187,6 @@ export default function ComposeModal() {
     attachments,
     forwardedAttachments: fwdAttachments,
     priority,
-    trackOpens: false,
     restored: true,
     autoRecipients: autoAtSend,
     draftWasPreExisting: draftWasPreExisting.current,
@@ -1291,10 +1213,9 @@ export default function ComposeModal() {
 
   const handleSend = async (opts = {}) => {
     // A scheduled message being edited is saved, not sent (Ctrl+Enter is Update there).
-    if (opts.archive && (scheduledEdit || !archiveContext)) { setError(t('compose.actions.archiveUnavailable', 'Send + Archive is available only for an identifiable reply sent now.')); return; }
     if (scheduledEdit) return updateRef.current(opts);
-    const from = await readyToSubmit(opts, o => sendRef.current({ ...o, archive: opts.archive }));
-    if (!from || sendingRef.current) return;
+    const from = await readyToSubmit(opts, o => sendRef.current(o));
+    if (!from) return;
     const { accountId, aliasId } = from;
 
     localStorage.setItem('mailflow_last_from_account', accountId);
@@ -1308,15 +1229,6 @@ export default function ComposeModal() {
     const built = buildSendPayload(accountId, aliasId);
     const { savedDraft, hasDraft, payload } = built;
     try {
-      let archiveIds = opts.archive ? archivePlanRef.current : null;
-      if (opts.archive && archivePlanRef.current === undefined) {
-        try { archiveIds = await captureReplyArchive(archiveContext, api.getThread); }
-        catch { throw new Error(t('compose.actions.archivePrepareFailed', 'The original inbox conversation could not be verified. Nothing was sent. Use Send to send without archiving.')); }
-        const active = useStore.getState();
-        if (active.user?.id !== composeOwner || !active.composing || active.composeSession !== composeSession) return;
-      }
-      // A retry after a lost response keeps the original snapshot, never newly arrived mail.
-      if (archivePlanRef.current === undefined) archivePlanRef.current = archiveIds;
       const sendResult = await api.post('/mail/send', {
         ...payload,
         // The server holds the message this long so it can still be undone, and deletes the
@@ -1330,28 +1242,6 @@ export default function ComposeModal() {
       // Runs after this composer has closed (and for a held send, up to minutes later), so it
       // uses only the store and values captured here.
       const reportSent = (result) => {
-        if (useStore.getState().user?.id !== composeOwner) return;
-        if (opts.archive) {
-          finishReplyArchive({ context: archiveContext, ids: archiveIds, pendingId: sendResult?.pending ? sendResult.pendingId : null, result }, {
-            stillOwner: () => useStore.getState().user?.id === composeOwner,
-            archive: api.bulkArchive,
-          }).then(outcome => {
-            if (outcome.status === 'abandoned' || useStore.getState().user?.id !== composeOwner) return;
-            if (outcome.archived.length) {
-              useStore.getState().removeMessages(outcome.archived);
-              useStore.getState().clearThreadMessages(archiveContext.threadId);
-              window.dispatchEvent(new CustomEvent('mailflow:counts_refresh'));
-            }
-            addNotification(outcome.status === 'archived' ? {
-              title: t('compose.actions.archived', 'Reply sent and original inbox conversation archived'),
-              body: subject || t('common.noSubject'),
-            } : {
-              type: 'error', persistent: true,
-              title: t('compose.actions.archiveIncomplete', 'Reply sent. Archiving was not confirmed.'),
-              body: t('compose.actions.archiveCheck', 'Check the original conversation before archiving it manually. Do not resend the reply.'),
-            });
-          });
-        }
         // Prefer the Sent folder the backend actually resolved to; fall back to the account's
         // mapping only if the response didn't carry one. Avoids navigating "View" to a stale
         // mapping (e.g. a non-selectable "[Gmail]" parent) that the send path bypassed (#386).
@@ -1386,9 +1276,8 @@ export default function ComposeModal() {
         if (replyThreadId) {
           const refreshThread = async () => {
             try {
-              if (useStore.getState().user?.id !== composeOwner) return;
               const data = await api.getThread(replyThreadId);
-              if (useStore.getState().user?.id === composeOwner && data.messages?.length) setThreadMessages(replyThreadId, data.messages);
+              if (data.messages?.length) setThreadMessages(replyThreadId, data.messages);
             } catch { /* best-effort refresh */ }
           };
           setTimeout(refreshThread, 3000);
@@ -1794,7 +1683,7 @@ export default function ComposeModal() {
     body: plaintextEmail ? body : htmlMode ? htmlSource : editor?.isEmpty ? '' : editor?.getHTML() ?? '',
     bodyIsHtml: !plaintextEmail,
     quotedBody,
-    quotedBodyHtml: quotedHtmlRef.current?.innerHTML || quotedBodyHtml || '',
+    quotedBodyHtml: quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedContentRef.current,
     // Off is saved as an empty signature, so toggling counts as an edit and is autosaved.
     editedSignature: !signatureEnabled ? '' : plaintextEmail ? plainSig : signatureContentRef.current,
     attachments: attachments.map(a => a.name),
@@ -1802,7 +1691,7 @@ export default function ComposeModal() {
     scheduledAttachments: scheduledAttachments.map(a => a.index),
     // A scheduled message keeps its priority, so changing only that is an edit to save. Drafts do
     // not store one, so for them it would only cost a save.
-    ...(scheduledEdit ? { priority, trackOpens: trackOpens && !plaintextEmail } : {}),
+    ...(scheduledEdit ? { priority } : {}),
   });
   unsupportedRef.current = () => sendingRef.current || attachments.length > 0 || fwdAttachments.length > 0
     || Boolean(composeData?.unresolvedExternalAttachments);
@@ -2360,45 +2249,6 @@ export default function ComposeModal() {
     />
   ) : null;
 
-  const snippetDialog = <>
-    {snippetsOpen && <SnippetsDialog onInsert={insertSnippet} onClose={closeSnippets} />}
-    {availabilityOpen && <ComposeAvailability initial={composeData?.availability} onInsert={text => insertSnippet({ body: text })} onClose={closeSnippets} />}
-  </>;
-  const snippetControl = (
-    <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 10, padding: '3px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
-      {superhuman && <>
-        <button type="button" onMouseDown={e => e.preventDefault()} onClick={handleInstantIntro}
-          disabled={sending || (!toChips.length && !toInput.trim())}
-          title={t('compose.actions.introHint', 'Move To recipients to Bcc without sending (Ctrl/Cmd+Shift+I)')}
-          style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', padding: '5px 4px', fontSize: 12 }}>
-          {t('compose.actions.intro', 'Instant intro')}
-        </button>
-        <button type="button" onClick={() => handleSend({ archive: true })} disabled={sendDisabled || scheduledEdit || !archiveContext}
-          title={scheduledEdit || !archiveContext ? t('compose.actions.archiveUnavailable', 'Send + Archive is available only for an identifiable reply sent now.') : t('compose.actions.archiveHint', 'After the undo window and confirmed delivery, archive the original inbox conversation. Keep this tab open until archiving finishes.')}
-          style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text-secondary)', padding: '5px 7px', fontSize: 12 }}>
-          {t('compose.actions.sendArchive', 'Send + Archive')}
-        </button>
-      </>}
-      {introNotice && <span role="status" style={{ width: '100%', color: 'var(--text-secondary)', fontSize: 12 }}>{t('compose.actions.introDone', 'To recipients moved to Bcc. Add the people you are introducing in To; nothing has been sent.')}</span>}
-      {isReply && !isForward && !htmlMode && <div aria-label={t("compose.snippets.quickReplies", "Quick replies")} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginRight: 'auto' }}>
-        {QUICK_REPLIES.map(reply => <button key={reply.label} type="button" disabled={sending}
-          title={t("compose.snippets.quickReplyHint", "Insert reply text without sending")} onMouseDown={e => e.preventDefault()}
-          onClick={() => { rememberInsertionCursor(); try { insertSnippet({ ...reply, body: t(reply.bodyKey, reply.body) }); } catch (err) { setError(err.message); } }}
-          style={{ border: '1px solid var(--border)', borderRadius: 5, padding: '4px 7px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', fontSize: 11, cursor: 'pointer' }}>{t(reply.labelKey, reply.label)}</button>)}
-      </div>}
-      <button type="button" onMouseDown={e => e.preventDefault()} onClick={openAvailability} disabled={htmlMode || sending}
-        aria-label={t("compose.availability.title", "Share availability")} aria-haspopup="dialog" aria-expanded={availabilityOpen}
-        title={htmlMode ? t("compose.snippets.availabilityRichText", "Switch to rich text to insert availability") : t("compose.snippets.availabilityHint", "Manually choose an available time")}
-        style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', padding: '5px 4px', fontSize: 12, cursor: htmlMode || sending ? 'not-allowed' : 'pointer' }}>{t("compose.snippets.availability", "Availability")}</button>
-      <button type="button" onMouseDown={e => e.preventDefault()} onClick={openSnippets} disabled={htmlMode || sending}
-        aria-label={t("compose.snippets.open", "Open snippets")} aria-haspopup="dialog" aria-expanded={snippetsOpen}
-        title={htmlMode ? t("compose.snippets.richTextHint", "Switch to rich text to insert snippets") : t("compose.snippets.insertHint", "Insert snippet (Ctrl/Cmd+;)")}
-        style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', padding: '5px 4px', fontSize: 12, cursor: htmlMode || sending ? 'not-allowed' : 'pointer' }}>
-        {htmlMode ? t("compose.snippets.richTextLabel", "Snippets · switch to rich text to insert") : t("compose.snippets.title", "Snippets")}
-      </button>
-    </div>
-  );
-
   // ── Mobile full-screen compose ──────────────────────────────────────────────
   if (isMobile) {
     const switchToReply = () => {
@@ -2438,7 +2288,6 @@ export default function ComposeModal() {
 
     return (
       <>
-      {snippetDialog}
       <div style={{
         position: 'fixed', inset: 0, zIndex: 1999,
         background: 'rgba(0,0,0,0.25)',
@@ -2446,7 +2295,6 @@ export default function ComposeModal() {
       }} />
       <div
         ref={composePanelRef}
-        onKeyDownCapture={handleComposeKeyDownCapture}
         onKeyDown={handleKeyDown}
         {...dropHandlers}
         style={{
@@ -2575,7 +2423,6 @@ export default function ComposeModal() {
         </div>
 
         {scheduledStrip}
-        <ComposeOpenActivity checked={trackOpens} onChange={setTrackOpens} plaintextEmail={plaintextEmail} disabled={sending} owner={composeOwner} />
 
         {/* Reply/Reply All toggle */}
         {isReply && (
@@ -2650,7 +2497,7 @@ export default function ComposeModal() {
             <span style={labelStyle}>{t('compose.to')}</span>
             <ChipInput
               chips={toChips} onChipsChange={setToChips}
-              value={toInput} onChange={setToInput} inputRef={toInputRef}
+              value={toInput} onChange={setToInput}
               placeholder={t('compose.toPh')}
               autoFocus={initialFocus === 'to'}
               inputStyle={mobileInputStyle}
@@ -2721,7 +2568,6 @@ export default function ComposeModal() {
             />
           </div>
 
-          {snippetControl}
           {/* Body */}
           {/* Plain text has no toolbar on a phone: a strip for attaching and the signature toggle. */}
           {plaintextEmail && (
@@ -2812,7 +2658,7 @@ export default function ComposeModal() {
           {(quotedBody || quotedBodyHtml) && (
             !plaintextEmail && quotedBodyHtml ? (
               <div
-                ref={quotedHtmlRef}
+                ref={attachQuotedEditor}
                 contentEditable
                 suppressContentEditableWarning
                 spellCheck={false}
@@ -3106,7 +2952,6 @@ export default function ComposeModal() {
 
   return (
     <>
-      {snippetDialog}
       {maximized && (
         <div
           onClick={() => setMaximized(false)}
@@ -3120,8 +2965,7 @@ export default function ComposeModal() {
     <div
       ref={composeWindowRef}
       className="compose-window"
-      onKeyDownCapture={handleComposeKeyDownCapture}
-        onKeyDown={handleKeyDown}
+      onKeyDown={handleKeyDown}
       {...dropHandlers}
       style={maximized ? {
         position: 'fixed', top: 28, left: 28, right: 28, bottom: 28,
@@ -3303,7 +3147,7 @@ export default function ComposeModal() {
           <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.to')}</span>
           <ChipInput
             chips={toChips} onChipsChange={setToChips}
-            value={toInput} onChange={setToInput} inputRef={toInputRef}
+            value={toInput} onChange={setToInput}
             placeholder={t('compose.toPh')}
             autoFocus={initialFocus === 'to'}
             inputStyle={{ ...inputStyle, borderBottom: 'none', padding: '6px 4px' }}
@@ -3366,7 +3210,6 @@ export default function ComposeModal() {
         </div>
       </div>
 
-      {snippetControl}
       {/* Toolbar — sits outside overflow container so dropdowns are never clipped */}
       {!plaintextEmail && <RichToolbar editor={editor} onAttach={() => fileInputRef.current?.click()} onInsertImage={() => imageInputRef.current?.click()}
         signatureControl={renderSignatureToggle()}
@@ -3449,7 +3292,7 @@ export default function ComposeModal() {
         {(quotedBody || quotedBodyHtml) ? (
           !plaintextEmail && quotedBodyHtml ? (
             <div
-              ref={quotedHtmlRef}
+              ref={attachQuotedEditor}
               contentEditable
               suppressContentEditableWarning
               spellCheck={false}
@@ -3483,7 +3326,6 @@ export default function ComposeModal() {
         ) : null}
       </div>
 
-      <ComposeOpenActivity checked={trackOpens} onChange={setTrackOpens} plaintextEmail={plaintextEmail} disabled={sending} owner={composeOwner} />
       {/* Footer */}
       <div style={{
         padding: '10px 14px', borderTop: '1px solid var(--border-subtle)',
