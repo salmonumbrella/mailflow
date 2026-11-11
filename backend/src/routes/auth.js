@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { getSavedSplits, putSavedSplits } from './savedSplitsPreferences.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { authenticator } from 'otplib';
@@ -749,9 +748,6 @@ router.get('/invite/:token', async (req, res) => {
   if (!result.rows.length) return res.status(404).json({ error: 'Invalid or expired invite' });
   res.json({ valid: true, email: result.rows[0].email });
 });
-
-router.get('/preferences/saved-splits', getSavedSplits);
-router.put('/preferences/saved-splits', putSavedSplits);
 
 router.get('/preferences', async (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
