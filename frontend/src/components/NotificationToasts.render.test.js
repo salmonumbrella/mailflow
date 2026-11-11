@@ -61,9 +61,9 @@ const NotificationToasts = (await import('./NotificationToasts.jsx')).default;
 const UndoBar = (await import('./UndoBar.jsx')).default;
 
 let root = null;
-async function mount({ mobile = false } = {}) {
+async function mount({ mobile = false, layout = 'comfortable' } = {}) {
   Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: mobile ? 375 : 1280 });
-  useStore.setState({ notifications: [] });
+  useStore.setState({ notifications: [], layout });
   root = createRoot(document.getElementById('root'));
   await React.act(async () => { root.render(React.createElement(NotificationToasts)); });
 }
@@ -119,4 +119,32 @@ test('on a phone the action bars and toasts are said the same way', async () => 
   assert.deepEqual(said('status'), ['Deleted']);
   assert.deepEqual(said('alert'), ['Could not restore it']);
   assert.deepEqual([...document.querySelectorAll('[role="status"], [role="alert"]')].map(el => el.dataset.announce), ['status', 'alert']);
+});
+
+
+test('Superhuman desktop undo stays visible and keeps its deadline across reader and list navigation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await mount({ layout: 'superhuman' });
+  let undone = 0;
+  await add({ title: 'Archived', onUndo: () => undone++ });
+  const undo = [...document.querySelectorAll('button')].find(b => b.textContent === 'common.undo');
+  assert.ok(undo, 'desktop Superhuman owns a global Undo control');
+  await React.act(async () => t.mock.timers.tick(2000));
+  await React.act(async () => useStore.setState({ selectedMessageId: 'next', selectedFolder: 'Archive', showContacts: true }));
+  assert.equal([...document.querySelectorAll('button')].find(b => b.textContent === 'common.undo'), undo, 'navigation keeps the same action bar mounted');
+  await React.act(async () => t.mock.timers.tick(2500));
+  assert.ok(undo.parentElement.className.includes('action-bar-exit'), 'the original 4500ms deadline is not restarted');
+  await React.act(async () => t.mock.timers.tick(190));
+  assert.equal(useStore.getState().notifications.length, 0);
+  assert.equal(undone, 0);
+});
+
+test('ordinary desktop keeps list-owned Undo and phones keep one native action bar', async () => {
+  await mount();
+  await add({ title: 'Archived', onUndo() {} });
+  assert.equal(document.querySelectorAll('button').length, 0);
+  await React.act(async () => root.unmount()); root = null;
+  await mount({ mobile: true, layout: 'superhuman' });
+  await add({ title: 'Archived', onUndo() {} });
+  assert.equal([...document.querySelectorAll('button')].filter(b => b.textContent === 'common.undo').length, 1);
 });

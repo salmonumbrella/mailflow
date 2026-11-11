@@ -36,9 +36,6 @@ import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/pri
 import AiResultBox from './AiResultBox.jsx';
 import { useAiActions } from '../hooks/useAiActions.js';
 import AttachmentStrip from './AttachmentStrip.jsx';
-import InvitationResponsePanel from './InvitationResponsePanel.jsx';
-import MessageOpenActivity from './MessageOpenActivity.jsx';
-import MessageMuteAction from './MessageMuteAction.jsx';
 import {
   ActionBtn, MessageTools, ReplySplitButton, RemoteImagesNotice, UnsubscribeNotice, TOUCH_MIN,
   AiReplyIcon, ForwardIcon, ArchiveIcon, MoveIcon, SpamIcon, HamIcon, TodoistIcon, ReadStateIcon, HeadersIcon,
@@ -1555,6 +1552,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       {/* Single scroll container — sender card + email body scroll together */}
       <div
         ref={scrollContainerRef}
+        className="mailflow-reader-scroll"
         onScroll={e => setPaneScrolled(e.currentTarget.scrollTop > 4)}
         onContextMenu={handlePaneContextMenu}
         style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', background: 'var(--bg-primary)' }}
@@ -2008,10 +2006,6 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
           />
         </div>
       )}
-      {body && <InvitationResponsePanel message={message} body={body} onArchive={handleArchive} />}
-      <MessageOpenActivity message={message} />
-      <MessageMuteAction message={message} />
-      <PluginSlot name="message-reader-footer" ctx={{ message, account }} />
       </div>{/* end single scroll container */}
       </SwipePager>
 

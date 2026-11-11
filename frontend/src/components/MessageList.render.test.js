@@ -1488,18 +1488,18 @@ describe('MessageList — Superhuman desktop list', () => {
     assert.ok(CALLS.some(call => call.path.includes(`/messages/${second.id}/body`)), 'Enter uses the real message opener');
   });
 
-  test('Enter delegates to the reader reply action once a message is open', async () => {
+  test('Enter delegates to the reader reply-all action once a message is open', async () => {
     await mountSuperhuman();
     let replies = 0;
     const onReply = () => { replies += 1; };
-    shortcutBus.on('reply', onReply);
+    shortcutBus.on('replyAll', onReply);
     try {
       await React.act(async () => shortcutBus.emit('openMessage'));
       assert.equal(replies, 0, 'first Enter opens the focused row');
       await React.act(async () => shortcutBus.emit('openMessage'));
       assert.equal(replies, 1, 'second Enter asks the actual reading pane to reply once');
       assert.equal(useStore.getState().composing, false, 'hidden list does not run the pane action again');
-    } finally { shortcutBus.off('reply', onReply); }
+    } finally { shortcutBus.off('replyAll', onReply); }
   });
 
   test('checkbox and shift selection expose the real bulk toolbar without opening mail', async () => {
