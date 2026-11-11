@@ -23,11 +23,9 @@ import { prefetchBody } from '../utils/bodyCache.js';
 import { applyReadGuard } from '../utils/pendingReads.js';
 import { applyDeleteGuard } from '../utils/pendingDeletes.js';
 import { ActionBtn, ArchiveIcon, MoveIcon, SnoozeIcon, SpamIcon, PrintIcon, TrashIcon, useShortcutTitle } from './MessageActions.jsx';
-import { PluginSlot } from '../plugins/PluginSlot.jsx';
-import MessageOpenActivity from './MessageOpenActivity.jsx';
-import MessageMuteAction from './MessageMuteAction.jsx';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { topOpenMessageWindow } from '../utils/messageHotkeys.js';
+import { PluginSlot } from '../plugins/PluginSlot.jsx';
 
 // What the reader is told when an action finds nothing to take (runAction below). In the unified
 // inbox, which has no "this account" to speak of, only Spam and Snooze can: keepDraftsApart and
@@ -188,7 +186,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   useEffect(() => {
     const navigate = direction => {
       const state = useStore.getState();
-      if (!selectedHere || loading || loadedConversation !== `${accountId || ''}\n${threadId}`
+      if (state.layout !== 'superhuman' || !selectedHere || loading || loadedConversation !== `${accountId || ''}\n${threadId}`
         || state.selectedMessageId !== selectedMessageId || !ownerId || state.user?.id !== ownerId || state.isLocked
         || state.showContacts || state.showAdmin || state.composing || topOpenMessageWindow(state)) return;
       const eligible = inAccount(messages, accountId).filter(message => state.accounts.some(account => account.id === message.account_id && account.enabled !== false));
@@ -436,6 +434,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
         // cards stay on screen until the next one lands, and a remount would mark them read again.
         key={loadedConversation ?? ''}
         ref={stackRef}
+        className="mailflow-reader-scroll"
         data-conversation-navigation={selectedHere && !loading && loadedConversation === `${accountId || ''}\n${threadId}` ? selectedMessageId : undefined}
         // flex: 1 and minWidth: 0 are load-bearing. The reading area is a flex row, so
         // without them this pane is sized shrink-to-fit by its contents: collapsed cards
@@ -461,9 +460,6 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
             aiReplyEnabled={aiReplyEnabled}
           />
         ))}
-        {headerMessage && <MessageMuteAction message={headerMessage} />}
-        {headerMessage && <MessageOpenActivity message={headerMessage} />}
-        {headerMessage && <PluginSlot name="message-reader-footer" ctx={headerContext} />}
       </div>
       </SwipePager>
     </div>

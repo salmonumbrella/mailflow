@@ -124,7 +124,7 @@ describe('Superhuman shell integration', () => {
     await update({ selectedMessageId: 'm1' });
     assert.equal(list.style.display, 'none');
     assert.equal(reader.style.display, 'flex');
-    assert.equal(document.querySelector('.superhuman-recent').parentElement.style.display, 'none');
+    assert.equal(document.querySelector('.superhuman-recent').parentElement.parentElement.style.display, 'none');
     await update({ selectedMessageId: null });
     assert.equal(list.style.display, 'flex');
     assert.match(document.querySelector('.superhuman-recent').textContent, /Session message/);
@@ -259,51 +259,27 @@ test('palette and slash search requests leave the full reader before refocusing 
 });
 
 
-test('auxiliary plugin navigation is opt-in, preserves mail, and respects browser Back and Escape', async () => {
-  const { registerPluginMeta } = await import('../plugins/registry.js');
-  registerPluginMeta('local-calendar', { navigation: { label: 'MailFlow calendar', symbol: '▦' } });
-  globalThis.__TEST_PLUGIN_SLOTS__ = (name, ctx) => name === 'auxiliary-view' && ctx.view === 'local-calendar'
-    ? [{ render: () => React.createElement('button', { 'data-test-aux-back': '', onClick: ctx.onBack }, 'Back to mail') }] : [];
-  await update({ enabledPlugins: [], selectedMessageId: 'm1' });
-  await click('[aria-label="MailFlow calendar"]');
-  assert.equal(useStore.getState().adminTab, 'plugins');
-  assert.equal(useStore.getState().showAdmin, true);
-  assert.equal(document.querySelector('[data-auxiliary-view]'), null);
-  await update({ showAdmin: false, enabledPlugins: ['local-calendar'] });
-  await click('[aria-label="MailFlow calendar"]');
-  assert.ok(document.querySelector('[data-auxiliary-view]'));
-  assert.equal(useStore.getState().selectedMessageId, 'm1');
-  const visibleReader = document.querySelector('[data-native-reader]');
-  assert.ok(visibleReader);
-  await React.act(async () => document.body.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'e', bubbles: true, cancelable: true })));
-  assert.equal(useStore.getState().selectedMessageId, 'm1');
-  await React.act(async () => window.dispatchEvent(new window.PopStateEvent('popstate', { state: { mailflow: 'message' } })));
-  assert.equal(document.querySelector('[data-auxiliary-view]'), null);
-  assert.equal(useStore.getState().selectedMessageId, 'm1');
-  await click('[aria-label="MailFlow calendar"]');
-  await click('[data-test-aux-back]');
-  assert.equal(document.querySelector('[data-auxiliary-view]'), null);
-  await click('[aria-label="MailFlow calendar"]');
-  await update({ enabledPlugins: [] });
-  assert.equal(document.querySelector('[data-auxiliary-view]'), null);
+
+test('an already-active plugin keeps its native sidebar in the list and full reader', async () => {
+  globalThis.__TEST_PLUGIN_SLOTS__ = name => name === 'right-sidebar' ? [{ render: () => React.createElement('div', { 'data-existing-plugin': '' }, 'Native plugin') }] : [];
+  await update({ selectedMessageId: 'm1' });
+  const plugin = document.querySelector('[data-existing-plugin]');
+  assert.ok(plugin);
+  assert.equal(plugin.parentElement.parentElement.style.display, '');
+  assert.equal(document.querySelector('.superhuman-recent'), null);
+  await update({ selectedMessageId: null });
+  assert.ok(document.querySelector('[data-existing-plugin]'));
+  assert.equal(useStore.getState().enabledPlugins.length, 0, 'the layout never activates a plugin');
 });
 
-
-test('open activity is separate from recently viewed and receives the real current account scope', async () => {
-  const reads = [];
-  api.get = async path => { reads.push(path); return { activity: [] }; };
-  await update({ selectedAccountId: 'a', selectedMessageId: 'm1' });
-  await click('[aria-label="Email open activity"]');
-  assert.ok(document.querySelector('[data-auxiliary-view="open-activity"]'));
-  assert.equal(reads.at(-1), '/open-activity?accountId=a');
-  assert.match(document.querySelector('[data-auxiliary-view]').textContent, /recently viewed mail is separate/);
-  await React.act(async () => document.body.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
-  assert.equal(document.querySelector('[data-auxiliary-view]'), null);
-  assert.equal(useStore.getState().selectedMessageId, 'm1');
-  await click('[aria-label="Email open activity"]');
-  await React.act(async () => [...document.querySelectorAll('[data-auxiliary-view] button')].find(b => b.textContent === 'Back to mail').click());
-  assert.equal(document.querySelector('[data-auxiliary-view]'), null);
-  await update({ selectedAccountId: null });
-  await click('[aria-label="Email open activity"]');
-  assert.equal(reads.at(-1), '/open-activity');
+test('choosing the layout persists only the native layout preference', async () => {
+  const before = useStore.getState();
+  await React.act(async () => before.setLayout('superhuman'));
+  assert.equal(localStorage.getItem('mailflow_layout'), 'superhuman');
+  assert.equal(useStore.getState().theme, before.theme);
+  assert.equal(useStore.getState().categorizationEnabled, before.categorizationEnabled);
+  assert.deepEqual(useStore.getState().enabledPlugins, before.enabledPlugins);
+  await React.act(async () => useStore.getState().setLayout('comfortable'));
+  assert.equal(localStorage.getItem('mailflow_layout'), 'comfortable');
+  assert.equal(document.querySelector('.superhuman-shell'), null);
 });

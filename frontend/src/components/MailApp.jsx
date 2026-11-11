@@ -11,8 +11,6 @@ import { LAYOUTS } from '../layouts.js';
 import { closeOpenMessage } from '../utils/closeMessage.js';
 import { updateFaviconBadge } from '../themes.js';
 import { installResumeRefresh } from '../utils/resumeRefresh.js';
-import MutedThreadsPanel from './MutedThreadsPanel.jsx';
-import { ThreadMuteRuntime } from './MessageMuteAction.jsx';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { NATIVE_TARGET_ACTIONS, nativeShortcutTarget, nativeTabTarget } from '../utils/nativeShortcutTargets.js';
 import { dispatchHoveredGtdShortcut } from '../utils/gtdHoveredRow.js';
@@ -22,10 +20,6 @@ import { selectedPickerMessage } from '../utils/labelPicker.js';
 import { applyMarkRead } from '../utils/markRead.js';
 import { buildKeyMap, resolveShortcutAction, shortcutActionText, getEffectiveShortcuts, getGroupedActions, parseModKey, modLabel, SPECIAL_KEYS, SPECIAL_KEY_LABELS } from '../utils/defaultShortcuts.js';
 import Sidebar from './Sidebar.jsx';
-import SenderContext from './SenderContext.jsx';
-import OpenActivityPanel from './OpenActivityPanel.jsx';
-import { SnippetsPanel } from './SnippetsPanel.jsx';
-import { openSnippetDraft } from '../utils/mailSnippets.js';
 import { accountForShortcut, runAccountShortcut } from '../utils/accountShortcuts.js';
 import { SuperhumanRail, SuperhumanRecent, SuperhumanFooter, SuperhumanFolderDrawer } from './SuperhumanShell.jsx';
 import MessageList from './MessageList.jsx';
@@ -127,48 +121,6 @@ export default function MailApp() {
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [superhumanFoldersOpen, setSuperhumanFoldersOpen] = useState(false);
-  const [auxiliaryView, setAuxiliaryView] = useState(null);
-  const auxiliaryRef = useRef(null);
-  const auxiliaryVersionRef = useRef(0);
-  const enabledPlugins = useStore(s => s.enabledPlugins);
-  const closeAuxiliary = useCallback(() => {
-    auxiliaryVersionRef.current++;
-    auxiliaryRef.current = null; setAuxiliaryView(null);
-    if (history.state?.mailflowAux) history.replaceState({ ...history.state, mailflowAux: null }, '', window.location.href);
-  }, []);
-  const openAuxiliary = (id) => {
-    if (!['open-activity', 'snippets', 'muted'].includes(id) && !enabledPlugins.includes(id)) { useStore.getState().setAdminTab('plugins'); setShowAdmin(true); return; }
-    if (auxiliaryRef.current === id) return;
-    auxiliaryVersionRef.current++;
-    history.pushState({ ...history.state, mailflowAux: id }, '', window.location.href);
-    auxiliaryRef.current = id; setAuxiliaryView(id); setSuperhumanFoldersOpen(false);
-  };
-  useEffect(() => {
-    const onPop = event => {
-      auxiliaryVersionRef.current++;
-      const next = event.state?.mailflowAux;
-      if (auxiliaryRef.current || next) event.mailflowAuxHandled = true;
-      auxiliaryRef.current = ['open-activity', 'snippets', 'muted'].includes(next) || enabledPlugins.includes(next) ? next : null;
-      setAuxiliaryView(auxiliaryRef.current);
-    };
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
-  }, [enabledPlugins]);
-  useEffect(() => { if (auxiliaryView && (layout !== 'superhuman' || (!['open-activity', 'snippets', 'muted'].includes(auxiliaryView) && !enabledPlugins.includes(auxiliaryView)))) closeAuxiliary(); }, [auxiliaryView, layout, enabledPlugins, closeAuxiliary]);
-  const composeSnippet = async snippet => {
-    const version = auxiliaryVersionRef.current;
-    const opened = await openSnippetDraft(useStore, snippet, () => auxiliaryRef.current === 'snippets' && auxiliaryVersionRef.current === version);
-    if (!opened) throw new Error(t('snippets.composeBlocked', 'The current draft could not be saved or the mail account changed. Your existing draft has been kept.'));
-    closeAuxiliary();
-    return true;
-  };
-  const auxiliaryCtx = { view: auxiliaryView, userId: user?.id, onBack: closeAuxiliary };
-  const auxiliaryProviders = usePluginSlot('auxiliary-view', auxiliaryCtx);
-  const auxiliaryContent = auxiliaryView === 'open-activity'
-    ? <OpenActivityPanel key={`${user?.id}:${selectedAccountId || 'all'}`} accountId={selectedAccountId} onBack={closeAuxiliary} />
-    : auxiliaryView === 'muted' ? <MutedThreadsPanel key={`${user?.id}:${selectedAccountId || 'all'}`} accountId={selectedAccountId} onBack={closeAuxiliary} />
-    : auxiliaryView === 'snippets' ? <SnippetsPanel key={user?.id} onCompose={composeSnippet} onClose={closeAuxiliary} />
-      : auxiliaryView && auxiliaryProviders[0]?.render(auxiliaryCtx);
   const [searchRequested, setSearchRequested] = useState(false);
   const [labelPickerMessage, setLabelPickerMessage] = useState(null);
   const labelPickerRef = useRef(null);
@@ -241,11 +193,10 @@ export default function MailApp() {
   const listFirst = !isMobile && Boolean(currentLayout.listFirst);
   const singleView = isMobile || listFirst;
   const superhuman = !isMobile && layout === 'superhuman';
-  const toggleSuperhumanFolders = useCallback(() => { closeAuxiliary(); setSuperhumanFoldersOpen(open => !open); }, [closeAuxiliary]);
+  const toggleSuperhumanFolders = useCallback(() => setSuperhumanFoldersOpen(open => !open), []);
   const closeSuperhumanFolders = useCallback(() => setSuperhumanFoldersOpen(false), []);
   useEffect(() => { setSuperhumanFoldersOpen(false); }, [selectedAccountId, selectedFolder, layout, isMobile]);
   const searchMail = () => {
-    closeAuxiliary();
     setShowContacts(false);
     setSearchRequested(true);
     if (selectedMessageId) closeOpenMessage();
@@ -277,11 +228,8 @@ export default function MailApp() {
   const rightSidebarCtx = { accounts, selectedAccountId, onCollapse: toggleRightSidebarHidden, toggleHint: rightSidebarToggleHint };
   const rightSidebarProviders = usePluginSlot('right-sidebar', rightSidebarCtx);
   const rightSidebarContent = rightSidebarProviders.length ? rightSidebarProviders[0].render(rightSidebarCtx)
-    : superhuman ? <>
-      <div style={{ display: selectedMessageId ? 'none' : undefined, height: '100%' }}><SuperhumanRecent key={user?.id || 'session'} onCollapse={toggleRightSidebarHidden} toggleHint={rightSidebarToggleHint} /></div>
-      {selectedMessageId && <SenderContext onCollapse={toggleRightSidebarHidden} toggleHint={rightSidebarToggleHint} />}
-    </> : null;
-  const rightSidebarVisible = !superhuman || (!showContacts && (!selectedMessageId || !rightSidebarProviders.length));
+    : superhuman ? <SuperhumanRecent key={user?.id || 'session'} onCollapse={toggleRightSidebarHidden} toggleHint={rightSidebarToggleHint} /> : null;
+  const rightSidebarVisible = !superhuman || !selectedMessageId || rightSidebarProviders.length > 0;
   const rightSidebarApplicable = !isMobile && currentLayout.direction === 'row' && rightSidebarContent != null && rightSidebarVisible;
 
   const handleListResizeMouseDown = (e) => {
@@ -370,7 +318,6 @@ export default function MailApp() {
       history.pushState({ mailflow: 'guard' }, '', '/');
     }
     const handler = (event) => {
-      if (event.mailflowAuxHandled || auxiliaryRef.current || event.state?.mailflowAux) return;
       if (selectedMessageIdRef.current) setSelectedMessage(null);
       // Backing out of a message lands on the existing guard entry. Re-pushing
       // during that popstate can make iOS PWA history gestures temporarily stop
@@ -388,7 +335,7 @@ export default function MailApp() {
   useEffect(() => {
     if (!listFirst) return undefined;
     const onKey = (e) => {
-      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || e.keyCode === 229 || !selectedMessageIdRef.current || document.querySelector('[data-auxiliary-view]')) return;
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || e.keyCode === 229 || !selectedMessageIdRef.current) return;
       if (composingRef.current || showAdminRef.current || paletteOpenRef.current || showShortcutHelpRef.current) return;
       if (document.querySelector('[role="menu"], [role="dialog"], [role="listbox"]')) return;
       const tag = e.target.tagName;
@@ -718,7 +665,7 @@ export default function MailApp() {
 
     const canRun = (action) => {
       if (NATIVE_TARGET_ACTIONS.has(action) && !nativeShortcutTarget(action, useStore.getState())) return false;
-      if (document.querySelector('#superhuman-folders') && action !== 'toggleLeftSidebar' && !/^goVisibleMailbox[1-9]$/.test(action) && !/^goAccount[1-9]$/.test(action)) return false;
+      if (document.querySelector('#superhuman-folders') && action !== 'toggleLeftSidebar' && action !== 'openFolderDrawer' && !/^goVisibleMailbox[1-9]$/.test(action) && !/^goAccount[1-9]$/.test(action)) return false;
       if (/^goAccount[1-9]$/.test(action)) return Boolean(accountForShortcut(action, useStore.getState()));
       if (!canRunGlobalAction(action, { rightSidebarApplicable })) return false;
       if (!canRunSelectedAction(action, useStore.getState())) return false;
@@ -729,13 +676,12 @@ export default function MailApp() {
     };
 
     const dispatchAction = action => {
-      if (action === 'focusPrivateNote') { nativeShortcutTarget(action, useStore.getState())?.focus(); return; }
-      if (action === 'nextSavedSplit' || action === 'prevSavedSplit') { nativeShortcutTarget(action, useStore.getState())?.click(); return; }
       if (!dispatchHoveredGtdShortcut(action, useStore.getState())) shortcutBus.emit(action);
     };
 
     const handler = (e) => {
-      if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || document.querySelector('[data-auxiliary-view]')) return;
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (e.repeat && ['returnToInbox', 'filterUnread', 'filterStarred'].includes(resolveShortcutAction(e, shortcuts, layout))) return;
       if (composingRef.current || showAdminRef.current || paletteOpenRef.current || showShortcutHelpRef.current) return;
       const modal = document.querySelector('[role="menu"], [role="dialog"], [role="listbox"], details.sh-list-options[open]');
       if (modal && modal.id !== 'superhuman-folders') return;
@@ -840,10 +786,11 @@ export default function MailApp() {
   }, []);
 
   useEffect(() => {
-    const actions = ['toggleLeftSidebar', ...Array.from({ length: 9 }, (_, i) => `goVisibleMailbox${i + 1}`), ...Array.from({ length: 9 }, (_, i) => `goAccount${i + 1}`)];
+    const actions = ['toggleLeftSidebar', 'openFolderDrawer', ...Array.from({ length: 9 }, (_, i) => `goVisibleMailbox${i + 1}`), ...Array.from({ length: 9 }, (_, i) => `goAccount${i + 1}`)];
     const handlers = actions.map(action => {
       const handler = () => {
-        if (/^goAccount[1-9]$/.test(action)) { closeAuxiliary(); runAccountShortcut(action, useStore.getState()); }
+        if (/^goAccount[1-9]$/.test(action)) { runAccountShortcut(action, useStore.getState()); }
+        else if (superhuman && action === 'openFolderDrawer') setSuperhumanFoldersOpen(true);
         else if (superhuman && action === 'toggleLeftSidebar') toggleSuperhumanFolders();
         else runMailboxShortcut(action, useStore.getState(), document.querySelector('[data-mailbox-sidebar]'));
       };
@@ -851,7 +798,7 @@ export default function MailApp() {
       return [action, handler];
     });
     return () => handlers.forEach(([action, handler]) => shortcutBus.off(action, handler));
-  }, [superhuman, toggleSuperhumanFolders, closeAuxiliary]);
+  }, [superhuman, toggleSuperhumanFolders]);
 
   // Close help overlay on Escape
   useEffect(() => {
@@ -1004,7 +951,7 @@ export default function MailApp() {
       ) : (
         <>
           {superhuman ? <>
-            <SuperhumanRail auxiliaryView={auxiliaryView} onOpenAuxiliary={openAuxiliary} onMailNavigate={closeAuxiliary} foldersOpen={superhumanFoldersOpen} onToggleFolders={toggleSuperhumanFolders} onSearch={searchMail} onCommands={() => setPaletteOpen(true)} onHelp={() => setShowShortcutHelp(true)} />
+            <SuperhumanRail foldersOpen={superhumanFoldersOpen} onToggleFolders={toggleSuperhumanFolders} onSearch={searchMail} onCommands={() => setPaletteOpen(true)} onHelp={() => setShowShortcutHelp(true)} />
             {superhumanFoldersOpen && <SuperhumanFolderDrawer onClose={closeSuperhumanFolders}>
               <Sidebar expanded onToggle={closeSuperhumanFolders} />
             </SuperhumanFolderDrawer>}
@@ -1029,19 +976,18 @@ export default function MailApp() {
             // A standalone PWA draws under the status bar; the sidebar header already clears it.
             paddingTop: 'var(--sat)',
           }}>
-            {auxiliaryContent && <div data-auxiliary-view={auxiliaryView} style={{ flex: 1, minHeight: 0, display: 'flex' }}>{auxiliaryContent}</div>}
-            {/* Keep native mail mounted behind auxiliary tools. */}
-            <div style={{ display: !auxiliaryContent && showContacts ? 'flex' : 'none', flex: 1, minWidth: 0, overflow: 'hidden', height: '100%' }}>
+            {/* Keep native list and reader mounted so navigation preserves their state. */}
+            <div style={{ display: showContacts ? 'flex' : 'none', flex: 1, minWidth: 0, overflow: 'hidden', height: '100%' }}>
               <Suspense fallback={lazyFallback}><ContactsPage /></Suspense>
             </div>
-            <div style={{ display: showContacts || auxiliaryContent ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', height: superhuman ? undefined : '100%', flexDirection: currentLayout.direction }}>
+            <div style={{ display: showContacts ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', height: superhuman ? undefined : '100%', flexDirection: currentLayout.direction }}>
               {listFirst ? (
                 <>
                   {/* Both stay mounted, as on a phone, so the list keeps its place behind a message. */}
                   <div style={{ display: selectedMessageId ? 'none' : 'flex', flex: 1, minWidth: 0, overflow: 'hidden', height: '100%' }}>
                     <MessageList />
                   </div>
-                  <div style={{ display: selectedMessageId ? 'flex' : 'none', flex: 1, minWidth: 0, overflow: 'hidden', height: '100%' }}>
+                  <div className={superhuman ? 'superhuman-reader' : undefined} style={{ display: selectedMessageId ? 'flex' : 'none', flex: 1, minWidth: 0, overflow: 'hidden', height: '100%' }}>
                     <ReadingPane />
                   </div>
                 </>
@@ -1123,7 +1069,7 @@ export default function MailApp() {
                 </>
               )}
             </div>
-            {superhuman && !auxiliaryContent && <SuperhumanFooter onCommands={() => setPaletteOpen(true)} onHelp={() => setShowShortcutHelp(true)} />}
+            {superhuman && <SuperhumanFooter onCommands={() => setPaletteOpen(true)} onHelp={() => setShowShortcutHelp(true)} />}
           </div>
         </>
       )}
@@ -1136,8 +1082,8 @@ export default function MailApp() {
       <Suspense fallback={null}>{hasNativeBridge && <ElectronNotificationBridge />}</Suspense>
       <NotificationToasts />
       <BusinessNotice hidden={composing || showAdmin || (isMobile && mobileSidebarOpen)} />
-      <PluginRuntime /><ThreadMuteRuntime />
-      <CommandPalette open={paletteOpen} labelPickerMessage={labelPickerMessage} mailVisible={isMobile || !auxiliaryContent} onMailNavigate={closeAuxiliary}
+      <PluginRuntime />
+      <CommandPalette open={paletteOpen} labelPickerMessage={labelPickerMessage}
         onClose={() => { setPaletteOpen(false); setLabelPickerMessage(null); }} />
 
       {/* Keyboard shortcut help overlay — toggled by the '?' key */}

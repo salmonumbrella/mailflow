@@ -12,7 +12,6 @@ import { openReplyFromMessage, openForwardFromMessage } from '../utils/composeFr
 import { shortcutBus } from '../utils/shortcutBus.js';
 import MessageBodyView from './MessageBodyView.jsx';
 import AttachmentStrip from './AttachmentStrip.jsx';
-import InvitationResponsePanel from './InvitationResponsePanel.jsx';
 import { isDarkTheme, canShowDark, showDark } from '../utils/darkScheme.js';
 import AiResultBox from './AiResultBox.jsx';
 import { useAiActions } from '../hooks/useAiActions.js';
@@ -378,7 +377,6 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
           {/* Attachments, the reading pane's strip (#634), where the reading pane has it: above the
               message. The body response already carries them. */}
           <AttachmentStrip messageId={message.id} attachments={body?.attachments} style={{ marginBottom: 12 }} />
-          {body && <InvitationResponsePanel message={message} body={body} />}
           {/* AI results pinned above the message, as in the reading pane (#204). */}
           {Object.keys(ai.results).length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, margin: '4px 0 12px' }}>
