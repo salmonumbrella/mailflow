@@ -8,9 +8,9 @@ const selected = {
 };
 const t = (_key, options) => options.defaultValue;
 
-test('commands resolve to native mail actions and describe Done as archive', () => {
+test('commands resolve to native mail actions and name Archive accurately', () => {
   const commands = mailCommandDefinitions(selected, t);
-  assert.match(commands.find(item => item.action === 'archive').detail, /Archive folder/);
+  assert.equal(commands.find(item => item.action === 'archive').label, 'Archive');
   assert.equal(commands.find(item => item.action === 'archive').shortcut, 'E');
   assert.equal(commands.find(item => item.action === 'snooze').shortcut, 'H');
   assert.equal(commands.find(item => item.action === 'replyAll').shortcut, '⇧ R');
@@ -36,6 +36,7 @@ test('folders and undo reflect real availability rather than placeholder actions
   assert.equal(canRunMailCommand('moveMessage', withoutFolders), false);
   assert.equal(canRunMailCommand('openLabelPicker', withoutFolders), false);
   assert.equal(canRunMailCommand('openLabelPicker', { ...selected, folders: {} }), true);
+  assert.equal(canRunMailCommand('moveMessage', { ...selected, folders: {} }), true, 'the native picker fetches unknown folders');
   assert.equal(canRunMailCommand('openLabelPicker', { ...selected, folders: { a: [] } }), false);
   assert.equal(canRunMailCommand('undoAction', { notifications: [] }), false);
   assert.equal(canRunMailCommand('undoAction', { notifications: [{ onUndo() {} }] }), true);

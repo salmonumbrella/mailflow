@@ -85,21 +85,3 @@
   .sh-mail-row-content { grid-template-columns: 24px minmax(100px, 23%) minmax(0, 1fr) max-content; gap: 8px; padding-right: 12px; }
   .sh-mail-indicator { width: 24px; }
 }
-
-.sh-saved-splits { padding-top: 8px; min-width: 0; }
-.sh-splits-error { color: var(--text-secondary); font-size: 12px; padding-top: 8px; }
-.sh-splits-backdrop { position: fixed; inset: 0; z-index: 1200; background: rgba(0,0,0,.62); display: flex; align-items: center; justify-content: center; padding: 20px; }
-.sh-splits-dialog { box-sizing: border-box; width: min(720px, 100%); max-height: 90vh; overflow-y: auto; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 14px; padding: 24px; box-shadow: 0 20px 80px #0008; }
-.sh-splits-dialog h2 { margin: 0 0 12px; font-size: 20px; }
-.sh-splits-dialog p { font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
-.sh-splits-dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
-.sh-splits-editor { list-style: none; padding: 0; display: grid; gap: 16px; }
-.sh-splits-editor li { border-bottom: 1px solid var(--border); padding-bottom: 12px; display: grid; gap: 8px; }
-.sh-splits-editor label { display: grid; gap: 4px; font-size: 12px; color: var(--text-secondary); }
-.sh-splits-editor input { width: 100%; box-sizing: border-box; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; padding: 8px; color: var(--text-primary); }
-.sh-splits-dialog button, .sh-splits-error button { border: 1px solid var(--border); border-radius: 6px; padding: 7px 11px; background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
-.sh-splits-dialog button:disabled { opacity: .45; cursor: default; }
-.sh-splits-actions, .sh-splits-footer { display: flex; flex-wrap: wrap; gap: 8px; }
-.sh-splits-hide { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 16px 0; }
-.sh-splits-footer { justify-content: flex-end; margin-top: 20px; }
-.sh-splits-dialog :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

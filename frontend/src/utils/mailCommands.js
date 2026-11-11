@@ -5,13 +5,14 @@ import { getEffectiveShortcuts, modLabel, SPECIAL_KEY_LABELS } from './defaultSh
 
 const MESSAGE_COMMANDS = new Set([
   'archive', 'snooze', 'toggleRead', 'markUnread', 'toggleStar', 'reply',
-  'replyAll', 'forward', 'delete', 'openLabelPicker', 'moveMessage', 'toggleThreadMute',
+  'replyAll', 'forward', 'returnToInbox', 'delete', 'openLabelPicker', 'moveMessage',
 ]);
 
 // The palette uses exactly the targets/actions owned by the existing mail UI.
 export function canRunMailCommand(action, state) {
   if (state.composing || state.showAdmin || state.showContacts) return false;
   if (action === 'undoAction') return state.notifications?.some(item => typeof item.onUndo === 'function') ?? false;
+  if (['filterUnread', 'filterStarred'].includes(action)) return canRunSelectedAction(action, state);
   if (!MESSAGE_COMMANDS.has(action)) return true;
   const message = selectedMessage(state);
   const account = state.accounts?.find(item => item.id === message?.account_id);
@@ -23,7 +24,8 @@ export function canRunMailCommand(action, state) {
     return !Array.isArray(folders) || labelPickerOptions(folders, account, message.folder).length > 0;
   }
   if (action === 'moveMessage') {
-    return state.folders?.[account.id]?.some(folder => folder.path && !folder.no_select && folder.path !== message.folder) ?? false;
+    const folders = state.folders?.[account.id];
+    return !Array.isArray(folders) || folders.some(folder => folder.path && !folder.no_select && folder.path !== message.folder);
   }
   return true;
 }
@@ -44,21 +46,22 @@ export function mailCommandDefinitions(state, t) {
     disabled: !canRunMailCommand(action, state),
     targetId: MESSAGE_COMMANDS.has(action) ? message?.id : null,
   });
-  const tr = (name, defaultValue) => t(`commandPalette.mail.${name}`, { defaultValue });
+  const tr = (key, defaultValue) => t(key, { defaultValue });
   return [
-    command('archive', state.layout === 'superhuman' ? tr('done', 'Done') : tr('archive', 'Archive'), tr('archiveDetail', 'Archive using your account’s Archive folder'), 'archive'),
-    command('snooze', tr('snooze', 'Snooze…'), tr('snoozeDetail', 'Choose when this message returns'), 'remind later'),
-    command('reply', tr('reply', 'Reply')),
-    command('replyAll', tr('replyAll', 'Reply all')),
-    command('forward', tr('forward', 'Forward')),
-    command(message?.is_read ? 'markUnread' : 'toggleRead', message?.is_read ? tr('markUnread', 'Mark unread') : tr('markRead', 'Mark read')),
-    command('toggleStar', message?.is_starred ? tr('unstar', 'Remove star') : tr('star', 'Star message'), '', 'important'),
-    command('openLabelPicker', tr('label', 'Label or copy to folder…')),
-    command('moveMessage', tr('move', 'Move to folder…')),
-    command('toggleThreadMute', t('mutedThreads.actionDescription', 'Mute or unmute the selected conversation'), t('mutedThreads.description', 'Muted conversations stay in MailFlow. New-mail alerts for matching messages are silenced. Muting archives the current inbox conversation; unmuting does not move it back.'), 'mute silence'),
-    command('delete', tr('delete', 'Delete message'), tr('deleteDetail', 'Drafts and messages already in Trash are permanently deleted'), 'trash'),
-    command('undoAction', tr('undo', 'Undo last action'), tr('undoDetail', 'Undo while its notification is available')),
-    command('focusSearch', tr('search', 'Search mail'), '', 'find'),
-    command('showHelp', tr('help', 'Keyboard shortcuts'), '', 'help keys'),
+    command('archive', tr('contextMenu.archive', 'Archive'), '', 'archive done'),
+    command('snooze', tr('contextMenu.snooze.label', 'Snooze…'), '', 'remind later'),
+    command('reply', tr('contextMenu.reply', 'Reply')),
+    command('replyAll', tr('contextMenu.replyAll', 'Reply all')),
+    command('forward', tr('contextMenu.forward', 'Forward')),
+    command(message?.is_read ? 'markUnread' : 'toggleRead', message?.is_read ? tr('contextMenu.markUnread', 'Mark unread') : tr('contextMenu.markRead', 'Mark read')),
+    command('toggleStar', message?.is_starred ? tr('contextMenu.unstar', 'Remove star') : tr('contextMenu.star', 'Star message')),
+    command('openLabelPicker', tr('commandPalette.labelPicker.placeholder', 'Copy or label selected message…')),
+    command('moveMessage', tr('contextMenu.folders.back', 'Move to folder…')),
+    ...(state.layout === 'superhuman' ? [command('returnToInbox', tr('shortcuts.actions.returnToInbox.label', 'Return to Inbox')),
+      ...['filterUnread', 'filterStarred'].map(action => command(action, tr(`shortcuts.actions.${action}.label`, action === 'filterUnread' ? 'Filter unread' : 'Filter starred')))] : []),
+    command('delete', tr('contextMenu.delete', 'Delete'), '', 'trash'),
+    command('undoAction', tr('shortcuts.actions.undoAction.label', 'Undo last action'), tr('shortcuts.actions.undoAction.description', 'Undo while its notification is available')),
+    command('focusSearch', tr('messageList.search', 'Search mail'), '', 'find'),
+    command('showHelp', tr('shortcuts.title', 'Keyboard shortcuts'), '', 'help keys'),
   ];
 }

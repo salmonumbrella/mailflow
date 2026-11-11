@@ -1,6 +1,6 @@
 import { topOpenMessageWindow } from './messageHotkeys.js';
 
-export const NATIVE_TARGET_ACTIONS = new Set(['nextSavedSplit', 'prevSavedSplit', 'focusPrivateNote', 'nextConversationMessage', 'prevConversationMessage']);
+export const NATIVE_TARGET_ACTIONS = new Set(['nextConversationMessage', 'prevConversationMessage']);
 
 const isVisible = node => {
   for (let parent = node; parent; parent = parent.parentElement) {
@@ -13,23 +13,7 @@ const isVisible = node => {
 // continue ordinary focus navigation from every interactive control and from the reader.
 export function nativeShortcutTarget(action, state, root = document) {
   if (!NATIVE_TARGET_ACTIONS.has(action) || !state.user || state.isLocked || state.showContacts || state.showAdmin || state.composing || topOpenMessageWindow(state)) return null;
-  if (action === 'nextSavedSplit' || action === 'prevSavedSplit') {
-    if (state.layout !== 'superhuman' || state.selectedMessageId || state.selectedFolder !== 'INBOX'
-      || (state.searchQuery?.trim() && !state.activeSavedSplitId)) return null;
-    const buttons = [...root.querySelectorAll('[data-saved-split-id]')].filter(isVisible);
-    if (buttons.length < 2) return null;
-    const index = buttons.findIndex(button => button.dataset.savedSplitId === (state.activeSavedSplitId || ''));
-    if (index < 0) return null;
-    return buttons[(index + (action === 'nextSavedSplit' ? 1 : buttons.length - 1)) % buttons.length];
-  }
-  if (!state.selectedMessageId) return null;
-  if (action === 'focusPrivateNote') {
-    if (!state.enabledPlugins?.includes('private-notes')) return null;
-    return [...root.querySelectorAll('textarea[data-private-note-message-id]:not(:disabled)')].find(node =>
-      node.dataset.privateNoteMessageId === String(state.selectedMessageId)
-      && state.accounts.some(account => String(account.id) === node.dataset.privateNoteAccountId && account.enabled !== false)
-      && isVisible(node)) || null;
-  }
+  if (!state.selectedMessageId || state.layout !== 'superhuman') return null;
   return [...root.querySelectorAll('[data-conversation-navigation]')].find(node =>
     node.dataset.conversationNavigation === String(state.selectedMessageId) && isVisible(node)) || null;
 }

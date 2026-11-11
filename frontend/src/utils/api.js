@@ -228,9 +228,6 @@ export const api = {
   me: () => request('GET', '/auth/me'),
   forgotPassword: (email) => request('POST', '/auth/forgot-password', { email }),
   resetPassword: (token, password) => request('POST', '/auth/reset-password', { token, password }),
-  getSavedSplits: () => request('GET', '/auth/preferences/saved-splits'),
-  saveSavedSplits: (prefs) => request('PUT', '/auth/preferences/saved-splits', prefs),
-  getSavedSplitCounts: (accountId) => request('GET', `/search/splits${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
   getPreferences: () => request('GET', '/auth/preferences'),
   savePreferences: (prefs) => request('PATCH', '/auth/preferences', prefs),
   // The same write, but issued while the page is going away. keepalive lets the browser
@@ -390,8 +387,6 @@ export const api = {
     return request('GET', `/mail/messages?${qs}`);
   },
   getMessage: (id) => request('GET', `/mail/messages/${id}`),
-  getInvitation: (id) => request('GET', `/mail/messages/${id}/invitation`),
-  respondToInvitation: (id, body) => request('POST', `/mail/messages/${id}/invitation`, body),
   // Resolve a deep-link reference (stable Message-ID header, or a legacy UUID) to the
   // current message row — durable across folder moves (#270).
   resolveMessage: (ref, accountId) => {
@@ -423,7 +418,7 @@ export const api = {
   bulkDelete: (ids) => request('POST', '/mail/messages/bulk-delete', { ids }),
   bulkMove: (ids, folder) => request('POST', '/mail/messages/bulk-move', { ids, folder }),
   copyMessage: (id, folder) => request('POST', `/mail/messages/${encodeURIComponent(id)}/copy`, { folder }),
-  bulkArchive: (ids, afterSend, muteGuard) => request('POST', '/mail/messages/bulk-archive', { ids, ...(afterSend ? { afterSend } : {}), ...(muteGuard ? { muteGuard } : {}) }),
+  bulkArchive: (ids) => request('POST', '/mail/messages/bulk-archive', { ids }),
   getUnreadCounts: () => request('GET', '/mail/unread-counts'),
 
   // Mailbox cleanup (read-only analysis; actual cleanup reuses bulkDelete above).

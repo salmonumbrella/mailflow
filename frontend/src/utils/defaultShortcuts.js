@@ -29,6 +29,9 @@ export const ACTION_DEFS = {
   nextMessage:   { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.nextMessage.label',   descriptionKey: 'shortcuts.actions.nextMessage.description',   defaultKey: 'j'  },
   prevMessage:   { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.prevMessage.label',   descriptionKey: 'shortcuts.actions.prevMessage.description',   defaultKey: 'k'  },
   openMessage:   { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.openMessage.label',   descriptionKey: 'shortcuts.actions.openMessage.description',   defaultKey: 'o'  },
+  ...Object.fromEntries(['openFolderDrawer', 'openHighlightedMessage', 'filterUnread', 'filterStarred'].map(action =>
+    [action, { groupKey: 'shortcuts.groups.navigation', labelKey: `shortcuts.actions.${action}.label`, descriptionKey: `shortcuts.actions.${action}.description`, defaultKey: null }])),
+  returnToInbox: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.returnToInbox.label', descriptionKey: 'shortcuts.actions.returnToInbox.description', defaultKey: null },
   goInbox:       { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.goInbox.label',       descriptionKey: 'shortcuts.actions.goInbox.description',       defaultKey: 'gi' },
   toggleLeftSidebar: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.toggleLeftSidebar.label', descriptionKey: 'shortcuts.actions.toggleLeftSidebar.description', defaultKey: 'ctrl+\\' },
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => {
@@ -40,12 +43,8 @@ export const ACTION_DEFS = {
     const action = `goAccount${i + 1}`;
     return [action, { groupKey: 'shortcuts.groups.navigation', labelKey: `shortcuts.actions.${action}.label`, descriptionKey: `shortcuts.actions.${action}.description`, defaultKey: null }];
   })),
-  nextSavedSplit: { groupKey: 'shortcuts.groups.navigation', labelKey: 'savedSplits.searches', descriptionKey: 'savedSplits.searches', defaultKey: null },
-  prevSavedSplit: { groupKey: 'shortcuts.groups.navigation', labelKey: 'savedSplits.searches', descriptionKey: 'savedSplits.searches', defaultKey: null },
   nextConversationMessage: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.nextMessage.label', descriptionKey: 'shortcuts.actions.nextMessage.description', defaultKey: null },
   prevConversationMessage: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.prevMessage.label', descriptionKey: 'shortcuts.actions.prevMessage.description', defaultKey: null },
-  toggleThreadMute: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'mutedThreads.mute', descriptionKey: 'mutedThreads.actionDescription', defaultKey: null },
-  focusPrivateNote: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'privateNotes.add', descriptionKey: 'privateNotes.add', defaultKey: null },
   openLabelPicker: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.openLabelPicker.label', descriptionKey: 'shortcuts.actions.openLabelPicker.description', defaultKey: 'ctrl+l' },
   toggleRightSidebar: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.toggleRightSidebar.label', descriptionKey: 'shortcuts.actions.toggleRightSidebar.description', defaultKey: 'ctrl+/' },
 
@@ -85,8 +84,9 @@ export const ACTION_DEFS = {
 const SUPERHUMAN_SHORTCUTS = {
   openMessage: 'Enter', replyAll: 'shift+r', undoAction: 'z', snooze: 'h',
   openLabelPicker: 'l', moveMessage: 'v', gtdReference: null, toggleRead: 'u', markUnread: null,
-  toggleThreadMute: 'shift+m', focusPrivateNote: 'm', nextConversationMessage: 'n', prevConversationMessage: 'p',
-  nextSavedSplit: 'Tab', prevSavedSplit: 'shift+Tab',
+  nextConversationMessage: 'n', prevConversationMessage: 'p', gtdDone: null,
+  returnToInbox: 'shift+e', filterUnread: 'shift+u', filterStarred: 'shift+s',
+  openFolderDrawer: 'ArrowLeft', openHighlightedMessage: 'ArrowRight',
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`goVisibleMailbox${i + 1}`, null])),
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`goAccount${i + 1}`, `ctrl+${i + 1}`])),
 };
@@ -242,7 +242,8 @@ const GENERAL_ACTION_TEXT = {
   loadRemoteImages: ['Load remote images', 'Load images in the selected message'],
 };
 
-export function shortcutActionText(t, action, kind = 'description') {
+export function shortcutActionText(t, action, kind = 'description', layout) {
+  if (layout === 'superhuman' && action === 'openMessage') return t(`shortcuts.actions.openOrReplyAll.${kind}`);
   const definition = ACTION_DEFS[action];
   if (!definition) return '';
   const mailboxNumber = /^goVisibleMailbox([1-9])$/.exec(action)?.[1];

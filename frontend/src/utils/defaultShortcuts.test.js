@@ -1,7 +1,7 @@
 // Run with: node --test src/utils/defaultShortcuts.test.js
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildKeyMap, buildModKeyMap, getShortcutConflicts, getEffectiveShortcuts, resolveShortcutAction, shortcutBindingFromEvent, shortcutActionText } from './defaultShortcuts.js';
+import { buildKeyMap, buildModKeyMap, getShortcutConflicts, resolveShortcutAction, shortcutBindingFromEvent, shortcutActionText } from './defaultShortcuts.js';
 
 const keyEvent = (key, modifiers = {}) => ({ key, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...modifiers });
 
@@ -179,32 +179,34 @@ describe('untranslated command help', () => {
 });
 
 
-describe('Superhuman reference action bindings', () => {
-  it('resolves split, message, folder and note actions without collisions', () => {
-    const bindings = { l: 'openLabelPicker', v: 'moveMessage', u: 'toggleRead', m: 'focusPrivateNote', n: 'nextConversationMessage', p: 'prevConversationMessage', Tab: 'nextSavedSplit' };
-    for (const [key, action] of Object.entries(bindings)) assert.equal(resolveShortcutAction(keyEvent(key), {}, 'superhuman'), action);
-    assert.equal(resolveShortcutAction(keyEvent('Tab', { shiftKey: true }), {}, 'superhuman'), 'prevSavedSplit');
-    assert.equal(resolveShortcutAction(keyEvent('M', { shiftKey: true }), {}, 'superhuman'), 'toggleThreadMute');
-    assert.equal(resolveShortcutAction(keyEvent('M', { shiftKey: true }), { forward: 'shift+m' }, 'superhuman'), 'forward');
-    assert.equal(resolveShortcutAction(keyEvent('M', { shiftKey: true })), null);
-    assert.equal(resolveShortcutAction(keyEvent('j'), {}, 'superhuman'), 'nextMessage');
-    assert.equal(resolveShortcutAction(keyEvent('k'), {}, 'superhuman'), 'prevMessage');
-    assert.deepEqual(getShortcutConflicts({}, 'superhuman'), []);
-    assert.equal(resolveShortcutAction(keyEvent('m')), 'toggleRead');
-    assert.equal(resolveShortcutAction(keyEvent('u')), 'markUnread');
-    assert.equal(resolveShortcutAction(keyEvent('v')), 'gtdReference');
-    for (const key of ['l', 'n', 'p', 'Tab']) assert.equal(resolveShortcutAction(keyEvent(key)), null);
-  });
-
-  it('preserves explicit inherited bindings without reviving displaced defaults', () => {
-    for (const overrides of [{ markUnread: 'u' }, { toggleRead: 'm' }, { gtdReference: 'v' }, { forward: 'm' }, { archive: 'Tab' }]) {
-      const [action, key] = Object.entries(overrides)[0];
-      assert.equal(resolveShortcutAction(keyEvent(key), overrides, 'superhuman'), action);
-      assert.deepEqual(getShortcutConflicts(overrides, 'superhuman'), []);
+describe('Superhuman native reference actions', () => {
+  it('maps native folder, read, label and conversation actions without claiming unsupported features', () => {
+    const bindings = { l: 'openLabelPicker', v: 'moveMessage', u: 'toggleRead', n: 'nextConversationMessage', p: 'prevConversationMessage', ArrowLeft: 'openFolderDrawer', ArrowRight: 'openHighlightedMessage' };
+    for (const [key, action] of Object.entries(bindings)) {
+      assert.equal(resolveShortcutAction(keyEvent(key), {}, 'superhuman'), action);
+      assert.equal(resolveShortcutAction(keyEvent(key), { [action]: null }, 'superhuman'), null);
+      assert.equal(resolveShortcutAction(keyEvent(key), { compose: key }, 'superhuman'), 'compose');
     }
-    const keys = getEffectiveShortcuts({ toggleRead: 'm' }, 'superhuman');
-    assert.equal(keys.markUnread, null);
-    assert.equal(keys.focusPrivateNote, null);
-    assert.equal(keys.toggleRead, 'm');
+    assert.equal(resolveShortcutAction(keyEvent('m'), {}, 'superhuman'), null);
+    for (const key of ['M', 'I']) assert.equal(resolveShortcutAction(keyEvent(key, { shiftKey: true }), {}, 'superhuman'), null);
+    assert.equal(resolveShortcutAction(keyEvent('E', { shiftKey: true })), 'gtdDone');
+    assert.deepEqual(getShortcutConflicts({}, 'superhuman'), []);
   });
+});
+
+it('Superhuman native filters and Inbox move are opt-in and obey explicit overrides', () => {
+  for (const [key, action] of [['E', 'returnToInbox'], ['U', 'filterUnread'], ['S', 'filterStarred']]) {
+    assert.equal(resolveShortcutAction(keyEvent(key, { shiftKey: true }), {}, 'superhuman'), action);
+    assert.equal(resolveShortcutAction(keyEvent(key, { shiftKey: true }), { [action]: null }, 'superhuman'), null);
+    assert.equal(resolveShortcutAction(keyEvent(key, { shiftKey: true }), { compose: `shift+${key.toLowerCase()}` }, 'superhuman'), 'compose');
+  }
+  assert.equal(resolveShortcutAction(keyEvent('E', { shiftKey: true })), 'gtdDone');
+  assert.equal(resolveShortcutAction(keyEvent('U', { shiftKey: true })), null);
+  assert.equal(resolveShortcutAction(keyEvent('S', { shiftKey: true })), null);
+});
+
+it('reader-open help describes the context only in the Superhuman layout', () => {
+  const t = key => key;
+  assert.equal(shortcutActionText(t, 'openMessage', 'description', 'superhuman'), 'shortcuts.actions.openOrReplyAll.description');
+  assert.equal(shortcutActionText(t, 'openMessage', 'label', 'comfortable'), 'shortcuts.actions.openMessage.label');
 });
