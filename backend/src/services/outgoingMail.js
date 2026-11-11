@@ -15,9 +15,6 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { deleteSentDraft } from './draftCopies.js';
 import { truncateFilename, safeFilename } from '../utils/contentDisposition.js';
 import { SMTP_AUTH_DISABLED, isSmtpAuthDisabled } from './smtpRefusals.js';
-import { prepareOpenActivity, setOpenActivityStatus, noteOpenActivityStatus } from './openActivity.js';
-import { requireOpenActivityAvailable, OpenActivityError } from './openActivityRules.js';
-import { classifySendError } from './scheduledSendRules.js';
 
 // The outgoing message pipeline: validate what the composer sent, resolve the From identity and
 // any forwarded content, build the message, deliver it over SMTP and record it (Sent copy, Sent
@@ -175,10 +172,9 @@ export function missingSendFields(body) {
 // subject made a safe header value, priority one of high/normal/low. Throws SendError (400).
 // Nothing here reads the database or the mail server, so it is cheap to run before anything else.
 export function validateSendInput(body) {
-  const { accountId, aliasId, to, cc = [], bcc = [], subject, body: text, bodyIsHtml = false, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, editedSignature, forwardedAttachments, forwardedMessages, priority, trackOpens = false } = body || {};
+  const { accountId, aliasId, to, cc = [], bcc = [], subject, body: text, bodyIsHtml = false, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, editedSignature, forwardedAttachments, forwardedMessages, priority } = body || {};
   const missing = missingSendFields(body);
   if (missing) throw new SendError(400, missing);
-  if (typeof trackOpens !== 'boolean') throw new SendError(400, 'trackOpens must be a boolean');
 
   if (attachments !== undefined) {
     if (!Array.isArray(attachments)) throw new SendError(400, 'attachments must be an array');
@@ -227,7 +223,6 @@ export function validateSendInput(body) {
     forwardedAttachments,
     forwardedMessages,
     priority: VALID_PRIORITIES.has(priority) ? priority : 'normal',
-    trackOpens,
   };
 }
 
@@ -527,26 +522,14 @@ export async function renderRawMessage(mailOptions) {
 export async function prepareDelivery(input, identity, forwarded, options = {}) {
   if (options.messageId !== undefined) checkedMessageId(options.messageId);
   if (options.date !== undefined) checkedDate(options.date);
-  try { requireOpenActivityAvailable(input, identity); }
-  catch (err) { if (err instanceof OpenActivityError) throw new SendError(err.status, err.message); throw err; }
   const smtp = await createAccountSmtpTransport(identity.account, options.smtp);
   if (smtp.error) throw new SendError(smtp.status, smtp.error);
   const account = smtp.account;
   const mailOptions = buildMailOptions(input, identity, forwarded, options);
-  let openActivity = null;
-  if (input.trackOpens === true && typeof mailOptions.html === 'string') {
-    try {
-      openActivity = await prepareOpenActivity({ userId: account.user_id, accountId: account.id, messageId: mailOptions.messageId, scheduledId: options.scheduledId });
-      mailOptions.html += openActivity.pixel;
-    } catch (err) {
-      if (err instanceof OpenActivityError) throw new SendError(err.status, err.message);
-      throw err;
-    }
-  }
   const serverAutoSaves = serverAutoSavesSent(account);
   // For servers that don't auto-save, generate the raw MIME now so we can APPEND it.
   const rawMessage = serverAutoSaves ? null : await renderRawMessage(mailOptions);
-  return { account, transport: smtp.transport, mailOptions, serverAutoSaves, rawMessage, ...(openActivity ? { openActivity } : {}) };
+  return { account, transport: smtp.transport, mailOptions, serverAutoSaves, rawMessage };
 }
 
 // The fields of a nodemailer SMTP error that say what failed: responseCode (e.g. 421, 550),
@@ -647,13 +630,10 @@ export async function deliverAndRecord(
 ) {
   const { account, transport, mailOptions, serverAutoSaves, rawMessage } = delivery;
   const { fromName, fromEmail } = identity;
-  let smtpStarted = false;
   let delivered = false; // true once transport.sendMail has actually handed off the message
   let rejected = [];
   let learning = Promise.resolve(); // never rejects: its errors are logged inside
   try {
-    await setOpenActivityStatus(delivery.openActivity, 'sending');
-    smtpStarted = true;
     const info = await transport.sendMail(mailOptions);
     delivered = true;
     // A server that accepts some recipients and refuses others at RCPT still resolves, so
@@ -668,7 +648,6 @@ export async function deliverAndRecord(
       .filter(e => e?.recipient)
       .map(e => ({ recipient: String(e.recipient), responseCode: Number(e.responseCode) || null }));
     await onDelivered?.({ ok: true, ...(rejected.length ? { rejected } : {}) }, { refusals });
-    await noteOpenActivityStatus(delivery.openActivity, 'sent');
     // Awaited, like the contact learning of a held send below: a shutdown delivers held sends
     // and waits for them to finish, and work left in a setImmediate would be cut off.
     if (sentDraft) await deleteSentDraft(userId, account, sentDraft);
@@ -792,7 +771,6 @@ export async function deliverAndRecord(
     return sendResult;
   } catch (err) {
     if (delivered) {
-      await noteOpenActivityStatus(delivery.openActivity, 'sent');
       // SMTP already accepted this message. A Sent-folder or metadata failure
       // must not invite the user to send it again.
       console.error('Post-send processing failed:', err.message);
@@ -802,14 +780,12 @@ export async function deliverAndRecord(
       if (onDelivered) await learning;
       return sendResult;
     }
-    await noteOpenActivityStatus(delivery.openActivity, classifySendError(err, { phase: smtpStarted ? 'send' : 'prepare' }).outcome === 'uncertain' ? 'uncertain' : 'failed');
     console.error('Send failed:', err.message);
     onFailure?.();
     // The SMTP error stays on it, as cause and its nodemailer fields, so a caller can tell a
     // temporary refusal (4xx) from a permanent one (5xx), and at which command it failed.
     throw Object.assign(new Error('Send failed', { cause: err }), {
       publicMessage: sanitizeSmtpError(err),
-      ...(smtpStarted ? {} : { smtpNotStarted: true }),
       // A refusal the composer says in the user's language (send.js and sendHold.js pass it on).
       ...(publicSendCode(err) ? { publicCode: publicSendCode(err) } : {}),
       ...smtpErrorFields(err),

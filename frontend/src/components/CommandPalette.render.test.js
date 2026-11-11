@@ -188,7 +188,7 @@ test('missing selection and editor context disable mail commands without dispatc
   }
 });
 
-test('workspace entry explicitly pairs appearance while ordinary layout choices stay independent', async () => {
+test('layout choices preserve the independently selected theme', async () => {
   seedState();
   const original = useStore.getState();
   const changes = [];
@@ -198,12 +198,12 @@ test('workspace entry explicitly pairs appearance while ordinary layout choices 
   try {
     await harness.mount();
     await harness.open();
-    await React.act(async () => document.querySelector('[data-command-id="workspace:superhuman"]').click());
-    assert.deepEqual(changes, [['theme', 'superhuman'], ['layout', 'superhuman']]);
+    await React.act(async () => document.querySelector('[data-command-id="layout:superhuman"]').click());
+    assert.deepEqual(changes, [['layout', 'superhuman']]);
     await harness.open();
     await React.act(async () => document.querySelector('[data-command-id="layout:comfortable"]').click());
     assert.deepEqual(changes.at(-1), ['layout', 'comfortable']);
-    assert.equal(changes.length, 3);
+    assert.equal(changes.length, 2);
   } finally {
     await React.act(async () => root.unmount());
     useStore.setState({ setTheme: original.setTheme, setLayout: original.setLayout });
@@ -347,9 +347,55 @@ test('mobile palette omits desktop-only shortcut help', async () => {
     await harness.mount();
     await harness.open();
     assert.equal(document.querySelector('[data-command-id="mail:showHelp"]'), null);
-    assert.ok(document.querySelector('[data-command-id="mail:focusSearch"]'));
+    assert.ok(document.querySelector('[data-command-id="compose"]'));
   } finally {
     await React.act(async () => root.unmount());
     window.innerWidth = previousWidth;
+  }
+});
+
+test('Contacts keeps baseline static palette navigation and compose in every layout while mail mutations stay blocked', async () => {
+  for (const layout of ['comfortable', 'superhuman']) {
+    seedState();
+    useStore.setState({ layout, showContacts: true });
+    const root = createRoot(document.getElementById('root'));
+    const harness = paletteHarness(root);
+    try {
+      await harness.mount(); await harness.open();
+      for (const id of ['compose', 'inbox', 'settings', 'themes', 'layout:comfortable', 'account:a', 'theme:dark']) {
+        const action = document.querySelector(`[data-command-id="${id}"]`);
+        assert.ok(action, id);
+        assert.equal(action.getAttribute('aria-disabled'), 'false', `${layout}: ${id} is safe from Contacts`);
+      }
+      if (layout === 'superhuman') assert.equal(document.querySelector('[data-command-id="mail:archive"]').getAttribute('aria-disabled'), 'true');
+      else assert.equal(document.querySelector('[data-command-id="mail:archive"]'), null);
+      await React.act(async () => document.querySelector('[data-command-id="inbox"]').click());
+      assert.equal(useStore.getState().showContacts, false);
+      assert.equal(useStore.getState().selectedFolder, 'INBOX');
+      await React.act(async () => useStore.setState({ showContacts: true }));
+      await harness.open();
+      await React.act(async () => document.querySelector('[data-command-id="compose"]').click());
+      assert.equal(useStore.getState().composing, true, `${layout}: native compose opens from Contacts`);
+    } finally {
+      await React.act(async () => root.unmount());
+      useStore.setState({ composing: false, showContacts: false });
+    }
+  }
+});
+
+test('a persisted Superhuman layout keeps the native palette on phones', async () => {
+  seedState();
+  const width = window.innerWidth;
+  window.innerWidth = 390;
+  const root = createRoot(document.getElementById('root'));
+  const harness = paletteHarness(root);
+  try {
+    await harness.mount(); await harness.open();
+    assert.equal(document.querySelectorAll('[data-command-id^="mail:"]').length, 0);
+    assert.equal(document.querySelector('[role="dialog"]').style.maxWidth, '520px');
+    assert.ok(document.querySelector('[data-command-id="compose"]'));
+  } finally {
+    await React.act(async () => root.unmount());
+    window.innerWidth = width;
   }
 });

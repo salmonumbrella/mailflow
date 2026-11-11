@@ -41,14 +41,6 @@ function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdm
     },
   ];
 
-  actions.unshift({
-    id: 'workspace:superhuman',
-    label: t('commandPalette.actions.superhuman', { defaultValue: 'Use Superhuman workspace' }),
-    detail: t('commandPalette.actions.superhumanDetail', { defaultValue: 'Focused inbox, graphite theme, and keyboard-first commands' }),
-    icon: <span style={{ width: 15, textAlign: 'center' }}>⌘</span>,
-    active: theme === 'superhuman' && layout === 'superhuman',
-    run: () => { setTheme('superhuman'); setLayout('superhuman'); },
-  });
   for (const [key, definition] of Object.entries(LAYOUTS)) {
     actions.push({
       id: `layout:${key}`,
@@ -99,6 +91,9 @@ function MailCommandIcon({ action }) {
     markUnread: 'M3 5h18v14H3zM3 5l9 8 9-8',
     toggleStar: 'M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z',
     openLabelPicker: 'M3 3h8l10 10-8 8L3 11zM7 7h.01',
+    returnToInbox: 'M3 3h18v18H3zM3 13h5l2 3h4l2-3h5',
+    filterUnread: 'M3 5h18v14H3zM3 5l9 8 9-8',
+    filterStarred: 'M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z',
     moveMessage: 'M3 7h7l2-3h9v16H3z',
     delete: 'M3 6h18M5 6l1 15h12l1-15M9 6V3h6v3M10 10v7M14 10v7',
     undoAction: 'M3 5v6h6M3 11a9 9 0 1 1 2 8',
@@ -124,7 +119,7 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
   const [folderError, setFolderError] = useState('');
   const [folderRetry, setFolderRetry] = useState(0);
   const listId = useId();
-  const superhuman = layout === 'superhuman';
+  const superhuman = !isMobile && layout === 'superhuman';
 
   const pickerAccount = accounts.find(account => account.id === labelPickerMessage?.account_id);
   const pickerAccountId = labelPickerMessage?.account_id;
@@ -169,7 +164,7 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
           { getThread: api.getThread, copyMessage: api.copyMessage }),
       }))
     : [
-      ...mailCommandDefinitions(state, t).filter(command => !isMobile || command.action !== 'showHelp').map(command => ({
+      ...(superhuman ? mailCommandDefinitions(state, t) : []).filter(command => !isMobile || command.action !== 'showHelp').map(command => ({
         ...command,
         disabled: command.disabled || (!mailVisible && !['focusSearch', 'showHelp'].includes(command.action)),
         icon: <MailCommandIcon action={command.action} />,
@@ -177,7 +172,7 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
         run: () => shortcutBus.emit(command.action),
       })),
       ...buildActions({ t, ...state }).map(action => ({ ...action, closeBeforeRun: true,
-        disabled: state.composing || state.showAdmin || state.showContacts })),
+        disabled: state.composing || state.showAdmin })),
     ];
 
   const normalizedQuery = query.trim().toLowerCase();
