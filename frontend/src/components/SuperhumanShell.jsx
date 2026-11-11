@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { htmlLang } from '../utils/browserLanguage.js';
-import { getPluginNavigation } from '../plugins/registry.js';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { resolveConversationSelection, selectListedMessage } from '../utils/conversation.js';
@@ -13,18 +12,16 @@ function Icon({ name }) {
     inbox: <><path d="M4 4h16l2 10v6H2v-6L4 4Z" /><path d="M2 14h6l2 3h4l2-3h6" /></>,
     folders: <path d="M3 6h7l2 3h9v11H3V6Z" />,
     compose: <><path d="m15 4 5 5M4 20l5-1L21 7l-5-5L4 14v6Z" /><path d="M13 20h8" /></>,
-    snippets: <><path d="M7 3h10l4 4v14H7V3Z" /><path d="M17 3v5h4M3 7v14M10 12h8M10 16h6" /></>,
     search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></>,
     accounts: <><circle cx="12" cy="8" r="4" /><path d="M4 22v-3a8 8 0 0 1 16 0v3" /></>,
     settings: <><path d="m9 3 1-2h4l1 2 3 2 2 1 2 4-1 2-1 3v3l-3 3-3-1h-4l-3 1-3-3v-3l-1-3-1-2 2-4 2-1 3-2Z" /><circle cx="12" cy="12" r="3" /></>,
     commands: <path d="m13 2-9 12h7l-1 8 10-12h-8l1-8Z" />,
-    muted: <><path d="M18 9a6 6 0 0 0-12 0v5l-2 3h16l-2-3V9M9 21h6M3 3l18 18" /></>,
     close: <path d="m9 6 6 6-6 6" />,
   };
   return <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
-export function SuperhumanRail({ foldersOpen, onToggleFolders, onSearch, onCommands, onHelp, auxiliaryView, onOpenAuxiliary, onMailNavigate }) {
+export function SuperhumanRail({ foldersOpen, onToggleFolders, onSearch, onCommands, onHelp }) {
   const { t } = useTranslation();
   const { selectedAccountId, selectedFolder, showContacts, setSelectedAccount, openCompose, setAdminTab, setShowAdmin } = useStore();
   const settings = (tab) => { setAdminTab(tab); setShowAdmin(true); };
@@ -32,14 +29,10 @@ export function SuperhumanRail({ foldersOpen, onToggleFolders, onSearch, onComma
   return <nav className="superhuman-rail" aria-label={t('superhuman.navigation', 'Mail navigation')}>
     {button('commands', t('superhuman.commands', 'Commands'), onCommands, { className: 'superhuman-rail-button superhuman-brand' })}
     <div className="superhuman-rail-main">
-      {button('inbox', t('sidebar.allInboxes', 'All inboxes'), () => { onMailNavigate?.(); setSelectedAccount(null, 'INBOX'); }, { 'aria-current': !auxiliaryView && !selectedAccountId && selectedFolder === 'INBOX' && !showContacts ? 'page' : undefined })}
+      {button('inbox', t('sidebar.allInboxes', 'All inboxes'), () => setSelectedAccount(null, 'INBOX'), { 'aria-current': !selectedAccountId && selectedFolder === 'INBOX' && !showContacts ? 'page' : undefined })}
       {button('folders', t('superhuman.folders', 'Folders and accounts'), onToggleFolders, { 'aria-expanded': foldersOpen, 'aria-controls': 'superhuman-folders' })}
       {button('compose', t('sidebar.compose', 'Compose'), () => openCompose({}))}
       {button('search', t('superhuman.search', 'Search mail'), onSearch)}
-      {button('snippets', t('snippets.title', 'Snippets'), () => onOpenAuxiliary?.('snippets'), { 'aria-current': auxiliaryView === 'snippets' ? 'page' : undefined })}
-      <button type="button" className="superhuman-rail-button" aria-label={t("openActivity.title", "Email open activity")} title={t("openActivity.title", "Email open activity")} aria-current={auxiliaryView === 'open-activity' ? 'page' : undefined} onClick={() => onOpenAuxiliary?.('open-activity')}>↗</button>
-      {button('muted', t('mutedThreads.title', 'Muted conversations'), () => onOpenAuxiliary?.('muted'), { 'aria-current': auxiliaryView === 'muted' ? 'page' : undefined })}
-      {getPluginNavigation().map(item => <button type="button" className="superhuman-rail-button" key={item.pluginId} aria-label={item.labelKey ? t(item.labelKey, item.label) : item.label} title={item.labelKey ? t(item.labelKey, item.label) : item.label} aria-current={auxiliaryView === item.pluginId ? 'page' : undefined} onClick={() => onOpenAuxiliary?.(item.pluginId)}>{item.symbol}</button>)}
     </div>
     <div className="superhuman-rail-bottom">
       {button('accounts', t('superhuman.accounts', 'Manage accounts'), () => settings('accounts'))}
@@ -60,6 +53,25 @@ export function SuperhumanFolderDrawer({ children, onClose }) {
   const onKeyDown = event => {
     if (event.defaultPrevented || event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229) return;
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); }
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && ['ArrowDown', 'ArrowUp', 'ArrowRight'].includes(event.key) && !event.target.isContentEditable && !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {
+      const rows = [...ref.current.querySelectorAll('[data-mailbox-row]')].filter(row => row.dataset.mailboxAvailable !== 'false');
+      const index = rows.findIndex(row => row === document.activeElement || row.contains(document.activeElement));
+      if (event.key === 'ArrowRight') {
+        if (index >= 0) { event.preventDefault(); event.stopPropagation(); rows[index].click(); onClose(); }
+      } else if (rows.length) {
+        event.preventDefault(); event.stopPropagation();
+        const next = index < 0 ? (event.key === 'ArrowDown' ? 0 : rows.length - 1) : (index + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+        rows[next].setAttribute('tabindex', '0'); rows[next].focus(); rows[next].scrollIntoView({ block: 'nearest' });
+      }
+      return;
+    }
+    // Expanded account rows contain their own buttons, so they cannot have a button role.
+    // Arrow navigation may focus the row itself; activate only that container, never its controls.
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && ['Enter', ' '].includes(event.key)
+      && event.target.matches('[data-mailbox-row]:not([data-mailbox-available="false"])')
+      && !event.target.matches('button, a[href], input, textarea, select, [contenteditable], [role="button"], [role="link"]')) {
+      event.preventDefault(); event.stopPropagation(); event.target.click(); onClose(); return;
+    }
     if (event.key !== 'Tab') return;
     const focusable = [...ref.current.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]')]
       .filter(node => node.getClientRects().length > 0);
@@ -172,7 +184,7 @@ export function SuperhumanFooter({ onCommands, onHelp }) {
   const selectedMessageId = useStore(s => s.selectedMessageId);
   const keys = getEffectiveShortcuts(shortcuts, 'superhuman');
   const hints = selectedMessageId
-    ? [['reply', 'Reply'], ['archive', 'Archive'], ['snooze', 'Snooze']]
+    ? [['replyAll', 'Reply all'], ['archive', 'Archive'], ['snooze', 'Snooze']]
     : [['nextMessage', 'Next'], ['prevMessage', 'Previous'], ['openMessage', 'Open'], ['compose', 'Compose']];
   return <footer className="superhuman-footer" aria-label={t('superhuman.keyboardHints', 'Keyboard hints')}>
     <div className="superhuman-key-hints">{hints.filter(([action]) => keys[action]).map(([action, fallback]) => <span key={action}><kbd>{keyLabel(keys[action])}</kbd>{t(`shortcuts.actions.${action}.label`, fallback)}</span>)}</div>

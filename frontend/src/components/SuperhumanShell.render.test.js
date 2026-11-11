@@ -57,7 +57,7 @@ const { useStore } = await import('../store/index.js');
 const Sidebar = (await import('./Sidebar.jsx')).default;
 
 const { api } = await import('../utils/api.js');
-const { SuperhumanRail, SuperhumanRecent, SuperhumanFooter } = await import('./SuperhumanShell.jsx');
+const { SuperhumanRail, SuperhumanRecent, SuperhumanFooter, SuperhumanFolderDrawer } = await import('./SuperhumanShell.jsx');
 const ACCOUNT = { id: 'a', enabled: true, email_address: 'a@example.invalid' };
 const MESSAGE = { id: 'm1', account_id: 'a', folder: 'INBOX', from_name: 'Real sender', subject: 'Opened message', is_read: true };
 const originalApi = { ...api };
@@ -230,4 +230,29 @@ test('recent opens honors manual marking and cancels a delayed mark when selecti
   await click(document.querySelector('.superhuman-recent-message'));
   await React.act(async () => t.mock.timers.tick(2000));
   assert.equal(reads, 1, 'remaining in the message honors the saved delay');
+});
+
+
+test('drawer activates only its arrow-focused account container, preserving nested controls and modified keys', async () => {
+  let selected = 0; let closed = 0;
+  const header = React.createElement('div', { 'data-mailbox-row': '', onClick: () => selected++ },
+    'Account', React.createElement('button', { onClick: event => event.stopPropagation() }, 'Expand'));
+  await render(SuperhumanFolderDrawer, { onClose: () => closed++, children: header });
+  const row = document.querySelector('[data-mailbox-row]');
+  const press = async (target, key, options = {}) => {
+    const event = new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...options });
+    await React.act(async () => target.dispatchEvent(event)); return event;
+  };
+  await press(document.activeElement, 'ArrowDown');
+  assert.equal(document.activeElement, row);
+  for (const options of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { isComposing: true }]) {
+    assert.equal((await press(row, 'Enter', options)).defaultPrevented, false);
+  }
+  assert.equal((await press(row.querySelector('button'), 'Enter')).defaultPrevented, false, 'the nested expand button keeps native activation');
+  assert.deepEqual([selected, closed], [0, 0]);
+  assert.equal((await press(row, 'Enter')).defaultPrevented, true);
+  assert.deepEqual([selected, closed], [1, 1]);
+  assert.equal((await press(row, ' ')).defaultPrevented, true);
+  assert.deepEqual([selected, closed], [2, 2]);
+  assert.equal(row.hasAttribute('role'), false, 'the account container does not nest button roles');
 });

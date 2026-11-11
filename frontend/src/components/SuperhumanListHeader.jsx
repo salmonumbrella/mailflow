@@ -2,11 +2,11 @@ import { useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LAYOUTS } from '../layouts.js';
 import ListSortMenu from './ListSortMenu.jsx';
-import SavedSplitBar from './SavedSplitBar.jsx';
+import { hasStarredSearch } from '../utils/mailListFilters.js';
 
 export default function SuperhumanListHeader({
   label, count, countTitle, categories, activeCategory, onCategory, searchQuery, setSearchQuery,
-  searchInputRef, syncing, onSync, syncTitle, unreadOnly, onToggleUnread, selectionMode, onToggleSelection,
+  searchInputRef, syncing, onSync, syncTitle, unreadOnly, onToggleUnread, onToggleStarred, selectionMode, onToggleSelection,
   layout, onLayout, pageSize, onPageSize, sortable, accountId, folder,
 }) {
   const { t } = useTranslation();
@@ -49,6 +49,7 @@ export default function SuperhumanListHeader({
           </summary>
           <div className="sh-list-options-panel">
             <button type="button" aria-pressed={unreadOnly} onClick={onToggleUnread}>{unreadOnly ? t('messageList.showAll') : t('messageList.unreadOnly')}</button>
+            {onToggleStarred && <button type="button" aria-pressed={hasStarredSearch(searchQuery)} onClick={onToggleStarred}>{t('shortcuts.actions.filterStarred.label')}</button>}
             <button type="button" aria-pressed={selectionMode} onClick={() => { onToggleSelection(); optionsRef.current.open = false; }}>{selectionMode ? t('common.cancel') : t('messageList.selectMessages')}</button>
             {sortable && <ListSortMenu accountId={accountId} folder={folder} />}
             <label>{t('messageList.messagesPerPage')}<select value={pageSize} onChange={event => onPageSize(Number(event.target.value))}>
@@ -61,7 +62,7 @@ export default function SuperhumanListHeader({
         </details>
       </div>
     </div>
-    {folder === 'INBOX' && <SavedSplitBar accountId={accountId} />}
+    {hasStarredSearch(searchQuery) && onToggleStarred && <div className="sh-list-filter"><button type="button" onClick={onToggleStarred}>{t('shortcuts.actions.filterStarred.label')} <span aria-hidden="true">×</span></button></div>}
     {unreadOnly && <div className="sh-list-filter"><button type="button" onClick={onToggleUnread}>{t('messageList.unreadOnly')} <span aria-hidden="true">×</span></button></div>}
   </header>;
 }
