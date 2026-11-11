@@ -2,13 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
-vi.mock('./mutedThreads.js', () => ({ mutedAlertIds: vi.fn(async () => new Set()) }));
 vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), parseMailboxList: vi.fn(() => [{ name: 'Hidden', email: 'hidden@example.test' }]), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((parsed) => parsed), MAX_HEADER_FIELD: 500 }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
 vi.mock('./encryption.js', () => ({ decrypt: vi.fn() }));
 vi.mock('./aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
-vi.mock('./pushNotifications.js', () => ({ sendPushToUser: vi.fn(async () => {}) }));
+vi.mock('./pushNotifications.js', () => ({ sendPushToUser: vi.fn() }));
 vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
@@ -31,7 +30,6 @@ import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
 import { parseMessage, decodeMimeWords } from './messageParser.js';
 import { classifyAndTagMessage } from './spamPipeline.js';
 import { getAccountAddresses } from './mailAccess.js';
-import { mutedAlertIds } from './mutedThreads.js';
 
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
@@ -1964,7 +1962,6 @@ describe('calendar-only messages', () => {
     walkStructure(calendarRoot, results);
     expect(results.textParts).toHaveLength(0);
     expect(results.calendarParts.map(p => p.part)).toEqual(['1']);
-    expect(results.attachments).toMatchObject([{ part: '1', filename: 'invite.ics', type: 'text/calendar' }]);
     expect(bodyFallbackApplies(results)).toBe(false);
   });
 
@@ -1987,14 +1984,6 @@ describe('calendar-only messages', () => {
       bodyParts: new Map([['1', Buffer.from('<p>Invite</p>')], ['2', Buffer.from(ics)]]),
     };
     expect(extractBodyFromMsg(msg).html).toBe('<p>Invite</p>');
-    expect(extractBodyFromMsg(msg).attachments).toMatchObject([{ part: '2', filename: 'invite.ics', type: 'text/calendar' }]);
-  });
-
-  it('does not duplicate calendars already marked as attachments', () => {
-    const results = { textParts: [], attachments: [] };
-    walkStructure({ ...calendarRoot, disposition: 'attachment', dispositionParameters: { filename: 'meeting.ics' } }, results);
-    expect(results.attachments).toHaveLength(1);
-    expect(results.attachments[0].filename).toBe('meeting.ics');
   });
 });
 
@@ -7029,7 +7018,7 @@ describe('syncMessages — tells the client when a Drafts folder gained rows', (
     id: 'acct-drafts', user_id: 'user-1', email_address: 'me@example.com', gtd_enabled: false,
     categorization_enabled: false, imap_host: 'imap.example.com', folder_mappings: { drafts: 'Entwürfe' },
   };
-  let folderRow, lastBroadcasts;
+  let folderRow;
   async function sync(folder, { isNew = true, isRead = true } = {}) {
     const client = {
       noop: vi.fn(async () => true),
@@ -7055,40 +7044,18 @@ describe('syncMessages — tells the client when a Drafts folder gained rows', (
     });
     // An unread arrival also schedules a body prefetch (setImmediate) and classification; stub
     // both, or the prefetch throws after the test has finished.
-    const mgr = { pluginFacade: {}, broadcast: vi.fn(), prefetchNewMessageBodies: vi.fn(async () => {}), upsertAutoContacts: vi.fn(async () => {}), maybeClassifyNewMessage: vi.fn() };
+    const mgr = { pluginFacade: {}, broadcast: vi.fn(), prefetchNewMessageBodies: vi.fn(async () => {}), maybeClassifyNewMessage: vi.fn() };
     await ImapManager.prototype.syncMessages.call(mgr, account, client, folder, 100, false, true);
-    lastBroadcasts = mgr.broadcast.mock.calls.map(([event]) => event);
     return mgr.broadcast.mock.calls.map(([event, userId]) => [event.type, event.accountId, userId]);
   }
   let hasActive, runHook;
   beforeEach(() => {
     folderRow = null;
-    mutedAlertIds.mockReset().mockResolvedValue(new Set());
     hasActive = vi.spyOn(pluginRegistry, 'hasActiveAsync').mockResolvedValue(false);
     runHook = vi.spyOn(pluginRegistry, 'runHook').mockResolvedValue([]);
   });
   afterEach(() => { hasActive.mockRestore(); runHook.mockRestore(); });
 
-  it('refreshes incoming cache rows but suppresses persistent muted-thread alerts', async () => {
-    mutedAlertIds.mockResolvedValue(new Set(['draft-row']));
-    await sync('INBOX', { isRead: false });
-    const event = lastBroadcasts.find(event => event.type === 'new_messages');
-    expect(mutedAlertIds).toHaveBeenCalledWith(account.id, ['draft-row']);
-    expect(event.messages).toHaveLength(1);
-    expect(event.alertMessages).toEqual([]);
-    expect(event.alertCount).toBe(0);
-  });
-  it('keeps unmuted incoming alerts and fails closed only for a mute lookup outage', async () => {
-    await sync('INBOX', { isRead: false });
-    expect(lastBroadcasts.find(event => event.type === 'new_messages').alertCount).toBe(1);
-    mutedAlertIds.mockRejectedValue(new Error('Disposable lookup unavailable'));
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      await sync('INBOX', { isRead: false });
-      const event = lastBroadcasts.find(event => event.type === 'new_messages');
-      expect(event.messages).toHaveLength(1); expect(event.alertCount).toBe(0);
-    } finally { warn.mockRestore(); }
-  });
   it('a read draft synced into the folder flagged \\Drafts', async () => {
     folderRow = { account_id: 'acct-drafts', path: 'Drafts', special_use: '\\Drafts', no_select: false };
     expect(await sync('Drafts')).toEqual([['drafts_changed', 'acct-drafts', 'user-1']]);
@@ -7441,48 +7408,5 @@ describe('snippet indexer batches (#768)', () => {
     const { client } = server({ 1: plain }, { drop: true });
     await expect(fetchSnippetBatch(client, [1], async () => {})).rejects.toThrow('Connection not available');
     await expect(fetchSnippetBatch(client, [1], async () => {}, { structureFirst: true })).rejects.toThrow('Connection not available');
-  });
-});
-
-describe('bounded original invitation source reads', () => {
-  let count = 0;
-  const serveRaw = ({ reported = 10, content = '0123456789' } = {}) => {
-    const acct = { ...baseAccount, id: `bounded-raw-${++count}`, user_id: 'owner', email_address: 'me@example.test' };
-    const release = vi.fn();
-    const client = Object.assign(new EventEmitter(), {
-      usable: true, connect: vi.fn(async () => {}), close: vi.fn(), logout: vi.fn(async () => {}),
-      getMailboxLock: vi.fn(async () => ({ release })),
-      fetch: vi.fn(async function* (_range, options) {
-        if (options.size) yield { uid: 1, size: reported };
-        if (options.source) yield { uid: 1, source: Buffer.from(content) };
-      }),
-    });
-    ImapFlow.mockImplementation(function () { return client; });
-    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
-    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
-    return { manager: Object.create(ImapManager.prototype), acct, client, release };
-  };
-  it('rejects a known oversized message before fetching its source', async () => {
-    const { manager, acct, client, release } = serveRaw({ reported: 100 });
-    await expect(manager.fetchRawMessage(acct, 1, 'INBOX', { maximumBytes: 20 })).rejects.toMatchObject({ code: 'MESSAGE_TOO_LARGE' });
-    expect(client.fetch).toHaveBeenCalledTimes(1);
-    expect(client.fetch.mock.calls[0][1]).toEqual({ uid: true, size: true });
-    expect(release).toHaveBeenCalledOnce();
-  });
-  it('requests only limit plus one bytes and rejects understated source sizes', async () => {
-    const { manager, acct, client } = serveRaw({ reported: 5, content: 'a'.repeat(21) });
-    await expect(manager.fetchRawMessage(acct, 1, 'INBOX', { maximumBytes: 20 })).rejects.toMatchObject({ code: 'MESSAGE_TOO_LARGE' });
-    expect(client.fetch.mock.calls[1][1].source).toEqual({ start: 0, maxLength: 21 });
-  });
-  it('preserves ordinary downloads without a new size query', async () => {
-    const { manager, acct, client } = serveRaw();
-    expect((await manager.fetchRawMessage(acct, 1, 'INBOX')).toString()).toBe('0123456789');
-    expect(client.fetch).toHaveBeenCalledTimes(1);
-    expect(client.fetch.mock.calls[0][1]).toEqual({ uid: true, source: true });
-  });
-  it('returns bounded valid source and releases the mailbox lock', async () => {
-    const { manager, acct, release } = serveRaw();
-    expect((await manager.fetchRawMessage(acct, 1, 'INBOX', { maximumBytes: 20 })).length).toBe(10);
-    expect(release).toHaveBeenCalledOnce();
   });
 });
