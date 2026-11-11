@@ -12,6 +12,8 @@ import { useMobile } from '../hooks/useMobile.js';
 import { isAccountInUnifiedInbox } from '../utils/unifiedInbox.js';
 import { shouldSyncFolder, folderSyncKey } from '../utils/folderSync.js';
 import { resolveThreadMessages } from '../utils/threadActions.js';
+import { selectedInboxMove, returnConversationToInbox } from '../utils/returnToInbox.js';
+import { canFilterMailList, toggleStarredSearch } from '../utils/mailListFilters.js';
 import { keepDraftsApart } from '../utils/conversationActions.js';
 import { unreadDeltaByAccount } from '../utils/countSnapshots.js';
 import { splitDraftSignature } from '../utils/draftSignature.js';
@@ -175,7 +177,7 @@ function MailboxList() {
     folders, favoriteFolders, recentFolders, addFavoriteFolder, removeFavoriteFolder, setSelectedAccount,
     categorizationEnabled, categoryCounts, categoryTotals, setCategoryCounts, adjustCategoryCount,
     markReadBehavior, markReadDelay,
-    searchAllFolders, activeSavedSplitId, user, isLocked,
+    searchAllFolders,
     activeGtdTab, setActiveGtdTab, gtdSections, enabledPlugins,
     openMessageWindow,
   } = useStore();
@@ -211,7 +213,7 @@ function MailboxList() {
   // Search is scoped to the current folder unless we're in the unified view or the
   // user toggled "search all folders". An in: operator in the query overrides this
   // server-side. undefined = search all folders.
-  const searchFolder = activeSavedSplitId ? 'INBOX' : (!isUnified && !searchAllFolders) ? selectedFolder : undefined;
+  const searchFolder = (!isUnified && !searchAllFolders) ? selectedFolder : undefined;
   const searchPageSize = Math.max(1, Math.min(Number(pageSize) || 50, 200));
   const undoableNotifications = notifications.filter(n => n.onUndo);
 
@@ -233,6 +235,7 @@ function MailboxList() {
   }, []);
 
   const [unreadOnly, setUnreadOnly] = useState(false);
+  const starredSearchRef = useRef(null);
   const [listLoadError, setListLoadError] = useState(null);
   const [listReloadToken, setListReloadToken] = useState(0);
   const listFocusIndexRef = useRef(0);
@@ -341,7 +344,6 @@ function MailboxList() {
     selectedAccountId,
     selectedFolder,
     searchQuery,
-    activeSavedSplitId,
     threadedView,
     unreadOnly,
     activeCategory,
@@ -608,13 +610,7 @@ function MailboxList() {
     const handler = () => {
       // Search results are their own list. The refresh is held, not dropped: clearing the search
       // hands it over (below), or the folder would come back as it was before the search.
-      if (searchQuery.trim()) {
-        trailingRefreshRef.current.request(true);
-        // A saved split is a live inbox, unlike a deliberate ad-hoc search snapshot.
-        // Refresh its rows as well as its count when synced mail changes.
-        if (useStore.getState().activeSavedSplitId) setSearchReloadToken(token => token + 1);
-        return;
-      }
+      if (searchQuery.trim()) { trailingRefreshRef.current.request(true); return; }
       if (trailingRefreshRef.current.request(useStore.getState().loadingMessages)) {
         const delayMs = Math.max(0, recentMessageOpenUntilRef.current - Date.now());
         clearTimeout(deferredRefreshTimerRef.current);
@@ -625,14 +621,9 @@ function MailboxList() {
         }
       }
     };
-    const onCountsRefresh = () => {
-      if (useStore.getState().activeSavedSplitId) setSearchReloadToken(token => token + 1);
-    };
     window.addEventListener('mailflow:refresh', handler);
-    window.addEventListener('mailflow:counts_refresh', onCountsRefresh);
     return () => {
       window.removeEventListener('mailflow:refresh', handler);
-      window.removeEventListener('mailflow:counts_refresh', onCountsRefresh);
       clearTimeout(deferredRefreshTimerRef.current);
     };
   }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, listOrder, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
@@ -666,7 +657,7 @@ function MailboxList() {
     searchTimer.current = setTimeout(async () => {
       try {
         const data = await api.search(searchQuery, selectedAccountId || undefined, { offset: 0, limit: searchPageSize, folder: searchFolder });
-        if (searchSeq.current !== seq || useStore.getState().user?.id !== user?.id || useStore.getState().isLocked) return;
+        if (searchSeq.current !== seq) return;
         searchFetchedOffsetRef.current = data.messages.length;
         setSearchResults(applyReadGuard(data.messages));
         setSearchHasMore(data.messages.length === searchPageSize);
@@ -684,8 +675,8 @@ function MailboxList() {
         if (searchSeq.current === seq) setIsSearching(false);
       }
     }, 300);
-    return () => { clearTimeout(searchTimer.current); searchSeq.current += 1; };
-  }, [searchQuery, user?.id, isLocked, activeSavedSplitId, selectedAccountId, searchFolder, searchPageSize, searchReloadToken, unifiedInboxAccountKey, applyReadGuard, setIsSearching, setSearchResults]);
+    return () => clearTimeout(searchTimer.current);
+  }, [searchQuery, selectedAccountId, searchFolder, searchPageSize, searchReloadToken, unifiedInboxAccountKey, applyReadGuard, setIsSearching, setSearchResults]);
 
   // Re-run an active search (and refresh the folder view) after inbox rules run, since
   // rules can move messages out of the searched folder and a search snapshot would
@@ -1517,6 +1508,7 @@ function MailboxList() {
   // Keep scRef in sync so scheduleDelete can read displayMessages without a stale closure
   scRef.current.displayMessages = displayMessages;
   scRef.current.isSuperhuman = isSuperhuman;
+  scRef.current.unreadOnly = unreadOnly;
   useEffect(() => {
     if (!isSuperhuman || selectedMessageId || loadingMessages) return;
     const index = displayMessages.findIndex(message => message.id === listFocusedMessageId);
@@ -2152,7 +2144,7 @@ function MailboxList() {
     const onOpen = () => {
       if (scRef.current.isSuperhuman) {
         const state = getState();
-        if (state.selectedMessageId) shortcutBus.emit('reply');
+        if (state.selectedMessageId && !topOpenMessageWindow(state)) shortcutBus.emit('replyAll');
         else {
           const focused = focusedListMessage(state);
           if (focused) rowOpenerRef.current?.(focused);
@@ -2162,6 +2154,48 @@ function MailboxList() {
       const { messages, selectedMessageId } = getState();
       if (selectedMessageId || !messages.length) return;
       selectListedMessage(useStore, messages[0].id);
+    };
+
+    const onOpenHighlighted = () => {
+      const state = getState();
+      if (state.selectedMessageId || topOpenMessageWindow(state)) return;
+      const focused = focusedListMessage(state);
+      if (focused) rowOpenerRef.current?.(focused);
+    };
+    const onReturnToInbox = () => {
+      const message = selectedInboxMove(getState());
+      if (!message || getState().layout !== 'superhuman') return;
+      const viewKey = archiveViewKeyRef.current;
+      void returnConversationToInbox(message, { store: useStore, api, t: tRef.current,
+        stillMounted: () => mounted,
+        viewCurrent: () => archiveViewKeyRef.current === viewKey,
+      });
+    };
+    const onFilterUnread = () => {
+      if (!canFilterMailList(getState()) || getState().searchQuery.trim()) return;
+      setUnreadOnly(value => !value);
+    };
+    const onFilterStarred = () => {
+      const state = getState();
+      if (!canFilterMailList(state)) return;
+      const previous = starredSearchRef.current;
+      if (previous && previous.filtered === state.searchQuery && previous.owner === state.user.id
+        && previous.accountId === state.selectedAccountId && previous.folder === state.selectedFolder) {
+        starredSearchRef.current = null;
+        setUnreadOnly(previous.unreadOnly);
+        state.setSearchQuery(previous.original);
+        return;
+      }
+      const original = state.searchQuery;
+      // Unified-inbox search normally spans every folder. This filter starts from the
+      // current Inbox instead; an existing ordinary search keeps its own scope.
+      const inboxScope = !state.selectedAccountId && !original.trim();
+      const scoped = `${inboxScope && !/(?:^|\s)in:/i.test(original) ? 'in:INBOX ' : ''}${original}`.trim();
+      const filtered = toggleStarredSearch(scoped + (scRef.current.unreadOnly ? ' is:unread' : ''));
+      starredSearchRef.current = { owner: state.user.id, accountId: state.selectedAccountId,
+        folder: state.selectedFolder, original, filtered, unreadOnly: scRef.current.unreadOnly };
+      setUnreadOnly(false);
+      state.setSearchQuery(filtered);
     };
 
     const onSelect = () => {
@@ -2348,6 +2382,10 @@ function MailboxList() {
     shortcutBus.on('nextMessage',   onNext);
     shortcutBus.on('prevMessage',   onPrev);
     shortcutBus.on('openMessage',   onOpen);
+    shortcutBus.on('openHighlightedMessage', onOpenHighlighted);
+    shortcutBus.on('returnToInbox', onReturnToInbox);
+    shortcutBus.on('filterUnread', onFilterUnread);
+    shortcutBus.on('filterStarred', onFilterStarred);
     shortcutBus.on('selectMessage', onSelect);
     shortcutBus.on('archive',       onArchive);
     shortcutBus.on('delete',        onDelete);
@@ -2371,6 +2409,10 @@ function MailboxList() {
       shortcutBus.off('nextMessage',   onNext);
       shortcutBus.off('prevMessage',   onPrev);
       shortcutBus.off('openMessage',   onOpen);
+      shortcutBus.off('openHighlightedMessage', onOpenHighlighted);
+      shortcutBus.off('returnToInbox', onReturnToInbox);
+      shortcutBus.off('filterUnread', onFilterUnread);
+      shortcutBus.off('filterStarred', onFilterStarred);
       shortcutBus.off('selectMessage', onSelect);
       shortcutBus.off('archive',       onArchive);
       shortcutBus.off('delete',        onDelete);
@@ -3141,6 +3183,7 @@ function MailboxList() {
         searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchInputRef={searchInputRef}
         syncing={syncing} onSync={handleSync} syncTitle={selectedAccountId ? t('messageList.syncAccount') : t('messageList.syncAll')}
         unreadOnly={unreadOnly} onToggleUnread={() => setUnreadOnly(value => !value)}
+        onToggleStarred={() => shortcutBus.emit('filterStarred')}
         selectionMode={selectionMode} onToggleSelection={() => selectionMode ? clearSelection() : setSelectionModeActive(true)}
         layout={layout} onLayout={setLayout} pageSize={pageSize} onPageSize={setPageSize}
         sortable={sortable} accountId={selectedAccountId} folder={selectedFolder}
@@ -4521,7 +4564,7 @@ function MailboxList() {
       </div>
 
       {/* Undo bar — anchored to the bottom of the list panel on desktop */}
-      {!isMobile && undoableNotifications.map((n, i) => (
+      {!isMobile && !isSuperhuman && undoableNotifications.map((n, i) => (
         <UndoBar
           key={n.id}
           notification={n}
