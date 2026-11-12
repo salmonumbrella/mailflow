@@ -1448,3 +1448,287 @@ describe('MessageList: a manual sync', () => {
     });
   });
 });
+
+describe('MessageList — Superhuman desktop list', () => {
+  const second = { ...MESSAGE, id: 'sh-second', uid: 2, message_id: '<sh-second@example.com>', from_name: 'Second sender', subject: 'Another subject' };
+  const mountSuperhuman = async ({ rows = [MESSAGE, second], threadedView = false, mobile = false, ...options } = {}) => {
+    ROUTES = {};
+    if (root) { await React.act(async () => root.unmount()); root = null; }
+    window.innerWidth = mobile ? 390 : 1200;
+    useStore.setState({ layout: 'superhuman', selectedMessageId: null, listFocusedMessageId: null,
+      lastViewedMessageId: null, composing: false, composeData: null, prepareComposeSwitch: null,
+      openCompose: useStore.getInitialState().openCompose, showAdmin: false, showContacts: false,
+      messageWindows: [], replyDrafts: {}, notifications: [], threadMessages: {},
+      expandedThreadId: null, enabledPlugins: [], categorizationEnabled: false, activeGtdTab: null,
+      markReadBehavior: 'manual', hoverQuickActions: true, showMessagePreviews: true, ...options });
+    await mount({ rows, threadedView });
+    CALLS = [];
+  };
+  const click = async (element, properties = {}) => {
+    assert.ok(element, 'interactive element is rendered');
+    await React.act(async () => element.dispatchEvent(new window.MouseEvent('click', { bubbles: true, ...properties })));
+  };
+
+  test('renders compact native rows and keeps j/k focus separate from opening and reading', async () => {
+    await mountSuperhuman();
+    const row = container.querySelector('[data-msgid="msg-1"]');
+    assert.ok(container.querySelector('.sh-list-header'));
+    assert.ok(row.querySelector('.sh-mail-sender'));
+    assert.ok(row.querySelector('.sh-mail-subject'));
+    assert.ok(row.querySelector('.sh-mail-snippet'));
+    assert.equal(row.dataset.unread, 'true');
+    assert.equal(row.dataset.selected, 'true');
+    assert.equal(useStore.getState().selectedMessageId, null);
+    await React.act(async () => shortcutBus.emit('nextMessage'));
+    assert.equal(useStore.getState().listFocusedMessageId, second.id);
+    assert.equal(useStore.getState().selectedMessageId, null);
+    assert.equal(CALLS.some(call => /\/body|\/read/.test(call.path)), false, 'moving focus must not fetch or mark read');
+    await React.act(async () => shortcutBus.emit('openMessage'));
+    assert.equal(useStore.getState().selectedMessageId, second.id);
+    assert.ok(CALLS.some(call => call.path.includes(`/messages/${second.id}/body`)), 'Enter uses the real message opener');
+  });
+
+  test('Enter delegates to the reader reply-all action once a message is open', async () => {
+    await mountSuperhuman();
+    let replies = 0;
+    const onReply = () => { replies += 1; };
+    shortcutBus.on('replyAll', onReply);
+    try {
+      await React.act(async () => shortcutBus.emit('openMessage'));
+      assert.equal(replies, 0, 'first Enter opens the focused row');
+      await React.act(async () => shortcutBus.emit('openMessage'));
+      assert.equal(replies, 1, 'second Enter asks the actual reading pane to reply once');
+      assert.equal(useStore.getState().composing, false, 'hidden list does not run the pane action again');
+    } finally { shortcutBus.off('replyAll', onReply); }
+  });
+
+  test('checkbox and shift selection expose the real bulk toolbar without opening mail', async () => {
+    await mountSuperhuman();
+    await click(container.querySelector('[data-msgid="msg-1"] input[type="checkbox"]'));
+    assert.equal(container.querySelector('[data-msgid="msg-1"] input').checked, true);
+    assert.ok(container.querySelector('.sh-list-bulk'));
+    assert.equal(useStore.getState().selectedMessageId, null);
+    await click(container.querySelector('[data-msgid="sh-second"] .sh-mail-row-content'), { shiftKey: true });
+    assert.equal(container.querySelector('[data-msgid="sh-second"] input').checked, true);
+    assert.equal(container.querySelectorAll('.sh-mail-actions').length, 0, 'hover actions do not compete with bulk selection');
+  });
+
+  for (const action of ['archive', 'delete']) {
+    test(`reader ${action} never targets a previously checked hidden row`, async () => {
+      await mountSuperhuman();
+      await React.act(async () => shortcutBus.emit('selectMessage'));
+      assert.ok(container.querySelector('.sh-list-bulk'));
+      await React.act(async () => shortcutBus.emit('nextMessage'));
+      await React.act(async () => shortcutBus.emit('openMessage'));
+      assert.equal(useStore.getState().selectedMessageId, second.id);
+      assert.equal(container.querySelector('.sh-list-bulk'), null, 'opening a reader clears hidden bulk selection');
+      await React.act(async () => shortcutBus.emit(action));
+      assert.ok(container.querySelector('[data-msgid="msg-1"]'), 'previously checked mail remains untouched');
+      assert.equal(container.querySelector('[data-msgid="sh-second"]'), null, 'only the open reader message is removed');
+      const undo = useStore.getState().notifications.find(notification => notification.onUndo);
+      if (undo) await React.act(async () => undo.onUndo());
+    });
+  }
+
+  test('singular palette commands clear the checked set while native list shortcuts retain bulk selection', async () => {
+    await mountSuperhuman();
+    await React.act(async () => shortcutBus.emit('selectMessage'));
+    await React.act(async () => shortcutBus.emit('nextMessage'));
+    await React.act(async () => { shortcutBus.emit('clearBulkSelection'); shortcutBus.emit('archive'); });
+    assert.ok(container.querySelector('[data-msgid="msg-1"]'));
+    assert.equal(container.querySelector('[data-msgid="sh-second"]'), null);
+    const undo = useStore.getState().notifications.find(notification => notification.onUndo);
+    if (undo) await React.act(async () => undo.onUndo());
+  });
+
+  test('search field waits for MailApp to close reader history before taking focus', async () => {
+    await mountSuperhuman();
+    await React.act(async () => shortcutBus.emit('openMessage'));
+    await React.act(async () => shortcutBus.emit('focusSearch'));
+    assert.equal(useStore.getState().selectedMessageId, MESSAGE.id, 'only MailApp owns closing the reader and its history');
+    await React.act(async () => useStore.getState().setSelectedMessage(null));
+    await React.act(async () => shortcutBus.emit('focusSearch'));
+    assert.equal(document.activeElement, container.querySelector('.sh-list-search input'));
+  });
+
+  test('focused reply opens the real native composer when its context stays current', async () => {
+    await mountSuperhuman({ user: { id: 'current-reply-owner' }, isLocked: false });
+    await React.act(async () => shortcutBus.emit('reply'));
+    assert.equal(useStore.getState().composing, true);
+    assert.equal(useStore.getState().composeData.subject, `Re: ${MESSAGE.subject}`);
+    assert.equal(useStore.getState().composeData.accountId, MESSAGE.account_id);
+    assert.equal(useStore.getState().composeData.isReply, true);
+  });
+
+  for (const action of ['reply', 'replyAll', 'forward']) {
+    test(`delayed focused ${action} cannot reopen after user/navigation changes`, async () => {
+      await mountSuperhuman({ user: { id: 'before-reply' }, isLocked: false });
+      const originalFetch = globalThis.fetch;
+      let release;
+      const pending = new Promise(resolve => { release = resolve; });
+      globalThis.fetch = async (url, options) => {
+        if (String(url).includes(`/messages/${MESSAGE.id}/body`)) {
+          await pending;
+          return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ text: 'Private original body' }) };
+        }
+        return originalFetch(url, options);
+      };
+      try {
+        await React.act(async () => shortcutBus.emit(action));
+        await React.act(async () => {
+          useStore.setState({ user: { id: 'another-user' } });
+          useStore.getState().setSelectedAccount('another-account', 'INBOX');
+        });
+        await React.act(async () => { release(); await pending; });
+        assert.equal(useStore.getState().composing, false);
+        assert.doesNotMatch(JSON.stringify(useStore.getState().composeData), /Private original body/);
+      } finally { release(); globalThis.fetch = originalFetch; }
+    });
+  }
+
+  for (const interrupt of ['lock', 'new-compose', 'unmount']) {
+    test(`delayed focused reply is cancelled by ${interrupt}`, async () => {
+      await mountSuperhuman({ user: { id: 'reply-owner' }, isLocked: false });
+      const originalFetch = globalThis.fetch;
+      let release;
+      const pending = new Promise(resolve => { release = resolve; });
+      globalThis.fetch = async (url, options) => {
+        if (String(url).includes(`/messages/${MESSAGE.id}/body`)) {
+          await pending;
+          return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ text: 'Stale private quote' }) };
+        }
+        return originalFetch(url, options);
+      };
+      try {
+        await React.act(async () => shortcutBus.emit('reply'));
+        await React.act(async () => {
+          if (interrupt === 'lock') { useStore.setState({ isLocked: true }); useStore.setState({ isLocked: false }); }
+          if (interrupt === 'new-compose') useStore.getState().openCompose({ subject: 'Newer work', body: 'Keep this draft' });
+          if (interrupt === 'unmount') { root.unmount(); root = null; }
+        });
+        await React.act(async () => { release(); await pending; });
+        assert.equal(useStore.getState().composing, interrupt === 'new-compose');
+        if (interrupt === 'new-compose') assert.equal(useStore.getState().composeData.subject, 'Newer work');
+        assert.doesNotMatch(JSON.stringify(useStore.getState().composeData), /Stale private quote/);
+      } finally { release(); globalThis.fetch = originalFetch; }
+    });
+  }
+
+  test('thread selection, expanded children, draft and attachment metadata use actual message data', async () => {
+    await mountSuperhuman({ rows: [{ ...THREAD, has_attachments: true, is_starred: true }], threadedView: true,
+      replyDrafts: { [THREAD.id]: { exists: true } } });
+    ROUTES['/mail/threads/thr-1?folder=INBOX'] = [200, { messages: [THREAD, second] }];
+    // Populate the cache, as a completed native thread request does.
+    await React.act(async () => useStore.setState({ threadMessages: { 'thr-1': [THREAD, second] } }));
+    const row = container.querySelector('[data-msgid="msg-2"]');
+    assert.equal(row.dataset.unread, 'true');
+    assert.ok(row.querySelector('[aria-label="Attachments"]'));
+    assert.ok(row.querySelector('[aria-label="Open reply draft"]'));
+    assert.ok(row.querySelector('[aria-label="contextMenu.unstar"]'));
+    await click(row.querySelector('.sh-mail-thread-count'));
+    assert.equal(row.querySelector('.sh-mail-thread-count').getAttribute('aria-expanded'), 'true');
+    assert.equal(row.querySelectorAll('.sh-mail-row--nested').length, 2);
+    assert.equal(useStore.getState().selectedMessageId, null, 'expansion is distinct from opening a message');
+    await click(row.querySelector('.sh-mail-thread-count'));
+    assert.equal(row.querySelector('.sh-mail-thread-children'), null);
+  });
+
+  test('expanded child keyboard activation never bubbles a destructive shortcut to its parent', async () => {
+    await mountSuperhuman({ rows: [THREAD], threadedView: true });
+    await React.act(async () => useStore.setState({ threadMessages: { 'thr-1': [second] } }));
+    await click(container.querySelector('.sh-mail-thread-count'));
+    const child = container.querySelector('.sh-mail-row--nested .sh-mail-row-content');
+    let forwarded = 0;
+    const listener = () => { forwarded += 1; };
+    document.addEventListener('keydown', listener);
+    try {
+      await React.act(async () => child.focus());
+      for (const key of ['r', 's', '#', 'e']) {
+        await React.act(async () => child.dispatchEvent(new window.KeyboardEvent('keydown', { key, bubbles: true })));
+      }
+      assert.equal(forwarded, 0, 'child-focused message shortcuts cannot target the parent row');
+      await React.act(async () => child.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+      assert.equal(useStore.getState().selectedMessageId, second.id, 'Enter opens the concrete child');
+    } finally { document.removeEventListener('keydown', listener); }
+  });
+
+  test('focused star and read shortcuts call native APIs and preserve reader selection', async () => {
+    await mountSuperhuman();
+    await React.act(async () => shortcutBus.emit('toggleStar'));
+    assert.ok(CALLS.some(call => call.path.includes('/messages/msg-1/star')));
+    assert.equal(useStore.getState().messages[0].is_starred, true);
+    await React.act(async () => shortcutBus.emit('toggleRead'));
+    assert.ok(CALLS.some(call => call.path.includes('/messages/bulk-read') && call.body?.ids?.includes(MESSAGE.id) && call.body.read));
+    assert.equal(useStore.getState().messages[0].is_read, true);
+    assert.equal(useStore.getState().selectedMessageId, null);
+  });
+
+  test('snooze and move open native pickers without mutating messages, including behind the full reader', async () => {
+    await mountSuperhuman();
+    await React.act(async () => shortcutBus.emit('snooze'));
+    assert.match(document.body.textContent, /contextMenu\.snooze/);
+    assert.equal(CALLS.some(call => call.method !== 'GET'), false);
+    await React.act(async () => document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    await React.act(async () => document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    await React.act(async () => useStore.getState().setSelectedMessage(MESSAGE.id));
+    await React.act(async () => shortcutBus.emit('moveMessage'));
+    assert.ok(document.body.querySelector('input[placeholder="contextMenu.folders.search"]'), 'picker is mounted outside a possibly hidden list');
+    assert.equal(container.querySelector('input[placeholder="contextMenu.folders.search"]'), null, 'Superhuman context menu is portaled');
+    assert.equal(CALLS.some(call => call.method !== 'GET'), false);
+  });
+
+  test('archive advances focused row and Undo restores actual mail without opening the reader', async () => {
+    const third = { ...MESSAGE, id: 'sh-third', uid: 3, message_id: '<sh-third@example.com>' };
+    await mountSuperhuman({ rows: [MESSAGE, second, third] });
+    await React.act(async () => shortcutBus.emit('nextMessage'));
+    assert.equal(useStore.getState().listFocusedMessageId, second.id);
+    await React.act(async () => shortcutBus.emit('archive'));
+    assert.equal(container.querySelector('[data-msgid="sh-second"]'), null);
+    assert.equal(useStore.getState().listFocusedMessageId, third.id);
+    assert.equal(useStore.getState().selectedMessageId, null);
+    const undo = useStore.getState().notifications.find(notification => notification.onUndo);
+    assert.ok(undo, 'native archive offers Undo');
+    await React.act(async () => undo.onUndo());
+    assert.ok(container.querySelector('[data-msgid="sh-second"]'));
+    assert.equal(CALLS.some(call => call.path.includes('/archive') && call.method !== 'GET'), false, 'Undo cancels the delayed native mutation');
+  });
+
+  test('native category tabs send real filter parameters and never invent Important counts', async () => {
+    await mountSuperhuman({ categorizationEnabled: true });
+    const tabs = container.querySelector('.sh-list-tabs');
+    assert.ok(tabs);
+    const newsletters = [...tabs.querySelectorAll('button')].find(button => button.textContent.includes('newsletter'));
+    await click(newsletters);
+    assert.equal(newsletters.getAttribute('aria-pressed'), 'true');
+    assert.ok(CALLS.some(call => call.path.includes('category=newsletter')));
+    assert.doesNotMatch(tabs.textContent, /Important|480/);
+  });
+
+  test('load failures offer an actual retry instead of claiming an empty inbox', async () => {
+    await mountSuperhuman({ rows: [] });
+    const route = CALLS.find(call => call.path.includes('/mail/messages?'))?.path;
+    const initialRoute = route || '/api/mail/messages?limit=50&offset=0&accountId=acct-1&folder=INBOX';
+    // Use the exact URL emitted by the mounted list rather than relying on parameter order.
+    await React.act(async () => useStore.setState({ messagesRefreshToken: useStore.getState().messagesRefreshToken + 1 }));
+    const listPath = CALLS.find(call => call.path.includes('/mail/messages?'))?.path || initialRoute;
+    ROUTES[listPath] = [500, { error: 'Synthetic inbox failure' }];
+    await React.act(async () => useStore.setState({ messagesRefreshToken: useStore.getState().messagesRefreshToken + 1 }));
+    assert.match(container.querySelector('[role="alert"]').textContent, /Could not load messages/);
+    delete ROUTES[listPath];
+    SERVED = [MESSAGE];
+    await click(container.querySelector('[role="alert"] button'));
+    assert.equal(container.querySelector('[role="alert"]'), null);
+    assert.ok(container.querySelector('[data-msgid="msg-1"]'));
+  });
+
+  test('the same preset leaves phone rows and headers on the existing touch UI', async () => {
+    await mountSuperhuman({ mobile: true });
+    assert.equal(container.querySelector('.sh-mail-list'), null);
+    assert.equal(container.querySelector('.sh-mail-row'), null);
+    assert.ok(container.querySelector('.no-callout'));
+    assert.ok(container.querySelector('[aria-label="Menu"]'));
+    await React.act(async () => root.unmount()); root = null;
+    window.innerWidth = 1024;
+    useStore.setState({ layout: 'comfortable' });
+  });
+});

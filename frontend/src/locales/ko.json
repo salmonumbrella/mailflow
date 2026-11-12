@@ -425,7 +425,8 @@
       "title": "{{when}}까지 다시 알림 대기",
       "failTitle": "다시 알림 시간을 변경하지 못했습니다",
       "failBody": "이전 시간이 유지됩니다. 다시 시도하세요."
-    }
+    },
+    "attachments": "첨부 파일"
   },
   "messageList": {
     "replyDraftChanged": "답장 초안이 변경되었습니다. 다시 열어 보세요.",
@@ -568,6 +569,10 @@
       "list": {
         "label": "목록 우선",
         "description": "전체 너비 목록, 메시지는 따로 열림"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "간결한 메일 목록, 슬림한 탐색 막대, 전체 너비 읽기 화면"
       }
     },
     "noAccountsDesc": "시작하려면 이메일 계정을 추가하세요",
@@ -593,7 +598,11 @@
     "categoryCountTitle": "메시지: {{total}} · 읽지 않음: {{unread}}",
     "emptyCategory": "{{category}}에 메일이 없습니다",
     "emptyCategoryOthers": "다른 카테고리에는 메일이 있습니다.",
-    "emptyCategoryNone": "받은편지함이 비어 있습니다."
+    "emptyCategoryNone": "받은편지함이 비어 있습니다.",
+    "loadFailed": "메일을 불러오지 못했습니다.",
+    "categoriesLabel": "받은편지함 카테고리",
+    "listOptions": "목록 옵션",
+    "openThreadMessageHint": "메일 단축키를 사용하기 전에 Enter를 눌러 이 메일을 여세요."
   },
   "lockScreen": {
     "unlockButton": "잠금 해제",
@@ -811,7 +820,9 @@
       "tomorrowMorning": "내일 아침",
       "threeHours": "3시간 후",
       "change": "다시 알림 시간 변경",
-      "unsnooze": "지금 되돌리기"
+      "unsnooze": "지금 되돌리기",
+      "date": "다시 알림 날짜",
+      "time": "다시 알림 시간"
     },
     "star": "별표 표시",
     "replyAll": "전체 답장",
@@ -856,7 +867,8 @@
       "themes": "테마 열기",
       "inbox": "받은편지함으로 이동",
       "switchTheme": "{{theme}} 테마로 전환",
-      "accountInbox": "{{name}} — 받은 편지함"
+      "accountInbox": "{{name}} — 받은 편지함",
+      "switchLayout": "{{layout}} 레이아웃 사용"
     },
     "hint": {
       "select": "선택",
@@ -864,7 +876,13 @@
       "navigate": "이동"
     },
     "noResults": "작업을 찾을 수 없습니다.",
-    "placeholder": "작업 검색…"
+    "placeholder": "작업 검색…",
+    "error": "명령을 실행하지 못했습니다",
+    "superhumanPlaceholder": "무엇을 하시겠어요?",
+    "title": "명령 팔레트",
+    "superhumanTitle": "Superhuman 명령",
+    "searchLabel": "명령 검색",
+    "results": "명령"
   },
   "shortcuts": {
     "title": "키보드 단축키",
@@ -998,9 +1016,45 @@
       },
       "gtdDone": {
         "description": "선택한 GTD 메시지를 완료로 표시"
+      },
+      "returnToInbox": {
+        "label": "받은편지함으로 이동",
+        "description": "선택한 대화를 해당 계정의 받은편지함으로 이동"
+      },
+      "openFolderDrawer": {
+        "label": "폴더 열기",
+        "description": "폴더를 열고 위/아래 화살표로 선택한 뒤 오른쪽 화살표로 열기"
+      },
+      "openHighlightedMessage": {
+        "label": "강조된 대화 열기",
+        "description": "목록에서 강조된 대화 열기"
+      },
+      "filterUnread": {
+        "label": "읽지 않은 메일 필터",
+        "description": "검색 중이 아닐 때 현재 폴더의 읽지 않은 메일 필터 전환"
+      },
+      "filterStarred": {
+        "label": "별표 메일 필터",
+        "description": "별표 표시된 메일 검색 전환"
+      },
+      "openOrReplyAll": {
+        "label": "열기 또는 전체답장",
+        "description": "강조된 대화를 열거나 읽기 화면에서 전체답장"
+      },
+      "snooze": {
+        "label": "다시 알림",
+        "description": "다시 알림"
+      },
+      "moveMessage": {
+        "label": "폴더로 이동",
+        "description": "폴더로 이동"
       }
     },
-    "browserMailboxFallback": "브라우저 환경: g 입력 후 1–9를 누르면 해당 편지함으로 이동하고, g 입력 후 l을 누르면 라벨 선택기가 열립니다."
+    "browserMailboxFallback": "브라우저 환경: g 입력 후 1–9를 누르면 해당 편지함으로 이동하고, g 입력 후 l을 누르면 라벨 선택기가 열립니다.",
+    "account": {
+      "label": "계정 {{number}}",
+      "description": "계정 {{number}}의 받은편지함 열기"
+    }
   },
   "notifications": {
     "newMessage": "새 메시지"
@@ -2414,5 +2468,20 @@
     "formNote": "Gmail 및 Google Workspace 사서함은 앱 비밀번호 대신 Google로 로그인할 수 있습니다.",
     "appPasswordNote": "Gmail에는 일반 비밀번호가 아닌 앱 비밀번호가 필요합니다. Google 계정에서 2단계 인증을 켠 다음 앱 비밀번호를 만들어 비밀번호 칸에 입력하세요.",
     "createAppPassword": "앱 비밀번호 만들기"
+  },
+  "superhuman": {
+    "navigation": "메일 탐색",
+    "commands": "명령",
+    "folders": "폴더 및 계정",
+    "search": "메일 검색",
+    "accounts": "계정 관리",
+    "shortcuts": "키보드 단축키",
+    "settings": "설정",
+    "closeFolders": "폴더 닫기",
+    "recentUnavailable": "이 메일을 더 이상 사용할 수 없습니다. 해당 폴더를 열어 찾아보세요.",
+    "recentlyViewed": "최근에 본 메일",
+    "thisSession": "현재 세션",
+    "recentEmpty": "연 메일이 여기에 표시됩니다. 기록은 현재 세션에서만 유지됩니다.",
+    "keyboardHints": "키보드 힌트"
   }
 }

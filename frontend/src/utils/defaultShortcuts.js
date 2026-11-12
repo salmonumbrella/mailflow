@@ -29,6 +29,9 @@ export const ACTION_DEFS = {
   nextMessage:   { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.nextMessage.label',   descriptionKey: 'shortcuts.actions.nextMessage.description',   defaultKey: 'j'  },
   prevMessage:   { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.prevMessage.label',   descriptionKey: 'shortcuts.actions.prevMessage.description',   defaultKey: 'k'  },
   openMessage:   { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.openMessage.label',   descriptionKey: 'shortcuts.actions.openMessage.description',   defaultKey: 'o'  },
+  ...Object.fromEntries(['openFolderDrawer', 'openHighlightedMessage', 'filterUnread', 'filterStarred'].map(action =>
+    [action, { groupKey: 'shortcuts.groups.navigation', labelKey: `shortcuts.actions.${action}.label`, descriptionKey: `shortcuts.actions.${action}.description`, defaultKey: null }])),
+  returnToInbox: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.returnToInbox.label', descriptionKey: 'shortcuts.actions.returnToInbox.description', defaultKey: null },
   goInbox:       { groupKey: 'shortcuts.groups.navigation',     labelKey: 'shortcuts.actions.goInbox.label',       descriptionKey: 'shortcuts.actions.goInbox.description',       defaultKey: 'gi' },
   toggleLeftSidebar: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.toggleLeftSidebar.label', descriptionKey: 'shortcuts.actions.toggleLeftSidebar.description', defaultKey: 'ctrl+\\' },
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => {
@@ -36,6 +39,12 @@ export const ACTION_DEFS = {
     const action = `goVisibleMailbox${n}`;
     return [action, { groupKey: 'shortcuts.groups.navigation', labelKey: `shortcuts.actions.${action}.label`, descriptionKey: `shortcuts.actions.${action}.description`, defaultKey: `ctrl+${n}` }];
   })),
+  ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => {
+    const action = `goAccount${i + 1}`;
+    return [action, { groupKey: 'shortcuts.groups.navigation', labelKey: `shortcuts.actions.${action}.label`, descriptionKey: `shortcuts.actions.${action}.description`, defaultKey: null }];
+  })),
+  nextConversationMessage: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.nextMessage.label', descriptionKey: 'shortcuts.actions.nextMessage.description', defaultKey: null },
+  prevConversationMessage: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.prevMessage.label', descriptionKey: 'shortcuts.actions.prevMessage.description', defaultKey: null },
   openLabelPicker: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.openLabelPicker.label', descriptionKey: 'shortcuts.actions.openLabelPicker.description', defaultKey: 'ctrl+l' },
   toggleRightSidebar: { groupKey: 'shortcuts.groups.navigation', labelKey: 'shortcuts.actions.toggleRightSidebar.label', descriptionKey: 'shortcuts.actions.toggleRightSidebar.description', defaultKey: 'ctrl+/' },
 
@@ -48,6 +57,8 @@ export const ACTION_DEFS = {
   unsubscribe: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.unsubscribe.label', descriptionKey: 'shortcuts.actions.unsubscribe.description', defaultKey: 'ctrl+shift+u' },
   loadRemoteImages: { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.loadRemoteImages.label', descriptionKey: 'shortcuts.actions.loadRemoteImages.description', defaultKey: 'i' },
   archive:       { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.archive.label',       descriptionKey: 'shortcuts.actions.archive.description',       defaultKey: 'e'  },
+  snooze:        { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.snooze.label', descriptionKey: 'shortcuts.actions.snooze.description', defaultKey: null },
+  moveMessage:   { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.moveMessage.label', descriptionKey: 'shortcuts.actions.moveMessage.description', defaultKey: null },
   delete:        { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.delete.label',        descriptionKey: 'shortcuts.actions.delete.description',        defaultKey: '#'  },
   toggleStar:    { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.toggleStar.label',    descriptionKey: 'shortcuts.actions.toggleStar.description',    defaultKey: 's'  },
   toggleRead:    { groupKey: 'shortcuts.groups.messageActions', labelKey: 'shortcuts.actions.toggleRead.label',    descriptionKey: 'shortcuts.actions.toggleRead.description',    defaultKey: 'm'  },
@@ -70,10 +81,36 @@ export const ACTION_DEFS = {
 };
 
 // Returns the effective shortcut map: action → key, with user overrides applied.
-export function getEffectiveShortcuts(userOverrides = {}) {
+const SUPERHUMAN_SHORTCUTS = {
+  openMessage: 'Enter', replyAll: 'shift+r', undoAction: 'z', snooze: 'h',
+  openLabelPicker: 'l', moveMessage: 'v', gtdReference: null, toggleRead: 'u', markUnread: null,
+  nextConversationMessage: 'n', prevConversationMessage: 'p', gtdDone: null,
+  returnToInbox: 'shift+e', filterUnread: 'shift+u', filterStarred: 'shift+s',
+  openFolderDrawer: 'ArrowLeft', openHighlightedMessage: 'ArrowRight',
+  ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`goVisibleMailbox${i + 1}`, null])),
+  ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`goAccount${i + 1}`, `ctrl+${i + 1}`])),
+};
+
+export function getEffectiveShortcuts(userOverrides = {}, layout) {
   const out = {};
   for (const [action, def] of Object.entries(ACTION_DEFS)) {
     out[action] = action in userOverrides ? userOverrides[action] : def.defaultKey;
+  }
+  if (layout === 'superhuman') {
+    const claimed = new Set(Object.entries(userOverrides)
+      .filter(([action]) => ACTION_DEFS[action])
+      .map(([, binding]) => canonicalShortcutBinding(binding)).filter(Boolean));
+    const reserved = new Set(Object.values(SUPERHUMAN_SHORTCUTS).map(canonicalShortcutBinding).filter(Boolean));
+    for (const [action, binding] of Object.entries(SUPERHUMAN_SHORTCUTS)) {
+      if (action in userOverrides) continue;
+      const fallback = ACTION_DEFS[action].defaultKey;
+      out[action] = !claimed.has(canonicalShortcutBinding(binding)) ? binding
+        : !reserved.has(canonicalShortcutBinding(fallback)) && !claimed.has(canonicalShortcutBinding(fallback)) ? fallback : null;
+    }
+    // A custom key always wins over this layout's inherited defaults too.
+    for (const action of Object.keys(out)) {
+      if (!(action in userOverrides) && claimed.has(canonicalShortcutBinding(out[action]))) out[action] = null;
+    }
   }
   return out;
 }
@@ -111,9 +148,9 @@ function canonicalShortcutBinding(binding) {
 
 // The last action in ACTION_DEFS wins at dispatch. Return every displaced action
 // so settings can show conflicts before the binding is pressed.
-export function getShortcutConflicts(userOverrides = {}) {
+export function getShortcutConflicts(userOverrides = {}, layout) {
   const groups = new Map();
-  for (const [action, binding] of Object.entries(getEffectiveShortcuts(userOverrides))) {
+  for (const [action, binding] of Object.entries(getEffectiveShortcuts(userOverrides, layout))) {
     const key = canonicalShortcutBinding(binding);
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
@@ -137,14 +174,14 @@ export function shortcutBindingFromEvent(event) {
 
 // Returns the reverse lookup map: key → action, for fast dispatch (plain keys only).
 // Collisions keep last-writer-wins behavior but are logged at registration.
-export function buildKeyMap(userOverrides = {}) {
-  const effective = getEffectiveShortcuts(userOverrides);
+export function buildKeyMap(userOverrides = {}, layout) {
+  const effective = getEffectiveShortcuts(userOverrides, layout);
   const map = {};
   for (const [action, key] of Object.entries(effective)) {
     if (!key || parseModKey(key)) continue;
     map[key] = action;
   }
-  for (const { key, loser, winner } of getShortcutConflicts(userOverrides)) {
+  for (const { key, loser, winner } of getShortcutConflicts(userOverrides, layout)) {
     console.warn(`[shortcuts] key "${key}" is bound to both "${loser}" and "${winner}"; "${winner}" wins`);
   }
   return map;
@@ -154,8 +191,8 @@ export function buildKeyMap(userOverrides = {}) {
 // e.g. { p: 'printMessage' } when printMessage is bound to 'ctrl+p'.
 // Collisions are checked against the full binding, so Ctrl+P and Ctrl+Shift+P
 // do not trigger a false warning.
-export function buildModKeyMap(userOverrides = {}) {
-  const effective = getEffectiveShortcuts(userOverrides);
+export function buildModKeyMap(userOverrides = {}, layout) {
+  const effective = getEffectiveShortcuts(userOverrides, layout);
   const map = {};
   for (const [action, key] of Object.entries(effective)) {
     const parsed = parseModKey(key);
@@ -163,7 +200,7 @@ export function buildModKeyMap(userOverrides = {}) {
     const bare = parsed.bare.toLowerCase();
     map[bare] = action;
   }
-  for (const { key, loser, winner } of getShortcutConflicts(userOverrides)) {
+  for (const { key, loser, winner } of getShortcutConflicts(userOverrides, layout)) {
     if (parseModKey(key)) console.warn(`[shortcuts] key "${key}" is bound to both "${loser}" and "${winner}"; "${winner}" wins`);
   }
   return map;
@@ -171,13 +208,13 @@ export function buildModKeyMap(userOverrides = {}) {
 
 // Match the full modifier set. A shifted punctuation character already carries
 // Shift in event.key on common keyboard layouts.
-export function resolveShortcutAction(event, userOverrides = {}) {
+export function resolveShortcutAction(event, userOverrides = {}, layout) {
   if (!event?.key) return null;
   const key = event.key.toLowerCase();
   const isCommand = isMac ? !!event.metaKey && !event.ctrlKey : !!event.ctrlKey && !event.metaKey;
   if ((event.ctrlKey || event.metaKey) && !isCommand) return null;
   let found = null;
-  for (const [action, binding] of Object.entries(getEffectiveShortcuts(userOverrides))) {
+  for (const [action, binding] of Object.entries(getEffectiveShortcuts(userOverrides, layout))) {
     if (!binding) continue;
     const pieces = binding.toLowerCase().split('+');
     const bare = pieces.pop();
@@ -195,6 +232,8 @@ export function resolveShortcutAction(event, userOverrides = {}) {
 }
 
 const GENERAL_ACTION_TEXT = {
+  snooze: ['Snooze', 'Choose when the selected message returns'],
+  moveMessage: ['Move to folder', 'Move the selected message to another folder'],
   toggleLeftSidebar: ['Toggle left sidebar', 'Hide or show the left sidebar'],
   openLabelPicker: ['Open label picker', 'Copy the selected message to a folder'],
   replyAllFromSelection: ['Reply all from selection', 'Reply all to the selected message'],
@@ -203,11 +242,19 @@ const GENERAL_ACTION_TEXT = {
   loadRemoteImages: ['Load remote images', 'Load images in the selected message'],
 };
 
-export function shortcutActionText(t, action, kind = 'description') {
+export function shortcutActionText(t, action, kind = 'description', layout) {
+  if (layout === 'superhuman' && action === 'openMessage') return t(`shortcuts.actions.openOrReplyAll.${kind}`);
   const definition = ACTION_DEFS[action];
   if (!definition) return '';
   const mailboxNumber = /^goVisibleMailbox([1-9])$/.exec(action)?.[1];
+  const accountNumber = /^goAccount([1-9])$/.exec(action)?.[1];
   const label = kind === 'label';
+  if (accountNumber) {
+    return t(`shortcuts.account.${kind}`, {
+      number: Number(accountNumber),
+      defaultValue: label ? 'Account {{number}}' : 'Open account {{number}} inbox',
+    });
+  }
   if (mailboxNumber) {
     return t(`shortcuts.visibleMailbox.${kind}`, {
       number: Number(mailboxNumber),

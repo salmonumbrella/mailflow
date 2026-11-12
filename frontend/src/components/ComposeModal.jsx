@@ -406,6 +406,17 @@ export default function ComposeModal() {
   const imageInputRef = useRef(null);
   const signatureRef = useRef(null);
   const quotedHtmlRef = useRef(null);
+  // Minimize removes the editable subtree. Keep its latest HTML independently of the DOM,
+  // then repopulate each new node without resetting edits on ordinary renders.
+  const quotedContentRef = useRef(null);
+  if (quotedContentRef.current === null) {
+    quotedContentRef.current = sanitizeEmailForApp(quotedBodyHtml || '', { FORBID_TAGS: ['style'] });
+  }
+  const attachQuotedEditor = useCallback(node => {
+    if (quotedHtmlRef.current) quotedContentRef.current = quotedHtmlRef.current.innerHTML;
+    quotedHtmlRef.current = node;
+    if (node) node.innerHTML = quotedContentRef.current;
+  }, []);
   const composeWindowRef = useRef(null);
   const posRef = useRef(null);
   const customSizeRef = useRef(null);
@@ -819,17 +830,6 @@ export default function ComposeModal() {
     if (next.bcc.length) setShowBcc(true);
   }, [fromAccount?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- reacts to the From account only; the chips and baselines are read as they stand at that moment
 
-  // Initialise quoted HTML contentEditable once on mount (ref-based to avoid React cursor conflicts)
-  useEffect(() => {
-    if (quotedHtmlRef.current && quotedBodyHtml) {
-      // Strip <style> blocks — marketing emails use global rules like "div { margin: 0 !important }"
-      // that leak out of contentEditable into the app UI. Inline style attributes are preserved.
-      // Images load only through MailFlow (utils/appEmailHtml.js): this is the app's page, not the
-      // email frame, and its CSP would let a sender's image through.
-      quotedHtmlRef.current.innerHTML = sanitizeEmailForApp(quotedBodyHtml, { FORBID_TAGS: ['style'] });
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   // Chrome re-evaluates spell check state for all contentEditable elements whenever new ones
   // are added to the DOM (e.g. signature + quoted body divs in reply/forward). Setting the
   // IDL property directly after all elements are mounted is more reliable than the HTML
@@ -1117,7 +1117,7 @@ export default function ComposeModal() {
     // Taken with the recipients it describes: From stays usable while the request is out.
     const autoAtSend = autoRef.current;
     const sentQuotedHtml = !plaintextEmail && (quotedBodyHtml != null || quotedHtmlRef.current)
-      ? (quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedBodyHtml)
+      ? (quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedContentRef.current)
       : null;
     const savedDraft = draftPointerRef.current;
     const hasDraft = savedDraft.uid != null && savedDraft.folder != null && savedDraft.accountId;
@@ -1683,7 +1683,7 @@ export default function ComposeModal() {
     body: plaintextEmail ? body : htmlMode ? htmlSource : editor?.isEmpty ? '' : editor?.getHTML() ?? '',
     bodyIsHtml: !plaintextEmail,
     quotedBody,
-    quotedBodyHtml: quotedHtmlRef.current?.innerHTML || quotedBodyHtml || '',
+    quotedBodyHtml: quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedContentRef.current,
     // Off is saved as an empty signature, so toggling counts as an edit and is autosaved.
     editedSignature: !signatureEnabled ? '' : plaintextEmail ? plainSig : signatureContentRef.current,
     attachments: attachments.map(a => a.name),
@@ -2658,7 +2658,7 @@ export default function ComposeModal() {
           {(quotedBody || quotedBodyHtml) && (
             !plaintextEmail && quotedBodyHtml ? (
               <div
-                ref={quotedHtmlRef}
+                ref={attachQuotedEditor}
                 contentEditable
                 suppressContentEditableWarning
                 spellCheck={false}
@@ -3292,7 +3292,7 @@ export default function ComposeModal() {
         {(quotedBody || quotedBodyHtml) ? (
           !plaintextEmail && quotedBodyHtml ? (
             <div
-              ref={quotedHtmlRef}
+              ref={attachQuotedEditor}
               contentEditable
               suppressContentEditableWarning
               spellCheck={false}

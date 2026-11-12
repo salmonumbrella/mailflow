@@ -282,7 +282,7 @@ function badgeStyle(badge) {
     : { fontSize: 10, color: 'var(--text-tertiary)', background: 'var(--bg-elevated)', padding: '1px 5px', borderRadius: 8 };
 }
 
-export default function Sidebar() {
+export default function Sidebar({ expanded, onToggle } = {}) {
   const { t } = useTranslation();
   const uiScale = useUiScale();
   const {
@@ -304,7 +304,7 @@ export default function Sidebar() {
 
   const isMobile = useMobile();
   // On mobile the sidebar is always expanded (shown as an overlay drawer)
-  const sidebarCollapsed = isMobile ? false : sidebarCollapsedPref;
+  const sidebarCollapsed = isMobile ? false : (expanded === undefined ? sidebarCollapsedPref : !expanded);
 
   // Close the mobile drawer whenever the user navigates to a different folder/account
   useEffect(() => {
@@ -919,7 +919,7 @@ export default function Sidebar() {
           </div>
         )}
         <button
-          onClick={isMobile ? () => setMobileSidebarOpen(false) : toggleSidebar}
+          onClick={isMobile ? () => setMobileSidebarOpen(false) : (onToggle || toggleSidebar)}
           title={t('sidebar.toggleSidebar')}
           className="btn-press"
           style={{

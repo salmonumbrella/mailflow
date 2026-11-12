@@ -425,7 +425,8 @@
       "title": "En attente jusqu'à {{when}}",
       "failTitle": "Impossible de modifier l'heure de retour",
       "failBody": "L'heure précédente est conservée. Réessayez."
-    }
+    },
+    "attachments": "Pièces jointes"
   },
   "messageList": {
     "replyDraftChanged": "Le brouillon de réponse a changé. Essayez de le rouvrir.",
@@ -571,6 +572,10 @@
       "list": {
         "label": "Liste d'abord",
         "description": "Liste en pleine largeur ; un message s'ouvre seul"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "Une liste compacte, une navigation étroite et un lecteur pleine largeur"
       }
     },
     "snoozedUntil": "En attente jusqu'à {{when}}",
@@ -593,7 +598,11 @@
     "categoryCountTitle": "Messages : {{total}} · Non lus : {{unread}}",
     "emptyCategory": "Rien dans {{category}}",
     "emptyCategoryOthers": "Les autres catégories contiennent encore des messages.",
-    "emptyCategoryNone": "La boîte de réception est vide."
+    "emptyCategoryNone": "La boîte de réception est vide.",
+    "loadFailed": "Impossible de charger les messages.",
+    "categoriesLabel": "Catégories de la boîte de réception",
+    "listOptions": "Options de la liste",
+    "openThreadMessageHint": "Appuyez sur Entrée pour ouvrir ce message avant d’utiliser les raccourcis de message."
   },
   "lockScreen": {
     "subtitle": "Saisissez votre PIN pour déverrouiller",
@@ -813,7 +822,9 @@
       "nextWeek": "La semaine prochaine",
       "custom": "Personnalisé...",
       "change": "Modifier l'heure de retour",
-      "unsnooze": "Ne plus mettre en attente"
+      "unsnooze": "Ne plus mettre en attente",
+      "date": "Date du rappel",
+      "time": "Heure du rappel"
     },
     "categorize": "Catégoriser comme…",
     "categoryAlwaysSender": "Toujours pour cet expéditeur",
@@ -863,8 +874,15 @@
       "settings": "Ouvrir les paramètres",
       "themes": "Ouvrir les thèmes",
       "switchTheme": "Passer au thème {{theme}}",
-      "accountInbox": "{{name}} — Boîte de réception"
-    }
+      "accountInbox": "{{name}} — Boîte de réception",
+      "switchLayout": "Utiliser la disposition {{layout}}"
+    },
+    "error": "Impossible d’exécuter la commande",
+    "superhumanPlaceholder": "Que souhaitez-vous faire ?",
+    "title": "Palette de commandes",
+    "superhumanTitle": "Commandes Superhuman",
+    "searchLabel": "Rechercher des commandes",
+    "results": "Commandes"
   },
   "shortcuts": {
     "title": "Raccourcis clavier",
@@ -999,7 +1017,43 @@
       "toggleRightSidebar": {
         "label": "Afficher ou masquer la barre latérale droite",
         "description": "Masquer ou afficher la barre latérale droite"
+      },
+      "returnToInbox": {
+        "label": "Remettre dans la boîte de réception",
+        "description": "Déplacer la conversation sélectionnée vers la boîte de réception de son compte"
+      },
+      "openFolderDrawer": {
+        "label": "Ouvrir les dossiers",
+        "description": "Ouvrir les dossiers ; choisir avec Haut/Bas et ouvrir avec Droite"
+      },
+      "openHighlightedMessage": {
+        "label": "Ouvrir la conversation surlignée",
+        "description": "Ouvrir la conversation surlignée dans la liste"
+      },
+      "filterUnread": {
+        "label": "Filtrer les non lus",
+        "description": "Afficher ou masquer les messages lus du dossier actuel, hors recherche"
+      },
+      "filterStarred": {
+        "label": "Filtrer les favoris",
+        "description": "Activer ou désactiver la recherche de messages favoris"
+      },
+      "openOrReplyAll": {
+        "label": "Ouvrir ou répondre à tous",
+        "description": "Ouvrir la conversation surlignée ou répondre à tous depuis le lecteur"
+      },
+      "snooze": {
+        "label": "Rappel",
+        "description": "Rappel"
+      },
+      "moveMessage": {
+        "label": "Déplacer vers un dossier",
+        "description": "Déplacer vers un dossier"
       }
+    },
+    "account": {
+      "label": "Compte {{number}}",
+      "description": "Ouvrir la boîte de réception du compte {{number}}"
     }
   },
   "notifications": {
@@ -2414,5 +2468,20 @@
     "formNote": "Les boîtes Gmail et Google Workspace peuvent se connecter avec Google au lieu d'un mot de passe d'application.",
     "appPasswordNote": "Gmail demande un mot de passe d'application, pas votre mot de passe habituel. Activez la validation en deux étapes de votre compte Google, puis créez un mot de passe d'application et saisissez-le dans le champ du mot de passe.",
     "createAppPassword": "Créer un mot de passe d'application"
+  },
+  "superhuman": {
+    "navigation": "Navigation de la messagerie",
+    "commands": "Commandes",
+    "folders": "Dossiers et comptes",
+    "search": "Rechercher des e-mails",
+    "accounts": "Gérer les comptes",
+    "shortcuts": "Raccourcis clavier",
+    "settings": "Paramètres",
+    "closeFolders": "Fermer les dossiers",
+    "recentUnavailable": "Ce message n’est plus disponible. Ouvrez son dossier pour le retrouver.",
+    "recentlyViewed": "Consultés récemment",
+    "thisSession": "Cette session",
+    "recentEmpty": "Les messages que vous ouvrez apparaîtront ici. Votre historique reste limité à cette session.",
+    "keyboardHints": "Aide au clavier"
   }
 }

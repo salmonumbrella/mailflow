@@ -425,7 +425,8 @@
       "title": "暂停至 {{when}}",
       "failTitle": "无法更改提醒时间",
       "failBody": "保留原来的时间。请重试。"
-    }
+    },
+    "attachments": "附件"
   },
   "messageList": {
     "replyDraftChanged": "回复草稿已更改。请尝试重新打开。",
@@ -571,6 +572,10 @@
       "list": {
         "label": "列表优先",
         "description": "全宽列表；邮件单独打开"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "紧凑邮件列表、精简导航栏和全宽阅读视图"
       }
     },
     "snoozedUntil": "暂停至 {{when}}",
@@ -593,7 +598,11 @@
     "categoryCountTitle": "邮件：{{total}} · 未读：{{unread}}",
     "emptyCategory": "{{category}}中没有邮件",
     "emptyCategoryOthers": "其他类别中仍有邮件。",
-    "emptyCategoryNone": "收件箱为空。"
+    "emptyCategoryNone": "收件箱为空。",
+    "loadFailed": "无法加载邮件。",
+    "categoriesLabel": "收件箱分类",
+    "listOptions": "列表选项",
+    "openThreadMessageHint": "请先按 Enter 打开此邮件，再使用邮件快捷键。"
   },
   "lockScreen": {
     "subtitle": "输入 PIN 码以解锁",
@@ -813,7 +822,9 @@
       "nextWeek": "下周",
       "custom": "自定义……",
       "change": "更改提醒时间",
-      "unsnooze": "立即恢复"
+      "unsnooze": "立即恢复",
+      "date": "稍后提醒日期",
+      "time": "稍后提醒时间"
     },
     "categorize": "分类为…",
     "categoryAlwaysSender": "始终用于此发件人",
@@ -863,8 +874,15 @@
       "settings": "打开设置",
       "themes": "打开主题",
       "switchTheme": "切换至「{{theme}}」主题",
-      "accountInbox": "{{name}} — 收件箱"
-    }
+      "accountInbox": "{{name}} — 收件箱",
+      "switchLayout": "使用 {{layout}} 布局"
+    },
+    "error": "无法执行命令",
+    "superhumanPlaceholder": "您想做什么？",
+    "title": "命令面板",
+    "superhumanTitle": "Superhuman 命令",
+    "searchLabel": "搜索命令",
+    "results": "命令"
   },
   "shortcuts": {
     "title": "键盘快捷键",
@@ -999,7 +1017,43 @@
       "toggleRightSidebar": {
         "label": "切换右侧边栏",
         "description": "隐藏或显示右侧边栏"
+      },
+      "returnToInbox": {
+        "label": "移回收件箱",
+        "description": "将选中的会话移回其账户的收件箱"
+      },
+      "openFolderDrawer": {
+        "label": "打开文件夹",
+        "description": "打开文件夹面板；用上/下键选择，右键打开"
+      },
+      "openHighlightedMessage": {
+        "label": "打开高亮会话",
+        "description": "打开列表中高亮的会话"
+      },
+      "filterUnread": {
+        "label": "筛选未读邮件",
+        "description": "在非搜索状态下切换当前文件夹的未读邮件筛选"
+      },
+      "filterStarred": {
+        "label": "筛选星标邮件",
+        "description": "切换星标邮件搜索"
+      },
+      "openOrReplyAll": {
+        "label": "打开或回复全部",
+        "description": "打开高亮会话，或在阅读视图中回复全部"
+      },
+      "snooze": {
+        "label": "稍后提醒",
+        "description": "稍后提醒"
+      },
+      "moveMessage": {
+        "label": "移动到文件夹",
+        "description": "移动到文件夹"
       }
+    },
+    "account": {
+      "label": "账户 {{number}}",
+      "description": "打开账户 {{number}} 的收件箱"
     }
   },
   "notifications": {
@@ -2414,5 +2468,20 @@
     "formNote": "Gmail 和 Google Workspace 邮箱可以使用 Google 登录，而不必使用应用专用密码。",
     "appPasswordNote": "Gmail 需要应用专用密码，而不是你的常用密码。请为 Google 帐号开启两步验证，然后创建应用专用密码并填入密码栏。",
     "createAppPassword": "创建应用专用密码"
+  },
+  "superhuman": {
+    "navigation": "邮件导航",
+    "commands": "命令",
+    "folders": "文件夹和账户",
+    "search": "搜索邮件",
+    "accounts": "管理账户",
+    "shortcuts": "键盘快捷键",
+    "settings": "设置",
+    "closeFolders": "关闭文件夹",
+    "recentUnavailable": "此邮件已不可用。请打开其所在文件夹进行查找。",
+    "recentlyViewed": "最近查看",
+    "thisSession": "本次会话",
+    "recentEmpty": "您打开的邮件会显示在此处。历史记录仅保留在本次会话中。",
+    "keyboardHints": "键盘提示"
   }
 }

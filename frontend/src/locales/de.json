@@ -425,7 +425,8 @@
       "title": "Zurückgestellt bis {{when}}",
       "failTitle": "Zeitpunkt konnte nicht geändert werden",
       "failBody": "Der bisherige Zeitpunkt bleibt. Bitte erneut versuchen."
-    }
+    },
+    "attachments": "Anhänge"
   },
   "messageList": {
     "replyDraftChanged": "Der Antwortentwurf wurde geändert. Öffne ihn erneut.",
@@ -571,6 +572,10 @@
       "list": {
         "label": "Liste zuerst",
         "description": "Liste in voller Breite; eine Nachricht öffnet sich für sich"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "Kompakte Nachrichtenzeilen, eine schmale Navigation und eine Leseansicht über die volle Breite"
       }
     },
     "snoozedUntil": "Zurückgestellt bis {{when}}",
@@ -593,7 +598,11 @@
     "categoryCountTitle": "Nachrichten: {{total}} · Ungelesen: {{unread}}",
     "emptyCategory": "Nichts in {{category}}",
     "emptyCategoryOthers": "Andere Kategorien enthalten noch Nachrichten.",
-    "emptyCategoryNone": "Der Posteingang ist leer."
+    "emptyCategoryNone": "Der Posteingang ist leer.",
+    "loadFailed": "Nachrichten konnten nicht geladen werden.",
+    "categoriesLabel": "Posteingangskategorien",
+    "listOptions": "Listenoptionen",
+    "openThreadMessageHint": "Drücke Enter, um diese Nachricht zu öffnen, bevor du Tastenkürzel für Nachrichten verwendest."
   },
   "lockScreen": {
     "subtitle": "Gib deine PIN zum Entsperren ein",
@@ -813,7 +822,9 @@
       "nextWeek": "Nächste Woche",
       "custom": "Benutzerdefiniert...",
       "change": "Zeitpunkt ändern",
-      "unsnooze": "Zurückholen"
+      "unsnooze": "Zurückholen",
+      "date": "Datum der Wiedervorlage",
+      "time": "Uhrzeit der Wiedervorlage"
     },
     "copySubject": "Betreff kopieren",
     "copySender": "Absenderadresse kopieren",
@@ -863,8 +874,15 @@
       "settings": "Einstellungen öffnen",
       "themes": "Designs öffnen",
       "switchTheme": "Zu {{theme}} wechseln",
-      "accountInbox": "{{name}} — Posteingang"
-    }
+      "accountInbox": "{{name}} — Posteingang",
+      "switchLayout": "Layout {{layout}} verwenden"
+    },
+    "error": "Befehl konnte nicht ausgeführt werden",
+    "superhumanPlaceholder": "Was möchtest du tun?",
+    "title": "Befehlspalette",
+    "superhumanTitle": "Superhuman-Befehle",
+    "searchLabel": "Befehle suchen",
+    "results": "Befehle"
   },
   "shortcuts": {
     "title": "Tastaturkürzel",
@@ -999,7 +1017,43 @@
       "toggleRightSidebar": {
         "label": "Rechte Seitenleiste umschalten",
         "description": "Rechte Seitenleiste aus- oder einblenden"
+      },
+      "returnToInbox": {
+        "label": "Zurück in den Posteingang",
+        "description": "Die ausgewählte Konversation in den Posteingang ihres Kontos verschieben"
+      },
+      "openFolderDrawer": {
+        "label": "Ordner öffnen",
+        "description": "Ordnerleiste öffnen; mit Auf/Ab wählen und mit Rechts öffnen"
+      },
+      "openHighlightedMessage": {
+        "label": "Markierte Konversation öffnen",
+        "description": "Die markierte Konversation aus der Liste öffnen"
+      },
+      "filterUnread": {
+        "label": "Ungelesene filtern",
+        "description": "Ungelesene Nachrichten im aktuellen Ordner außerhalb der Suche filtern"
+      },
+      "filterStarred": {
+        "label": "Markierte filtern",
+        "description": "Suche nach mit Stern markierten Nachrichten umschalten"
+      },
+      "openOrReplyAll": {
+        "label": "Öffnen oder allen antworten",
+        "description": "Die markierte Konversation öffnen oder im Lesebereich allen antworten"
+      },
+      "snooze": {
+        "label": "Zurückstellen",
+        "description": "Zurückstellen"
+      },
+      "moveMessage": {
+        "label": "In Ordner verschieben",
+        "description": "In Ordner verschieben"
       }
+    },
+    "account": {
+      "label": "Konto {{number}}",
+      "description": "Posteingang von Konto {{number}} öffnen"
     }
   },
   "notifications": {
@@ -2414,5 +2468,20 @@
     "formNote": "Postfächer von Gmail und Google Workspace können sich statt mit einem App-Passwort mit Google anmelden.",
     "appPasswordNote": "Gmail braucht ein App-Passwort, nicht Ihr normales Passwort. Schalten Sie die Bestätigung in zwei Schritten für Ihr Google-Konto ein, erstellen Sie dann ein App-Passwort und geben Sie es im Passwortfeld ein.",
     "createAppPassword": "App-Passwort erstellen"
+  },
+  "superhuman": {
+    "navigation": "E-Mail-Navigation",
+    "commands": "Befehle",
+    "folders": "Ordner und Konten",
+    "search": "E-Mails durchsuchen",
+    "accounts": "Konten verwalten",
+    "shortcuts": "Tastenkürzel",
+    "settings": "Einstellungen",
+    "closeFolders": "Ordner schließen",
+    "recentUnavailable": "Diese Nachricht ist nicht mehr verfügbar. Öffne ihren Ordner, um sie zu finden.",
+    "recentlyViewed": "Zuletzt angesehen",
+    "thisSession": "Diese Sitzung",
+    "recentEmpty": "Nachrichten, die du öffnest, erscheinen hier. Dein Verlauf bleibt auf diese Sitzung beschränkt.",
+    "keyboardHints": "Tastaturhinweise"
   }
 }

@@ -148,6 +148,7 @@ export const useStore = create((set, get) => ({
     set(state => ({
       user,
       ...(state.user?.id !== user?.id ? {
+        listFocusedMessageId: null,
         serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
         unreadCounts: { total: 0, byAccount: {}, snapshots: {}, complete: false },
         snoozedCount: 0,
@@ -245,7 +246,7 @@ export const useStore = create((set, get) => ({
         isLocked: true,
         messages: [], searchResults: [], searchQuery: '',
         accounts: [], accountsReady: false,
-        folders: {}, selectedMessageId: null,
+        folders: {}, selectedMessageId: null, listFocusedMessageId: null,
         unreadCounts: { total: 0, byAccount: {} },
         snoozedCount: 0,
         ...SCHEDULED_RESET,
@@ -330,6 +331,7 @@ export const useStore = create((set, get) => ({
         selectedAccountId: accountId,
         selectedFolder: folder,
         selectedMessageId: null,
+        listFocusedMessageId: null,
         messages: [],
         messagesOffset: 0,
         hasMoreMessages: true,
@@ -438,6 +440,7 @@ export const useStore = create((set, get) => ({
 
   // Selected message
   selectedMessageId: null,
+  listFocusedMessageId: null,
   lastViewedMessageId: null,
   setSelectedMessage: (id) => set(id ? { selectedMessageId: id, lastViewedMessageId: id } : { selectedMessageId: null }),
 

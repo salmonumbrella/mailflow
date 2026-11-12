@@ -65,6 +65,18 @@ export const LAYOUTS = {
     rowPx: 20,
   },
 
+  superhuman: {
+    labelKey: 'messageList.layouts.superhuman.label',
+    label: 'Superhuman',
+    descriptionKey: 'messageList.layouts.superhuman.description',
+    description: 'Quiet navigation rail, dense inbox and full-width reading',
+    direction: 'row',
+    listWidth: null,
+    listFirst: true,
+    rowPy: 8,
+    rowPx: 18,
+  },
+
   vertical: {
     labelKey: 'messageList.layouts.vertical.label',
     label: 'Vertical Split',

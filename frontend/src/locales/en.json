@@ -425,7 +425,8 @@
       "title": "Snoozed until {{when}}",
       "failTitle": "Could not change the snooze time",
       "failBody": "It keeps its earlier time. Try again."
-    }
+    },
+    "attachments": "Attachments"
   },
   "messageList": {
     "replyDraftChanged": "The reply draft changed. Try opening it again.",
@@ -571,6 +572,10 @@
       "list": {
         "label": "List first",
         "description": "Full-width list; a message opens on its own"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "Compact inbox rows, a slim navigation rail and a full-width reader"
       }
     },
     "snoozedUntil": "Snoozed until {{when}}",
@@ -593,7 +598,11 @@
     "categoryCountTitle": "Messages: {{total}} · Unread: {{unread}}",
     "emptyCategory": "Nothing in {{category}}",
     "emptyCategoryOthers": "Other categories still have mail.",
-    "emptyCategoryNone": "The Inbox is empty."
+    "emptyCategoryNone": "The Inbox is empty.",
+    "loadFailed": "Could not load messages.",
+    "categoriesLabel": "Inbox categories",
+    "listOptions": "List options",
+    "openThreadMessageHint": "Press Enter to open this message before using message shortcuts."
   },
   "lockScreen": {
     "subtitle": "Enter your PIN to unlock",
@@ -813,7 +822,9 @@
       "nextWeek": "Next week",
       "custom": "Custom...",
       "change": "Change snooze time",
-      "unsnooze": "Unsnooze"
+      "unsnooze": "Unsnooze",
+      "date": "Snooze date",
+      "time": "Snooze time"
     },
     "categorize": "Categorize as…",
     "categoryAlwaysSender": "Always for this sender",
@@ -863,8 +874,15 @@
       "settings": "Open Settings",
       "themes": "Open Themes",
       "switchTheme": "Switch to {{theme}} theme",
-      "accountInbox": "{{name}} — Inbox"
-    }
+      "accountInbox": "{{name}} — Inbox",
+      "switchLayout": "Use {{layout}} layout"
+    },
+    "error": "Could not run command",
+    "superhumanPlaceholder": "What would you like to do?",
+    "title": "Command palette",
+    "superhumanTitle": "Superhuman Command",
+    "searchLabel": "Search commands",
+    "results": "Commands"
   },
   "shortcuts": {
     "title": "Keyboard Shortcuts",
@@ -999,7 +1017,43 @@
       "toggleRightSidebar": {
         "label": "Toggle right sidebar",
         "description": "Hide or show the right sidebar"
+      },
+      "returnToInbox": {
+        "label": "Return to Inbox",
+        "description": "Move the selected conversation back to its account’s Inbox"
+      },
+      "openFolderDrawer": {
+        "label": "Open folders",
+        "description": "Open the folder drawer; use Up/Down to choose and Right to open"
+      },
+      "openHighlightedMessage": {
+        "label": "Open highlighted conversation",
+        "description": "Open the highlighted conversation from the list"
+      },
+      "filterUnread": {
+        "label": "Filter unread",
+        "description": "Toggle unread messages in the current folder, outside search"
+      },
+      "filterStarred": {
+        "label": "Filter starred",
+        "description": "Toggle a search for starred messages"
+      },
+      "openOrReplyAll": {
+        "label": "Open or reply all",
+        "description": "Open the highlighted conversation, or reply all in the reader"
+      },
+      "snooze": {
+        "label": "Snooze",
+        "description": "Snooze"
+      },
+      "moveMessage": {
+        "label": "Move to folder",
+        "description": "Move to folder"
       }
+    },
+    "account": {
+      "label": "Account {{number}}",
+      "description": "Open Inbox for account {{number}}"
     }
   },
   "notifications": {
@@ -2414,5 +2468,20 @@
     "formNote": "Gmail and Google Workspace mailboxes can sign in with Google instead of an app password.",
     "appPasswordNote": "Gmail needs an app password, not your regular password. Turn on 2-Step Verification for your Google account, then create an app password and enter it in the password field.",
     "createAppPassword": "Create an app password"
+  },
+  "superhuman": {
+    "navigation": "Mail navigation",
+    "commands": "Commands",
+    "folders": "Folders and accounts",
+    "search": "Search mail",
+    "accounts": "Manage accounts",
+    "shortcuts": "Keyboard shortcuts",
+    "settings": "Settings",
+    "closeFolders": "Close folders",
+    "recentUnavailable": "This message is no longer available. Open its folder to find it.",
+    "recentlyViewed": "Recently viewed",
+    "thisSession": "This session",
+    "recentEmpty": "Messages you open will appear here. Your history stays in this session.",
+    "keyboardHints": "Keyboard hints"
   }
 }

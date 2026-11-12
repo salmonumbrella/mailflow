@@ -1552,6 +1552,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       {/* Single scroll container — sender card + email body scroll together */}
       <div
         ref={scrollContainerRef}
+        className="mailflow-reader-scroll"
         onScroll={e => setPaneScrolled(e.currentTarget.scrollTop > 4)}
         onContextMenu={handlePaneContextMenu}
         style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', background: 'var(--bg-primary)' }}

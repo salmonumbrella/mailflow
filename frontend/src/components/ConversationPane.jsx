@@ -9,6 +9,7 @@ import {
   normalizeConversation,
   initialExpandedMessageIds,
   newestConversationMessage,
+  selectListedMessage,
 } from '../utils/conversation.js';
 import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread, inAccount, otherAccountsDraft } from '../utils/threadActions.js';
 import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../utils/listSelection.js';
@@ -22,6 +23,8 @@ import { prefetchBody } from '../utils/bodyCache.js';
 import { applyReadGuard } from '../utils/pendingReads.js';
 import { applyDeleteGuard } from '../utils/pendingDeletes.js';
 import { ActionBtn, ArchiveIcon, MoveIcon, SnoozeIcon, SpamIcon, PrintIcon, TrashIcon, useShortcutTitle } from './MessageActions.jsx';
+import { shortcutBus } from '../utils/shortcutBus.js';
+import { topOpenMessageWindow } from '../utils/messageHotkeys.js';
 import { PluginSlot } from '../plugins/PluginSlot.jsx';
 
 // What the reader is told when an action finds nothing to take (runAction below). In the unified
@@ -61,6 +64,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   const withShortcut = useShortcutTitle();
   const addNotification = useStore(s => s.addNotification);
   const accounts = useStore(s => s.accounts);
+  const ownerId = useStore(s => s.user?.id);
   const selectedRow = useStore(s => {
     const pool = s.searchQuery?.trim() ? s.searchResults : s.messages;
     return pool.find(message => message.id === selectedMessageId)
@@ -178,6 +182,29 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
     const card = stackRef.current?.querySelector(`[data-message-id="${focusedId}"]`);
     card?.scrollIntoView?.({ block: 'nearest' });
   }, [selectedHere, focusedId, messages]);
+
+  useEffect(() => {
+    const navigate = direction => {
+      const state = useStore.getState();
+      if (state.layout !== 'superhuman' || !selectedHere || loading || loadedConversation !== `${accountId || ''}\n${threadId}`
+        || state.selectedMessageId !== selectedMessageId || !ownerId || state.user?.id !== ownerId || state.isLocked
+        || state.showContacts || state.showAdmin || state.composing || topOpenMessageWindow(state)) return;
+      const eligible = inAccount(messages, accountId).filter(message => state.accounts.some(account => account.id === message.account_id && account.enabled !== false));
+      const index = eligible.findIndex(message => message.id === focusedId);
+      const message = eligible[index + direction];
+      if (index < 0 || !message) return;
+      // Preserve the reader's native selection and automatic expansion path, including
+      // messages outside the listed folder, rather than fetching or marking them here.
+      state.setThreadMessages(threadId, messages);
+      setOpenedOnNewest(message.id);
+      selectListedMessage(useStore, message.id);
+    };
+    const next = () => navigate(1);
+    const prev = () => navigate(-1);
+    shortcutBus.on('nextConversationMessage', next);
+    shortcutBus.on('prevConversationMessage', prev);
+    return () => { shortcutBus.off('nextConversationMessage', next); shortcutBus.off('prevConversationMessage', prev); };
+  }, [selectedHere, loading, loadedConversation, accountId, threadId, selectedMessageId, messages, focusedId, ownerId]);
 
   // Swiping on a phone (#229), as in the single-message pane: from the left edge back to the list,
   // and left and right for the next and previous row of the list, which may be a conversation or a
@@ -407,6 +434,8 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
         // cards stay on screen until the next one lands, and a remount would mark them read again.
         key={loadedConversation ?? ''}
         ref={stackRef}
+        className="mailflow-reader-scroll"
+        data-conversation-navigation={selectedHere && !loading && loadedConversation === `${accountId || ''}\n${threadId}` ? selectedMessageId : undefined}
         // flex: 1 and minWidth: 0 are load-bearing. The reading area is a flex row, so
         // without them this pane is sized shrink-to-fit by its contents: collapsed cards
         // are narrow, an expanded newsletter is as wide as the newsletter, and the pane
