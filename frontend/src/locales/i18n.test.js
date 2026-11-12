@@ -115,6 +115,7 @@ const dir = dirname(fileURLToPath(import.meta.url));
 // Two locales sharing a value is only allowed if both appear in the same group.
 // Any unlisted pair will still fail.
 const SAME_VALUE_ALLOWED = {
+  'messageList.layouts.gmail.label': 'any', // Gmail is a product name in every locale.
   // ── List sort menu (#528) ───────────────────────────────────────────────────
   'messageList.sortSummary':                'any', // "{{sort}}, {{dir}}": only the placeholders and a comma
   'messageList.sortDate':                   [['en', 'fr'], ['it', 'ptBR', 'pl'], ['cs', 'de']], // Date / Data / Datum
@@ -702,6 +703,7 @@ const I18N_ATTRS = ['title', 'placeholder', 'aria-label', 'alt'];
 // Plain strings that are intentionally NOT translated (technical terms,
 // brand names, format placeholders). Add with a comment explaining why.
 const HARDCODED_OK = new Set([
+  'MailFlow', // Application brand in the Gmail-inspired header.
   // CSS/DOM placeholder for a variable-name input field — not a sentence
   'value',
   // Tooltip label for a rich-text editor colour input — purely visual affordance,
