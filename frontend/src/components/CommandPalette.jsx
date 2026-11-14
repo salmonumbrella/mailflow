@@ -1,14 +1,19 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useId } from 'react';
+import { flushSync } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { THEMES } from '../themes.js';
+import { LAYOUTS } from '../layouts.js';
+import { shortcutBus } from '../utils/shortcutBus.js';
+import { canRunMailCommand, mailCommandDefinitions } from '../utils/mailCommands.js';
+import { selectedMessage } from '../utils/messageHotkeys.js';
 import { api } from '../utils/api.js';
 import { labelPickerOptions, pickerNavigationDirection, executeLabelChoice } from '../utils/labelPicker.js';
 
 const THEME_NAMES = Object.keys(THEMES);
 
-function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, accounts }) {
+function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, accounts, layout, setLayout }) {
   const actions = [
     {
       id: 'compose',
@@ -35,6 +40,18 @@ function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdm
       run: () => { setShowAdmin(true); setAdminTab('appearance'); },
     },
   ];
+
+  for (const [key, definition] of Object.entries(LAYOUTS)) {
+    actions.push({
+      id: `layout:${key}`,
+      label: t('commandPalette.actions.switchLayout', {
+        layout: t(definition.labelKey, { defaultValue: definition.label }), defaultValue: 'Use {{layout}} layout',
+      }),
+      icon: <span style={{ width: 15, textAlign: 'center' }}>▤</span>,
+      active: layout === key,
+      run: () => setLayout(key),
+    });
+  }
 
   // Theme switch actions
   for (const themeKey of THEME_NAMES) {
@@ -63,19 +80,80 @@ function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdm
   return actions;
 }
 
-export default function CommandPalette({ open, onClose, labelPickerMessage = null }) {
+function MailCommandIcon({ action }) {
+  const paths = {
+    archive: 'M5 12l4 4L19 6',
+    snooze: 'M12 8v4l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
+    reply: 'M9 5l-7 7 7 7M2 12h11a7 7 0 0 1 7 7',
+    replyAll: 'M7 6l-6 6 6 6M13 6l-6 6 6 6M7 12h8a7 7 0 0 1 7 7',
+    forward: 'M15 5l7 7-7 7M22 12H11a7 7 0 0 0-7 7',
+    toggleRead: 'M3 5h18v14H3zM3 5l9 8 9-8',
+    markUnread: 'M3 5h18v14H3zM3 5l9 8 9-8',
+    toggleStar: 'M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z',
+    openLabelPicker: 'M3 3h8l10 10-8 8L3 11zM7 7h.01',
+    returnToInbox: 'M3 3h18v18H3zM3 13h5l2 3h4l2-3h5',
+    filterUnread: 'M3 5h18v14H3zM3 5l9 8 9-8',
+    filterStarred: 'M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z',
+    moveMessage: 'M3 7h7l2-3h9v16H3z',
+    delete: 'M3 6h18M5 6l1 15h12l1-15M9 6V3h6v3M10 10v7M14 10v7',
+    undoAction: 'M3 5v6h6M3 11a9 9 0 1 1 2 8',
+    focusSearch: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
+    showHelp: 'M3 5h18v14H3zM6 8h1m3 0h1m3 0h1m3 0h1M6 11h1m3 0h1m3 0h1m3 0h1M7 16h10',
+  };
+  return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[action]} /></svg>;
+}
+
+export default function CommandPalette({ open, onClose, labelPickerMessage = null, mailVisible = true, onMailNavigate }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
-  const { openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme,
-    accounts, folders, addNotification } = useStore();
+  const state = useStore();
+  const { accounts, folders, addNotification, layout } = state;
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const [listScrolled, setListScrolled] = useState(false);
   const inputRef = useRef(null);
   const listRef = useRef(null);
+  const retryRef = useRef(null);
   const busyRef = useRef(false);
+  const sessionRef = useRef({ value: 0 });
+  const [folderError, setFolderError] = useState('');
+  const [folderRetry, setFolderRetry] = useState(0);
+  const listId = useId();
+  const superhuman = !isMobile && layout === 'superhuman';
 
   const pickerAccount = accounts.find(account => account.id === labelPickerMessage?.account_id);
+  const pickerAccountId = labelPickerMessage?.account_id;
+  const pickerFolders = folders[pickerAccountId];
+  const owner = state.user?.id;
+  const pickerFoldersUnknown = Boolean(labelPickerMessage && pickerAccount?.enabled && !Array.isArray(pickerFolders));
+
+  useEffect(() => {
+    setFolderError('');
+    if (!open || !pickerFoldersUnknown || state.isLocked) return;
+    let cancelled = false;
+    const session = sessionRef.current.value;
+    const unsubscribe = useStore.subscribe(live => {
+      if (live.user?.id !== owner || live.isLocked || !live.accounts.some(account => account.id === pickerAccountId && account.enabled)) cancelled = true;
+    });
+    const current = () => {
+      const live = useStore.getState();
+      return !cancelled && sessionRef.current.value === session && live.user?.id === owner && !live.isLocked
+        && live.accounts.some(account => account.id === pickerAccountId && account.enabled);
+    };
+    void (async () => {
+      try {
+        const result = await api.getFolders(pickerAccountId);
+        if (!current()) return;
+        if (!Array.isArray(result)) throw new Error(t('commandPalette.labelPicker.error', { defaultValue: 'Could not label message' }));
+        if (Array.isArray(useStore.getState().folders[pickerAccountId])) return;
+        useStore.getState().setFolders(pickerAccountId, result);
+      } catch (error) {
+        if (current()) setFolderError(error.message || t('commandPalette.labelPicker.error', { defaultValue: 'Could not label message' }));
+      }
+    })();
+    return () => { cancelled = true; unsubscribe(); };
+  }, [open, pickerFoldersUnknown, pickerAccountId, labelPickerMessage?.id, owner, state.isLocked, folderRetry, t]);
+
   const actions = labelPickerMessage
     ? labelPickerOptions(folders[labelPickerMessage.account_id], pickerAccount, labelPickerMessage.folder)
       .map(choice => ({
@@ -85,159 +163,186 @@ export default function CommandPalette({ open, onClose, labelPickerMessage = nul
         run: () => executeLabelChoice(labelPickerMessage, choice,
           { getThread: api.getThread, copyMessage: api.copyMessage }),
       }))
-    : buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, accounts });
+    : [
+      ...(superhuman ? mailCommandDefinitions(state, t) : []).filter(command => !isMobile || command.action !== 'showHelp').map(command => ({
+        ...command,
+        disabled: command.disabled || (!mailVisible && !['focusSearch', 'showHelp'].includes(command.action)),
+        icon: <MailCommandIcon action={command.action} />,
+        closeBeforeRun: true,
+        run: () => shortcutBus.emit(command.action),
+      })),
+      ...buildActions({ t, ...state }).map(action => ({ ...action, closeBeforeRun: true,
+        disabled: state.composing || state.showAdmin })),
+    ];
 
-  const filtered = query.trim()
-    ? actions.filter(a => a.label.toLowerCase().includes(query.toLowerCase()))
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = normalizedQuery
+    ? actions.filter(action => `${action.label} ${action.detail || ''} ${action.keywords || ''}`.toLowerCase().includes(normalizedQuery))
     : actions;
+  const activeIndex = filtered[activeIdx] && !filtered[activeIdx].disabled
+    ? activeIdx : filtered.findIndex(action => !action.disabled);
 
-  useEffect(() => {
-    if (open) {
-      setQuery('');
-      setActiveIdx(0);
-      setTimeout(() => inputRef.current?.focus(), 30);
-    }
-  }, [open]);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const previousFocus = document.activeElement;
+    const input = inputRef.current;
+    const session = sessionRef.current;
+    session.value++;
+    setQuery('');
+    setActiveIdx(0);
+    setListScrolled(false);
+    input?.focus();
+    return () => {
+      session.value++;
+      if (previousFocus?.isConnected && (document.activeElement === input || document.activeElement === document.body)) {
+        previousFocus.focus();
+      }
+    };
+  }, [open, labelPickerMessage?.id]);
 
   useEffect(() => { setActiveIdx(0); }, [query]);
 
   const runAction = useCallback(async (action) => {
-    if (busyRef.current) return;
+    if (!action || action.disabled || busyRef.current) return;
+    if (action.action) {
+      const live = useStore.getState();
+      if (!canRunMailCommand(action.action, live)) return;
+      if (action.targetId != null && selectedMessage(live)?.id !== action.targetId) return;
+    }
     busyRef.current = true;
+    const session = sessionRef.current.value;
     try {
+      // Close and restore the old focus before the native handler opens a picker,
+      // composer or search field. Closing afterwards would dismiss that new UI.
+      if (action.closeBeforeRun) flushSync(() => {
+        if (action.targetId != null) shortcutBus.emit('clearBulkSelection');
+        onClose();
+        if (action.id === 'inbox' || action.id.startsWith('account:') || action.action === 'focusSearch') onMailNavigate?.();
+      });
+      if (action.targetId != null && selectedMessage(useStore.getState())?.id !== action.targetId) return;
       await action.run();
-      onClose();
+      if (!action.closeBeforeRun && sessionRef.current.value === session) onClose();
     } catch (error) {
-      addNotification({ title: t('commandPalette.labelPicker.error', { defaultValue: 'Could not label message' }), body: error.message });
+      addNotification({
+        title: labelPickerMessage ? t('commandPalette.labelPicker.error', { defaultValue: 'Could not label message' })
+          : t('commandPalette.error', { defaultValue: 'Could not run command' }),
+        body: error.message,
+      });
     } finally {
       busyRef.current = false;
     }
-  }, [onClose, addNotification, t]);
+  }, [onClose, onMailNavigate, addNotification, t, labelPickerMessage]);
 
-  const handleKeyDown = (e) => {
-    const direction = labelPickerMessage ? pickerNavigationDirection(e) :
-      e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
-    if (direction > 0) {
-      e.preventDefault();
-      e.stopPropagation();
-      setActiveIdx(i => Math.min(i + 1, Math.max(0, filtered.length - 1)));
-    } else if (direction < 0) {
-      e.preventDefault();
-      e.stopPropagation();
-      setActiveIdx(i => Math.max(i - 1, 0));
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      e.stopPropagation();
-      if (filtered[activeIdx]) runAction(filtered[activeIdx]);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
+  const handleKeyDown = (event) => {
+    if (event.defaultPrevented || event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229) return;
+    const togglePalette = (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'k';
+    const direction = !labelPickerMessage && togglePalette ? 0 : pickerNavigationDirection(event);
+    if (direction) {
+      event.preventDefault();
+      event.stopPropagation();
+      let next = activeIndex;
+      do { next += direction; } while (next >= 0 && next < filtered.length && filtered[next].disabled);
+      if (next >= 0 && next < filtered.length) setActiveIdx(next);
+    } else if (event.key === 'Enter') {
+      if (event.target === retryRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void runAction(filtered[activeIndex]);
+    } else if (event.key === 'Escape' || togglePalette) {
+      event.preventDefault();
+      event.stopPropagation();
       onClose();
+    } else if (event.key === 'Tab') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (retryRef.current && event.target !== retryRef.current) retryRef.current.focus();
+      else inputRef.current?.focus();
     }
   };
 
-  // Scroll active item into view
   useEffect(() => {
-    const el = listRef.current?.children[activeIdx];
-    el?.scrollIntoView({ block: 'nearest' });
-  }, [activeIdx]);
+    listRef.current?.children[activeIndex]?.scrollIntoView({ block: 'nearest' });
+  }, [activeIndex, open]);
 
   if (!open) return null;
+  const placeholder = labelPickerMessage ? t('commandPalette.labelPicker.placeholder', { defaultValue: 'Copy or label selected message…' })
+    : superhuman ? t('commandPalette.superhumanPlaceholder', { defaultValue: 'What would you like to do?' }) : t('commandPalette.placeholder');
 
   return (
     <div
       style={{
         position: 'fixed', inset: 0, zIndex: 9500,
-        background: 'rgba(0,0,0,0.55)',
-        backdropFilter: 'blur(8px)',
-        WebkitBackdropFilter: 'blur(8px)',
-        display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-        paddingTop: '15vh',
+        background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
+        display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: '15vh',
         animation: 'backdrop-enter var(--motion-fast) var(--ease-standard) both',
       }}
       onClick={onClose}
     >
       <div
+        role="dialog" aria-modal="true" aria-label={labelPickerMessage ? placeholder : t('commandPalette.title', { defaultValue: 'Command palette' })}
+        onKeyDown={handleKeyDown}
         style={{
           background: 'var(--bg-secondary)', border: '1px solid var(--border)',
-          borderRadius: 12, width: '100%', maxWidth: 520, margin: '0 16px',
-          boxShadow: 'var(--shadow-modal)',
-          overflow: 'hidden',
+          borderRadius: 12, width: '100%', maxWidth: superhuman ? 580 : 520, margin: '0 16px',
+          boxShadow: 'var(--shadow-modal)', overflow: 'hidden',
           animation: 'modal-enter var(--motion-fast) var(--ease-emphasized) backwards',
         }}
-        onClick={e => e.stopPropagation()}
+        onClick={event => event.stopPropagation()}
       >
-        {/* Search input */}
+        {superhuman && !labelPickerMessage && <div style={{ padding: '14px 18px 0', color: 'var(--text-tertiary)', fontSize: 10, fontWeight: 700, letterSpacing: '0.13em', textTransform: 'uppercase' }}>
+          {t('commandPalette.superhumanTitle', { defaultValue: 'Superhuman Command' })}
+        </div>}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2">
             <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
           <input
-            ref={inputRef}
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={labelPickerMessage ? t('commandPalette.labelPicker.placeholder', { defaultValue: 'Copy or label selected message…' }) : t('commandPalette.placeholder')}
-            style={{
-              flex: 1, background: 'none', border: 'none', outline: 'none',
-              color: 'var(--text-primary)', fontSize: 15,
-            }}
+            ref={inputRef} role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls={listId}
+            aria-activedescendant={activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
+            aria-label={t('commandPalette.searchLabel', { defaultValue: 'Search commands' })}
+            value={query} onChange={event => setQuery(event.target.value)} placeholder={placeholder}
+            style={{ flex: 1, minWidth: 0, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: 15 }}
           />
-          {!isMobile && <kbd style={{
-            fontSize: 11, color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)',
-            border: '1px solid var(--border)', borderRadius: 4, padding: '2px 6px',
-          }}>Esc</kbd>}
+          {!isMobile && <kbd style={{ fontSize: 11, color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 6px' }}>Esc</kbd>}
         </div>
-
-        {/* Results */}
         <div
-          ref={listRef}
-          onScroll={e => setListScrolled(e.currentTarget.scrollTop > 4)}
-          style={{
-            maxHeight: 360, overflowY: 'auto', padding: '6px 0',
-            boxShadow: listScrolled ? 'inset 0 8px 8px -8px rgba(0,0,0,0.25)' : 'none',
-            transition: 'box-shadow 0.2s ease',
-          }}
+          ref={listRef} id={listId} role="listbox" aria-label={t('commandPalette.results', { defaultValue: 'Commands' })}
+          onScroll={event => setListScrolled(event.currentTarget.scrollTop > 4)}
+          style={{ maxHeight: 390, overflowY: 'auto', padding: '6px 0', boxShadow: listScrolled ? 'inset 0 8px 8px -8px rgba(0,0,0,0.25)' : 'none', transition: 'box-shadow 0.2s ease' }}
         >
-          {filtered.length === 0 ? (
-            <div style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 13, textAlign: 'center' }}>
-              {t('commandPalette.noResults')}
-            </div>
-          ) : filtered.map((action, i) => (
+          {pickerFoldersUnknown ? (
+            folderError ? <div role="alert" style={{ padding: '20px 16px', fontSize: 13 }}>
+              {folderError} <button ref={retryRef} type="button" onClick={() => { inputRef.current?.focus(); setFolderError(''); setFolderRetry(value => value + 1); }}>{t('common.retry')}</button>
+            </div> : <div role="status" style={{ padding: '20px 16px', fontSize: 13 }}>{t('common.loading')}</div>
+          ) : filtered.length === 0 ? (
+            <div role="status" style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 13, textAlign: 'center' }}>{t('commandPalette.noResults')}</div>
+          ) : filtered.map((action, index) => (
             <div
-              key={action.id}
-              onClick={() => runAction(action)}
-              onMouseEnter={() => setActiveIdx(i)}
-              onMouseDown={e => { e.currentTarget.style.transform = 'scale(0.98)'; }}
-              onMouseUp={e => { e.currentTarget.style.transform = ''; }}
-              onMouseLeave={e => { e.currentTarget.style.transform = ''; }}
+              key={action.id} id={`${listId}-${index}`} data-command-id={action.id}
+              role="option" aria-selected={index === activeIndex} aria-disabled={Boolean(action.disabled)}
+              onClick={() => { void runAction(action); }}
+              onMouseEnter={() => { if (!action.disabled) setActiveIdx(index); }}
               style={{
-                display: 'flex', alignItems: 'center', gap: 12,
-                padding: '9px 16px', cursor: 'pointer',
-                background: i === activeIdx ? 'var(--bg-hover)' : 'transparent',
-                transition: 'background 0.08s, transform 0.08s',
+                display: 'flex', alignItems: 'center', gap: 12, padding: '9px 16px',
+                cursor: action.disabled ? 'default' : 'pointer', opacity: action.disabled ? 0.4 : 1,
+                background: index === activeIndex ? 'var(--bg-hover)' : 'transparent', transition: 'background 0.08s',
               }}
             >
-              <span style={{ color: action.active ? 'var(--accent)' : 'var(--text-tertiary)', display: 'flex', flexShrink: 0 }}>
-                {action.icon}
+              <span style={{ color: action.active ? 'var(--accent)' : 'var(--text-tertiary)', display: 'flex', flexShrink: 0 }}>{action.icon}</span>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'block', fontSize: 13, color: action.active ? 'var(--accent)' : 'var(--text-primary)' }}>{action.label}</span>
+                {action.detail && <span style={{ display: 'block', marginTop: 3, fontSize: 11, color: 'var(--text-tertiary)' }}>{action.detail}</span>}
               </span>
-              <span style={{ fontSize: 13, color: action.active ? 'var(--accent)' : 'var(--text-primary)', flex: 1 }}>
-                {action.label}
-              </span>
-              {action.active && (
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5">
-                  <polyline points="20 6 9 17 4 12"/>
-                </svg>
-              )}
+              {action.shortcut && !isMobile && <kbd style={{ fontSize: 10, color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 5px', flexShrink: 0 }}>{action.shortcut}</kbd>}
+              {action.active && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>}
             </div>
           ))}
         </div>
-
         {!isMobile && (
           <div style={{ padding: '8px 16px', borderTop: '1px solid var(--border-subtle)', display: 'flex', gap: 12, fontSize: 11, color: 'var(--text-tertiary)' }}>
-            <span><kbd style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 3, padding: '1px 5px' }}>↑↓</kbd> {t('commandPalette.hint.navigate')}</span>
-            <span><kbd style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 3, padding: '1px 5px' }}>↵</kbd> {t('commandPalette.hint.select')}</span>
-            <span><kbd style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 3, padding: '1px 5px' }}>Esc</kbd> {t('commandPalette.hint.close')}</span>
+            <span>↑↓ {t('commandPalette.hint.navigate')}</span>
+            <span>↵ {t('commandPalette.hint.select')}</span>
+            <span>Esc {t('commandPalette.hint.close')}</span>
           </div>
         )}
       </div>

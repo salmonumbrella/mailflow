@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { useStore } from '../store/index.js';
@@ -22,7 +22,15 @@ const SPAM_NAME_RE = /(spam|junk|bulk|indesiderata|spamverdacht|courrier\s*ind|p
 // ─── Context Menu ─────────────────────────────────────────────────────────────
 const CATEGORIES = ['primary', 'newsletter', 'promotion', 'automated', 'social'];
 
-export default function ContextMenu({ x, y, message, onClose, onAction, defaultMoveView = false, defaultSnoozeView = false, variant = 'inbox', selectedText = '' }) {
+const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]';
+
+function MenuControl({ keyboardNavigation, disabled, style, ...props }) {
+  const Tag = keyboardNavigation ? 'button' : 'div';
+  return <Tag {...props} {...(keyboardNavigation ? { type: 'button', disabled, 'data-keyboard-menu-item': '' } : {})}
+    style={{ ...(keyboardNavigation ? { width: '100%', border: 0, background: 'transparent', textAlign: 'left', font: 'inherit' } : {}), ...style }} />;
+}
+
+export default function ContextMenu({ x, y, message, onClose, onAction, defaultMoveView = false, defaultSnoozeView = false, variant = 'inbox', selectedText = '', keyboardNavigation = false }) {
   const { t } = useTranslation();
   const uiScale = useUiScale();
   const isMobile = useMobile();
@@ -58,6 +66,65 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   const hasUnread = Number.isFinite(unreadCount) ? unreadCount > 0 : !message.is_read;
   const isMessagePane = variant === 'messagePane';
   const hasSelectedText = Boolean(String(selectedText || '').trim());
+  const previousFocus = useRef(keyboardNavigation ? document.activeElement : null);
+
+  useLayoutEffect(() => {
+    if (!keyboardNavigation) return;
+    const menu = menuRef.current;
+    const previous = previousFocus.current;
+    return () => {
+      // A reply or another dialog may have deliberately taken focus already.
+      if (previous?.isConnected && (menu?.contains(document.activeElement) || document.activeElement === document.body)) previous.focus();
+    };
+  }, [keyboardNavigation]);
+
+  useLayoutEffect(() => {
+    if (!keyboardNavigation) return;
+    const menu = menuRef.current;
+    const first = moveView ? menu?.querySelector('input')
+      : customSnoozeView ? menu?.querySelector('input[type="date"]') : menu?.querySelector(FOCUSABLE);
+    (first || menu)?.focus();
+  }, [keyboardNavigation, moveView, snoozeView, customSnoozeView, categorizeView, pluginSubmenu]);
+
+  const handleKeyboard = event => {
+    if (!keyboardNavigation || event.defaultPrevented) return;
+    if (event.nativeEvent.isComposing || event.keyCode === 229) {
+      if (event.target.tagName === 'BUTTON' && ['Enter', ' '].includes(event.key)) event.preventDefault();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault(); event.stopPropagation(); onClose(); return;
+    }
+    const menu = menuRef.current;
+    const controls = [...menu.querySelectorAll(FOCUSABLE)].filter(node => !node.closest('[hidden], [aria-hidden="true"]'));
+    if (event.key === 'Tab') {
+      const first = controls[0]; const last = controls.at(-1);
+      if (!first || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
+        event.preventDefault(); event.stopPropagation();
+        (event.shiftKey ? last : first)?.focus();
+      }
+      return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const button = event.target.closest('button');
+    if (button && ['Enter', ' '].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation();
+      if (!event.repeat && !button.disabled) button.click();
+      return;
+    }
+    const input = event.target.closest('input, textarea, select, [contenteditable="true"]');
+    if (input && (!moveView || input.tagName !== 'INPUT' || !['ArrowDown', 'ArrowUp'].includes(event.key))) return;
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const rows = controls.filter(node => node.tagName === 'BUTTON');
+    if (!rows.length) return;
+    event.preventDefault(); event.stopPropagation();
+    const index = rows.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+      : index < 0 ? (event.key === 'ArrowUp' ? rows.length - 1 : 0)
+        : (index + (event.key === 'ArrowUp' ? -1 : 1) + rows.length) % rows.length;
+    rows[next].focus();
+    rows[next].scrollIntoView({ block: 'nearest' });
+  };
 
   // A folder is "spam-like" when either the user mapped it as spam or the IMAP
   // server tagged it with \Junk special-use. Falls back to a multilingual name
@@ -383,6 +450,8 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
       <div onClick={onClose} aria-hidden style={{ position: 'fixed', inset: 0, zIndex: 3999 }} />
       <div
         ref={menuRef}
+        tabIndex={keyboardNavigation ? -1 : undefined}
+        onKeyDown={handleKeyboard}
         onClick={e => e.stopPropagation()}
         style={{
           background: 'var(--bg-elevated)',
@@ -455,7 +524,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           const domain = at > 0 && at < sender.length - 1 ? sender.slice(at) : '';
           const scoped = categorizeView === 'sender' || categorizeView === 'domain';
           const backRow = (label, onClick) => (
-            <div
+            <MenuControl keyboardNavigation={keyboardNavigation}
               onClick={onClick}
               style={{
                 display: 'flex', alignItems: 'center', gap: 8,
@@ -471,11 +540,12 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                 <polyline points="15 18 9 12 15 6"/>
               </svg>
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
-            </div>
+            </MenuControl>
           );
           const row = (key, label, onClick, { current = false, submenu = false } = {}) => (
-            <div
+            <MenuControl keyboardNavigation={keyboardNavigation}
               key={key}
+              disabled={current}
               onClick={current ? undefined : onClick}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
@@ -496,7 +566,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                   <polyline points="9 18 15 12 9 6"/>
                 </svg>
               )}
-            </div>
+            </MenuControl>
           );
           if (scoped) {
             const value = categorizeView === 'sender' ? sender : domain;
@@ -531,7 +601,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           customSnoozeView ? (
             /* Custom date/time picker */
             <>
-              <div
+              <MenuControl keyboardNavigation={keyboardNavigation}
                 onClick={() => setCustomSnoozeView(false)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
@@ -546,11 +616,12 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                   <polyline points="15 18 9 12 15 6"/>
                 </svg>
                 {t('contextMenu.snooze.label')}
-              </div>
+              </MenuControl>
               <div style={{ padding: '10px 14px 12px' }}>
                 <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
                   <input
                     type="date"
+                    aria-label={keyboardNavigation ? t('contextMenu.snooze.date', 'Snooze date') : undefined}
                     value={customDate}
                     min={snoozeMinDate()}
                     onChange={e => setCustomDate(e.target.value)}
@@ -562,6 +633,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                   />
                   <input
                     type="time"
+                    aria-label={keyboardNavigation ? t('contextMenu.snooze.time', 'Snooze time') : undefined}
                     value={customTime}
                     onChange={e => setCustomTime(e.target.value)}
                     style={{
@@ -593,7 +665,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           ) : (
             /* Snooze preset picker */
             <>
-              <div
+              <MenuControl keyboardNavigation={keyboardNavigation}
                 onClick={() => setSnoozeView(false)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
@@ -608,7 +680,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                   <polyline points="15 18 9 12 15 6"/>
                 </svg>
                 {t(snoozeAction === 'changeSnooze' ? 'contextMenu.snooze.change' : 'contextMenu.snooze.label')}
-              </div>
+              </MenuControl>
               {[
                 {
                   label: t('contextMenu.snooze.threeHours'),
@@ -623,7 +695,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                   getDate: () => { const d = new Date(); d.setDate(d.getDate() + 7); d.setHours(9, 0, 0, 0); return d; },
                 },
               ].map(({ label, getDate }) => (
-                <div
+                <MenuControl keyboardNavigation={keyboardNavigation}
                   key={label}
                   onClick={() => { onAction(snoozeAction, getDate().toISOString()); onClose(); }}
                   style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)' }}
@@ -632,9 +704,9 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                   {label}
-                </div>
+                </MenuControl>
               ))}
-              <div
+              <MenuControl keyboardNavigation={keyboardNavigation}
                 onClick={() => {
                   setCustomDate(snoozeDefaultDate());
                   setCustomTime(SNOOZE_DEFAULT_TIME);
@@ -646,7 +718,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
                 {t('contextMenu.snooze.custom')}
-              </div>
+              </MenuControl>
             </>
           )
         ) : moveView ? (
@@ -664,7 +736,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                 {t('contextMenu.folders.back')}
               </div>
             ) : (
-              <div
+              <MenuControl keyboardNavigation={keyboardNavigation}
                 onClick={() => setMoveView(false)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
@@ -679,11 +751,11 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                   <polyline points="15 18 9 12 15 6"/>
                 </svg>
                 {t('contextMenu.folders.back')}
-              </div>
+              </MenuControl>
             )}
             <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-subtle)' }}>
               <input
-                autoFocus={!isMobile}
+                autoFocus={!isMobile && !keyboardNavigation}
                 value={folderSearch}
                 onChange={e => setFolderSearch(e.target.value)}
                 placeholder={t('contextMenu.folders.search')}
@@ -718,14 +790,14 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                         </div>
                       )}
                       {section.rows.map(row => row.kind === 'action' ? (
-                        <FolderMenuItem
+                        <FolderMenuItem keyboardNavigation={keyboardNavigation}
                           key={`action-${row.item.key}`}
                           icon={row.item.renderIcon(13)}
                           label={row.item.label}
                           onClick={() => runMovePickerAction(row.item, onClose)}
                         />
                       ) : (
-                        <FolderMenuItem
+                        <FolderMenuItem keyboardNavigation={keyboardNavigation}
                           key={row.folder.path}
                           folder={row.folder}
                           onClick={() => { onAction('moveTo', row.folder.path); onClose(); }}
@@ -755,7 +827,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
               <div key={gi}>
                 {gi > 0 && <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />}
                 {group.actions.map((item, ai) => (
-                  <MenuItem
+                  <MenuItem keyboardNavigation={keyboardNavigation}
                     key={ai}
                     icon={item.icon}
                     label={item.label}
@@ -787,10 +859,10 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   );
 }
 
-function MenuItem({ icon, label, onClick, danger, hasSubmenu, disabled }) {
+function MenuItem({ icon, label, onClick, danger, hasSubmenu, disabled, keyboardNavigation }) {
   const [hov, setHov] = useState(false);
   return (
-    <div
+    <MenuControl keyboardNavigation={keyboardNavigation} disabled={disabled}
       onClick={onClick}
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
@@ -813,11 +885,11 @@ function MenuItem({ icon, label, onClick, danger, hasSubmenu, disabled }) {
           <polyline points="9 18 15 12 9 6"/>
         </svg>
       )}
-    </div>
+    </MenuControl>
   );
 }
 
-function FolderMenuItem({ folder, icon: iconOverride, label, onClick }) {
+function FolderMenuItem({ folder, icon: iconOverride, label, onClick, keyboardNavigation }) {
   const [hov, setHov] = useState(false);
   const su = (folder?.special_use || '').toLowerCase();
   const icon = iconOverride ? iconOverride
@@ -832,7 +904,7 @@ function FolderMenuItem({ folder, icon: iconOverride, label, onClick }) {
     : <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>;
 
   return (
-    <div
+    <MenuControl keyboardNavigation={keyboardNavigation}
       onClick={onClick}
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
@@ -847,6 +919,6 @@ function FolderMenuItem({ folder, icon: iconOverride, label, onClick }) {
     >
       <span style={{ flexShrink: 0, color: 'var(--text-tertiary)', display: 'flex' }}>{icon}</span>
       {folder ? <FolderPathLabel folder={folder} label={folder.favoriteLabel} /> : <FolderPathLabel label={label} />}
-    </div>
+    </MenuControl>
   );
 }

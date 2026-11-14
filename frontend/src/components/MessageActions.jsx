@@ -127,9 +127,10 @@ export function DarkToggleIcon({ shownDark }) {
 // so there it is the label alone.
 export function useShortcutTitle() {
   const shortcuts = useStore(s => s.shortcuts);
+  const layout = useStore(s => s.layout);
   const isMobile = useMobile();
   return (label, action) => {
-    const key = getEffectiveShortcuts(shortcuts)[action];
+    const key = getEffectiveShortcuts(shortcuts, layout)[action];
     if (isMobile || !key) return label;
     const mod = parseModKey(key);
     return `${label} (${mod ? `${modCompactLabel(mod.mod)}${mod.bare.toUpperCase()}` : key.toUpperCase()})`;
