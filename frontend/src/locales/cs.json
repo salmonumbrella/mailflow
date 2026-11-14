@@ -457,6 +457,10 @@
       "list": {
         "label": "Nejdřív seznam",
         "description": "Seznam přes celou šířku; zpráva se otevře samostatně"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "Kompaktní seznam, úzký navigační panel a čtení na celou šířku"
       }
     },
     "snoozedUntil": "Odloženo do {{when}}",
@@ -479,7 +483,11 @@
     "categoryCountTitle": "Zprávy: {{total}} · Nepřečtené: {{unread}}",
     "emptyCategory": "V kategorii {{category}} nic není",
     "emptyCategoryOthers": "V ostatních kategoriích pošta je.",
-    "emptyCategoryNone": "Doručená pošta je prázdná."
+    "emptyCategoryNone": "Doručená pošta je prázdná.",
+    "loadFailed": "Nepodařilo se načíst zprávy.",
+    "categoriesLabel": "Kategorie doručené pošty",
+    "listOptions": "Možnosti seznamu",
+    "openThreadMessageHint": "Před použitím klávesových zkratek pro zprávu ji otevřete stisknutím Enter."
   },
   "message": {
     "find": {
@@ -623,7 +631,8 @@
       "title": "Odloženo do {{when}}",
       "failTitle": "Čas návratu se nepodařilo změnit",
       "failBody": "Zůstává původní čas. Zkuste to znovu."
-    }
+    },
+    "attachments": "Přílohy"
   },
   "compose": {
     "unsupportedDraftFrom": "Před uložením nebo odesláním tohoto konceptu vyberte nastaveného odesílatele.",
@@ -881,7 +890,9 @@
       "nextWeek": "Příští týden",
       "custom": "Vlastní…",
       "change": "Změnit čas návratu",
-      "unsnooze": "Vrátit hned"
+      "unsnooze": "Vrátit hned",
+      "date": "Datum odložení",
+      "time": "Čas odložení"
     },
     "categorize": "Zařadit jako…",
     "categoryAlwaysSender": "Vždy pro tohoto odesílatele",
@@ -1084,7 +1095,43 @@
       "toggleRightSidebar": {
         "label": "Pravý postranní panel",
         "description": "Skrýt nebo zobrazit pravý postranní panel"
+      },
+      "returnToInbox": {
+        "label": "Vrátit do doručené pošty",
+        "description": "Přesunout vybranou konverzaci do doručené pošty jejího účtu"
+      },
+      "openFolderDrawer": {
+        "label": "Otevřít složky",
+        "description": "Otevřít složky; vybírat šipkami nahoru/dolů a otevřít šipkou doprava"
+      },
+      "openHighlightedMessage": {
+        "label": "Otevřít zvýrazněnou konverzaci",
+        "description": "Otevřít zvýrazněnou konverzaci ze seznamu"
+      },
+      "filterUnread": {
+        "label": "Filtrovat nepřečtené",
+        "description": "Přepnout nepřečtené zprávy v aktuální složce mimo vyhledávání"
+      },
+      "filterStarred": {
+        "label": "Filtrovat označené hvězdičkou",
+        "description": "Přepnout vyhledávání zpráv označených hvězdičkou"
+      },
+      "openOrReplyAll": {
+        "label": "Otevřít nebo odpovědět všem",
+        "description": "Otevřít zvýrazněnou konverzaci nebo odpovědět všem v zobrazené zprávě"
+      },
+      "snooze": {
+        "label": "Odložit",
+        "description": "Odložit"
+      },
+      "moveMessage": {
+        "label": "Přesunout do složky",
+        "description": "Přesunout do složky"
       }
+    },
+    "account": {
+      "label": "Účet {{number}}",
+      "description": "Otevřít doručenou poštu účtu {{number}}"
     }
   },
   "signatureEditor": {
@@ -1227,8 +1274,15 @@
       "settings": "Otevřít Nastavení",
       "themes": "Otevřít Motivy",
       "switchTheme": "Přepnout na motiv {{theme}}",
-      "accountInbox": "{{name}} — Doručené"
-    }
+      "accountInbox": "{{name}} — Doručené",
+      "switchLayout": "Použít rozložení {{layout}}"
+    },
+    "error": "Příkaz se nepodařilo spustit",
+    "superhumanPlaceholder": "Co chcete udělat?",
+    "title": "Paleta příkazů",
+    "superhumanTitle": "Příkazy Superhuman",
+    "searchLabel": "Hledat příkazy",
+    "results": "Příkazy"
   },
   "admin": {
     "cleanup": {
@@ -2433,5 +2487,20 @@
     "formNote": "Schránky Gmail a Google Workspace se mohou místo hesla aplikace přihlásit přes Google.",
     "appPasswordNote": "Gmail vyžaduje heslo aplikace, ne vaše běžné heslo. Zapněte pro účet Google dvoufázové ověření, vytvořte heslo aplikace a zadejte ho do pole pro heslo.",
     "createAppPassword": "Vytvořit heslo aplikace"
+  },
+  "superhuman": {
+    "navigation": "Navigace v poště",
+    "commands": "Příkazy",
+    "folders": "Složky a účty",
+    "search": "Hledat v poště",
+    "accounts": "Spravovat účty",
+    "shortcuts": "Klávesové zkratky",
+    "settings": "Nastavení",
+    "closeFolders": "Zavřít složky",
+    "recentUnavailable": "Tato zpráva již není k dispozici. Otevřete její složku a vyhledejte ji.",
+    "recentlyViewed": "Nedávno zobrazené",
+    "thisSession": "Tato relace",
+    "recentEmpty": "Zde se zobrazí zprávy, které otevřete. Historie zůstává pouze v této relaci.",
+    "keyboardHints": "Nápověda ke klávesovým zkratkám"
   }
 }

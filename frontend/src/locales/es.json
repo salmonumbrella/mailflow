@@ -425,7 +425,8 @@
       "title": "Pospuesto hasta {{when}}",
       "failTitle": "No se pudo cambiar la hora",
       "failBody": "Mantiene la hora anterior. Inténtalo de nuevo."
-    }
+    },
+    "attachments": "Archivos adjuntos"
   },
   "messageList": {
     "replyDraftChanged": "El borrador de respuesta ha cambiado. Intenta abrirlo de nuevo.",
@@ -571,6 +572,10 @@
       "list": {
         "label": "Primero la lista",
         "description": "Lista a todo lo ancho; cada mensaje se abre por separado"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "Lista compacta, barra de navegación estrecha y lectura a todo el ancho"
       }
     },
     "snoozedUntil": "Pospuesto hasta {{when}}",
@@ -593,7 +598,11 @@
     "categoryCountTitle": "Mensajes: {{total}} · Sin leer: {{unread}}",
     "emptyCategory": "No hay nada en {{category}}",
     "emptyCategoryOthers": "Las otras categorías todavía tienen correo.",
-    "emptyCategoryNone": "La bandeja de entrada está vacía."
+    "emptyCategoryNone": "La bandeja de entrada está vacía.",
+    "loadFailed": "No se pudieron cargar los mensajes.",
+    "categoriesLabel": "Categorías de la bandeja de entrada",
+    "listOptions": "Opciones de la lista",
+    "openThreadMessageHint": "Pulsa Intro para abrir este mensaje antes de usar los atajos de mensajes."
   },
   "lockScreen": {
     "subtitle": "Introduce tu PIN para desbloquear",
@@ -813,7 +822,9 @@
       "nextWeek": "La próxima semana",
       "custom": "Personalizado...",
       "change": "Cambiar la hora",
-      "unsnooze": "Dejar de posponer"
+      "unsnooze": "Dejar de posponer",
+      "date": "Fecha de recordatorio",
+      "time": "Hora de recordatorio"
     },
     "categorize": "Categorizar como…",
     "categoryAlwaysSender": "Siempre para este remitente",
@@ -863,8 +874,15 @@
       "settings": "Abrir ajustes",
       "themes": "Abrir temas",
       "switchTheme": "Cambiar al tema {{theme}}",
-      "accountInbox": "{{name}} — Bandeja de entrada"
-    }
+      "accountInbox": "{{name}} — Bandeja de entrada",
+      "switchLayout": "Usar el diseño {{layout}}"
+    },
+    "error": "No se pudo ejecutar el comando",
+    "superhumanPlaceholder": "¿Qué te gustaría hacer?",
+    "title": "Paleta de comandos",
+    "superhumanTitle": "Comandos de Superhuman",
+    "searchLabel": "Buscar comandos",
+    "results": "Comandos"
   },
   "shortcuts": {
     "title": "Atajos de teclado",
@@ -999,7 +1017,43 @@
       "toggleRightSidebar": {
         "label": "Alternar la barra lateral derecha",
         "description": "Ocultar o mostrar la barra lateral derecha"
+      },
+      "returnToInbox": {
+        "label": "Volver a la bandeja de entrada",
+        "description": "Mover la conversación seleccionada a la bandeja de entrada de su cuenta"
+      },
+      "openFolderDrawer": {
+        "label": "Abrir carpetas",
+        "description": "Abrir las carpetas; elegir con Arriba/Abajo y abrir con Derecha"
+      },
+      "openHighlightedMessage": {
+        "label": "Abrir conversación resaltada",
+        "description": "Abrir la conversación resaltada de la lista"
+      },
+      "filterUnread": {
+        "label": "Filtrar no leídos",
+        "description": "Alternar los mensajes no leídos de la carpeta actual, fuera de la búsqueda"
+      },
+      "filterStarred": {
+        "label": "Filtrar destacados",
+        "description": "Alternar una búsqueda de mensajes destacados"
+      },
+      "openOrReplyAll": {
+        "label": "Abrir o responder a todos",
+        "description": "Abrir la conversación resaltada o responder a todos desde el lector"
+      },
+      "snooze": {
+        "label": "Posponer",
+        "description": "Posponer"
+      },
+      "moveMessage": {
+        "label": "Mover a carpeta",
+        "description": "Mover a carpeta"
       }
+    },
+    "account": {
+      "label": "Cuenta {{number}}",
+      "description": "Abrir la bandeja de entrada de la cuenta {{number}}"
     }
   },
   "notifications": {
@@ -2414,5 +2468,20 @@
     "formNote": "Los buzones de Gmail y Google Workspace pueden iniciar sesión con Google en lugar de usar una contraseña de aplicación.",
     "appPasswordNote": "Gmail necesita una contraseña de aplicación, no tu contraseña habitual. Activa la verificación en dos pasos de tu cuenta de Google, crea una contraseña de aplicación y escríbela en el campo de contraseña.",
     "createAppPassword": "Crear una contraseña de aplicación"
+  },
+  "superhuman": {
+    "navigation": "Navegación del correo",
+    "commands": "Comandos",
+    "folders": "Carpetas y cuentas",
+    "search": "Buscar correo",
+    "accounts": "Gestionar cuentas",
+    "shortcuts": "Atajos de teclado",
+    "settings": "Ajustes",
+    "closeFolders": "Cerrar carpetas",
+    "recentUnavailable": "Este mensaje ya no está disponible. Abre su carpeta para encontrarlo.",
+    "recentlyViewed": "Vistos recientemente",
+    "thisSession": "Esta sesión",
+    "recentEmpty": "Los mensajes que abras aparecerán aquí. Tu historial se conserva solo durante esta sesión.",
+    "keyboardHints": "Indicaciones del teclado"
   }
 }

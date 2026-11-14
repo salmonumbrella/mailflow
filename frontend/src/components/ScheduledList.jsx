@@ -483,7 +483,7 @@ export default function ScheduledList() {
         )}
       </div>
 
-      {!isMobile && undoable.map((n, i) => (
+      {!isMobile && layout !== 'superhuman' && undoable.map((n, i) => (
         <UndoBar key={n.id} notification={n} onDismiss={() => removeNotification(n.id)} showTopBorder={i === 0} />
       ))}
 
