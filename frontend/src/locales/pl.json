@@ -427,7 +427,8 @@
       "title": "Odłożone do {{when}}",
       "failTitle": "Nie udało się zmienić czasu powrotu",
       "failBody": "Pozostaje poprzedni czas. Spróbuj ponownie."
-    }
+    },
+    "attachments": "Załączniki"
   },
   "messageList": {
     "replyDraftChanged": "Szkic odpowiedzi się zmienił. Spróbuj otworzyć go ponownie.",
@@ -585,6 +586,10 @@
       "list": {
         "label": "Najpierw lista",
         "description": "Lista na całą szerokość; wiadomość otwiera się osobno"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "Zwarta lista, wąski pasek nawigacji i czytanie na pełnej szerokości"
       }
     },
     "snoozedUntil": "Odłożone do {{when}}",
@@ -607,7 +612,11 @@
     "categoryCountTitle": "Wiadomości: {{total}} · Nieprzeczytane: {{unread}}",
     "emptyCategory": "Brak wiadomości w kategorii {{category}}",
     "emptyCategoryOthers": "W innych kategoriach są jeszcze wiadomości.",
-    "emptyCategoryNone": "Skrzynka odbiorcza jest pusta."
+    "emptyCategoryNone": "Skrzynka odbiorcza jest pusta.",
+    "loadFailed": "Nie udało się wczytać wiadomości.",
+    "categoriesLabel": "Kategorie skrzynki odbiorczej",
+    "listOptions": "Opcje listy",
+    "openThreadMessageHint": "Naciśnij Enter, aby otworzyć tę wiadomość przed użyciem skrótów wiadomości."
   },
   "lockScreen": {
     "subtitle": "Wpisz swój PIN aby odblokować",
@@ -829,7 +838,9 @@
       "nextWeek": "W przyszłym tygodniu",
       "custom": "Niestandardowe...",
       "change": "Zmień czas powrotu",
-      "unsnooze": "Przywróć teraz"
+      "unsnooze": "Przywróć teraz",
+      "date": "Data odroczenia",
+      "time": "Godzina odroczenia"
     },
     "categorize": "Kategoryzuj jako…",
     "categoryAlwaysSender": "Zawsze dla tego nadawcy",
@@ -879,8 +890,15 @@
       "settings": "Otwórz ustawienia",
       "themes": "Otwórz motywy",
       "switchTheme": "Przełącz na motyw {{theme}}",
-      "accountInbox": "{{name}} — Skrzynka odbiorcza"
-    }
+      "accountInbox": "{{name}} — Skrzynka odbiorcza",
+      "switchLayout": "Użyj układu {{layout}}"
+    },
+    "error": "Nie udało się wykonać polecenia",
+    "superhumanPlaceholder": "Co chcesz zrobić?",
+    "title": "Paleta poleceń",
+    "superhumanTitle": "Polecenia Superhuman",
+    "searchLabel": "Szukaj poleceń",
+    "results": "Polecenia"
   },
   "shortcuts": {
     "title": "Skróty klawiaturowe",
@@ -1015,7 +1033,43 @@
       "toggleRightSidebar": {
         "label": "Przełącz prawy panel",
         "description": "Ukryj lub pokaż prawy panel boczny"
+      },
+      "returnToInbox": {
+        "label": "Przenieś do odebranych",
+        "description": "Przenieś wybraną rozmowę do skrzynki odbiorczej jej konta"
+      },
+      "openFolderDrawer": {
+        "label": "Otwórz foldery",
+        "description": "Otwórz foldery; wybierz strzałkami w górę/dół i otwórz strzałką w prawo"
+      },
+      "openHighlightedMessage": {
+        "label": "Otwórz podświetloną rozmowę",
+        "description": "Otwórz podświetloną rozmowę z listy"
+      },
+      "filterUnread": {
+        "label": "Filtruj nieprzeczytane",
+        "description": "Przełącz nieprzeczytane wiadomości w bieżącym folderze poza wyszukiwaniem"
+      },
+      "filterStarred": {
+        "label": "Filtruj oznaczone gwiazdką",
+        "description": "Przełącz wyszukiwanie wiadomości oznaczonych gwiazdką"
+      },
+      "openOrReplyAll": {
+        "label": "Otwórz lub odpowiedz wszystkim",
+        "description": "Otwórz podświetloną rozmowę lub odpowiedz wszystkim w widoku wiadomości"
+      },
+      "snooze": {
+        "label": "Odłóż",
+        "description": "Odłóż"
+      },
+      "moveMessage": {
+        "label": "Przenieś do folderu",
+        "description": "Przenieś do folderu"
       }
+    },
+    "account": {
+      "label": "Konto {{number}}",
+      "description": "Otwórz skrzynkę odbiorczą konta {{number}}"
     }
   },
   "notifications": {
@@ -2433,5 +2487,20 @@
     "formNote": "Skrzynki Gmail i Google Workspace mogą logować się przez Google zamiast hasłem aplikacji.",
     "appPasswordNote": "Gmail wymaga hasła aplikacji, a nie zwykłego hasła. Włącz weryfikację dwuetapową na koncie Google, utwórz hasło aplikacji i wpisz je w polu hasła.",
     "createAppPassword": "Utwórz hasło aplikacji"
+  },
+  "superhuman": {
+    "navigation": "Nawigacja poczty",
+    "commands": "Polecenia",
+    "folders": "Foldery i konta",
+    "search": "Szukaj w poczcie",
+    "accounts": "Zarządzaj kontami",
+    "shortcuts": "Skróty klawiaturowe",
+    "settings": "Ustawienia",
+    "closeFolders": "Zamknij foldery",
+    "recentUnavailable": "Ta wiadomość nie jest już dostępna. Otwórz jej folder, aby ją znaleźć.",
+    "recentlyViewed": "Ostatnio przeglądane",
+    "thisSession": "Ta sesja",
+    "recentEmpty": "Tutaj pojawią się otwierane wiadomości. Historia jest przechowywana tylko w tej sesji.",
+    "keyboardHints": "Podpowiedzi klawiaturowe"
   }
 }

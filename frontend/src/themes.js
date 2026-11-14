@@ -49,6 +49,31 @@ export const THEMES = {
     }
   },
 
+  superhuman: {
+    label: 'Superhuman',
+    description: 'Graphite surfaces, quiet chrome and lavender highlights',
+    preview: ['#282726', '#211f1e', '#c1a0e8', '#f2f0ed'],
+    vars: {
+      '--bg-primary': '#282726',
+      '--bg-secondary': '#211f1e',
+      '--bg-tertiary': '#302e2d',
+      '--bg-elevated': '#393635',
+      '--bg-hover': '#484543',
+      '--border': '#47423f',
+      '--border-subtle': '#353230',
+      '--text-primary': '#f2f0ed',
+      '--text-secondary': '#bcb8b4',
+      '--text-tertiary': '#96918c',
+      '--accent': '#c1a0e8',
+      '--accent-text': '#211a29',
+      '--accent-dim': '#44384f',
+      '--accent-glow': 'rgba(193,160,232,0.13)',
+      '--green': '#8ccfa7',
+      '--red': '#ed999d',
+      '--amber': '#e8c082',
+    }
+  },
+
   light: {
     label: 'Light',
     description: 'Clean light theme',

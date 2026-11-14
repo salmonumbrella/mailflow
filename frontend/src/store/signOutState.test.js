@@ -181,21 +181,31 @@ test('Sign out clears what the shared sign-out clears, and the lock once the ser
 // Locking sends what is still in its undo window (flushUndoables) before the lock request, which
 // the server would otherwise answer first, refusing the rest.
 test('locking sends actions still in their undo window before the lock request', async () => {
-  const { holdUndoable } = await import('../utils/undoableAction.js');
+  const { holdUndoable, releaseUndoable } = await import('../utils/undoableAction.js');
   const sent = [];
   const realLock = api.lock;
   const realArchive = api.bulkArchive;
-  api.lock = async () => { sent.push('lock'); };
+  let resolveLock;
+  const lockCalled = new Promise(resolve => { resolveLock = resolve; });
+  api.lock = async () => { sent.push('lock'); resolveLock(); };
   api.bulkArchive = async () => { sent.push('archive'); return { archived: [] }; };
   // What MailApp does on mailflow:will-lock.
   const { flushUndoables } = await import('../utils/undoableAction.js');
   window.addEventListener('mailflow:will-lock', flushUndoables);
+  let held, deadline;
   try {
-    holdUndoable(async () => { await Promise.resolve(); await api.bulkArchive(['m1']); }, 60000);
+    held = holdUndoable(async () => { await Promise.resolve(); await api.bulkArchive(['m1']); }, 60000);
     s().lockScreen();
-    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(s().isLocked, true);
+    // MessageChannel dispatch is a task, not a timer. Wait for the actual request,
+    // while still failing if it never arrives, instead of racing a 20ms timer.
+    await Promise.race([lockCalled, new Promise((_, reject) => {
+      deadline = setTimeout(() => reject(new Error('Lock request was not observed')), 5000);
+    })]);
     assert.deepEqual(sent, ['archive', 'lock']);
   } finally {
+    clearTimeout(deadline);
+    releaseUndoable(held);
     window.removeEventListener('mailflow:will-lock', flushUndoables);
     api.lock = realLock;
     api.bulkArchive = realArchive;

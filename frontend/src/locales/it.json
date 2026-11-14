@@ -425,7 +425,8 @@
       "title": "Posticipato fino a {{when}}",
       "failTitle": "Impossibile cambiare l'orario",
       "failBody": "Resta l'orario precedente. Riprova."
-    }
+    },
+    "attachments": "Allegati"
   },
   "messageList": {
     "replyDraftChanged": "La bozza di risposta è cambiata. Prova ad aprirla di nuovo.",
@@ -571,6 +572,10 @@
       "list": {
         "label": "Prima l'elenco",
         "description": "Elenco a tutta larghezza; un messaggio si apre da solo"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "Elenco compatto, barra di navigazione sottile e lettura a tutta larghezza"
       }
     },
     "snoozedUntil": "Posticipato fino a {{when}}",
@@ -593,7 +598,11 @@
     "categoryCountTitle": "Messaggi: {{total}} · Da leggere: {{unread}}",
     "emptyCategory": "Niente in {{category}}",
     "emptyCategoryOthers": "Le altre categorie contengono ancora messaggi.",
-    "emptyCategoryNone": "La posta in arrivo è vuota."
+    "emptyCategoryNone": "La posta in arrivo è vuota.",
+    "loadFailed": "Impossibile caricare i messaggi.",
+    "categoriesLabel": "Categorie della posta in arrivo",
+    "listOptions": "Opzioni elenco",
+    "openThreadMessageHint": "Premi Invio per aprire questo messaggio prima di usare le scorciatoie dei messaggi."
   },
   "lockScreen": {
     "subtitle": "Inserisci il PIN per sbloccare",
@@ -813,7 +822,9 @@
       "nextWeek": "La settimana prossima",
       "custom": "Personalizzato...",
       "change": "Cambia l'orario",
-      "unsnooze": "Annulla posticipo"
+      "unsnooze": "Annulla posticipo",
+      "date": "Data del rinvio",
+      "time": "Orario del rinvio"
     },
     "categorize": "Categorizza come…",
     "categoryAlwaysSender": "Sempre per questo mittente",
@@ -863,8 +874,15 @@
       "settings": "Apri Impostazioni",
       "themes": "Apri Temi",
       "switchTheme": "Passa al tema {{theme}}",
-      "accountInbox": "{{name}} — Posta in arrivo"
-    }
+      "accountInbox": "{{name}} — Posta in arrivo",
+      "switchLayout": "Usa il layout {{layout}}"
+    },
+    "error": "Impossibile eseguire il comando",
+    "superhumanPlaceholder": "Cosa vorresti fare?",
+    "title": "Tavolozza comandi",
+    "superhumanTitle": "Comandi Superhuman",
+    "searchLabel": "Cerca comandi",
+    "results": "Comandi"
   },
   "shortcuts": {
     "title": "Scorciatoie da tastiera",
@@ -999,7 +1017,43 @@
       "toggleRightSidebar": {
         "label": "Mostra o nascondi la barra laterale destra",
         "description": "Nascondi o mostra la barra laterale destra"
+      },
+      "returnToInbox": {
+        "label": "Sposta in Posta in arrivo",
+        "description": "Spostare la conversazione selezionata nella posta in arrivo del suo account"
+      },
+      "openFolderDrawer": {
+        "label": "Apri cartelle",
+        "description": "Aprire le cartelle; scegliere con Su/Giù e aprire con Destra"
+      },
+      "openHighlightedMessage": {
+        "label": "Apri conversazione evidenziata",
+        "description": "Aprire la conversazione evidenziata nell’elenco"
+      },
+      "filterUnread": {
+        "label": "Filtra non letti",
+        "description": "Mostrare solo i messaggi non letti della cartella attuale, fuori dalla ricerca"
+      },
+      "filterStarred": {
+        "label": "Filtra speciali",
+        "description": "Attivare o disattivare la ricerca di messaggi speciali"
+      },
+      "openOrReplyAll": {
+        "label": "Apri o rispondi a tutti",
+        "description": "Aprire la conversazione evidenziata o rispondere a tutti nel lettore"
+      },
+      "snooze": {
+        "label": "Posticipa",
+        "description": "Posticipa"
+      },
+      "moveMessage": {
+        "label": "Sposta nella cartella",
+        "description": "Sposta nella cartella"
       }
+    },
+    "account": {
+      "label": "Account {{number}}",
+      "description": "Apri la posta in arrivo dell’account {{number}}"
     }
   },
   "notifications": {
@@ -2414,5 +2468,20 @@
     "formNote": "Le caselle Gmail e Google Workspace possono accedere con Google invece di usare una password per le app.",
     "appPasswordNote": "Gmail richiede una password per le app, non la tua password abituale. Attiva la verifica in due passaggi per il tuo account Google, poi crea una password per le app e inseriscila nel campo della password.",
     "createAppPassword": "Crea una password per le app"
+  },
+  "superhuman": {
+    "navigation": "Navigazione della posta",
+    "commands": "Comandi",
+    "folders": "Cartelle e account",
+    "search": "Cerca nella posta",
+    "accounts": "Gestisci account",
+    "shortcuts": "Scorciatoie da tastiera",
+    "settings": "Impostazioni",
+    "closeFolders": "Chiudi cartelle",
+    "recentUnavailable": "Questo messaggio non è più disponibile. Apri la sua cartella per trovarlo.",
+    "recentlyViewed": "Visualizzati di recente",
+    "thisSession": "Questa sessione",
+    "recentEmpty": "I messaggi che apri appariranno qui. La cronologia resta in questa sessione.",
+    "keyboardHints": "Suggerimenti da tastiera"
   }
 }
