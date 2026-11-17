@@ -1451,7 +1451,7 @@ describe('MessageList: a manual sync', () => {
 
 describe('MessageList — Superhuman desktop list', () => {
   const second = { ...MESSAGE, id: 'sh-second', uid: 2, message_id: '<sh-second@example.com>', from_name: 'Second sender', subject: 'Another subject' };
-  const mountSuperhuman = async ({ rows = [MESSAGE, second], threadedView = false, mobile = false, ...options } = {}) => {
+  const mountSuperhuman = async ({ rows = [MESSAGE, second], threadedView = false, mobile = false, folder = 'INBOX', accounts = [ACCOUNT], ...options } = {}) => {
     ROUTES = {};
     if (root) { await React.act(async () => root.unmount()); root = null; }
     window.innerWidth = mobile ? 390 : 1200;
@@ -1461,13 +1461,27 @@ describe('MessageList — Superhuman desktop list', () => {
       messageWindows: [], replyDrafts: {}, notifications: [], threadMessages: {},
       expandedThreadId: null, enabledPlugins: [], categorizationEnabled: false, activeGtdTab: null,
       markReadBehavior: 'manual', hoverQuickActions: true, showMessagePreviews: true, ...options });
-    await mount({ rows, threadedView });
+    await mount({ rows, threadedView, folder, accounts });
     CALLS = [];
   };
   const click = async (element, properties = {}) => {
     assert.ok(element, 'interactive element is rendered');
     await React.act(async () => element.dispatchEvent(new window.MouseEvent('click', { bubbles: true, ...properties })));
   };
+
+  test('keyboard opening a highlighted draft uses the native composer', async () => {
+    const draft = { ...MESSAGE, folder: 'Drafts', subject: 'Draft to edit' };
+    await mountSuperhuman({ rows: [draft], folder: 'Drafts' });
+    ROUTES = {
+      [`/mail/messages/${draft.id}/body?allowRemoteImages=true`]: [200, { html: '<p>Draft body</p>', attachments: [] }],
+      [`/mail/messages/${draft.id}/bcc`]: [200, { bcc: [] }],
+    };
+    await React.act(async () => shortcutBus.emit('openMessage'));
+    assert.equal(useStore.getState().composing, true);
+    assert.equal(useStore.getState().composeData.draftFolder, 'Drafts');
+    assert.equal(useStore.getState().composeData.subject, draft.subject);
+    assert.equal(useStore.getState().selectedMessageId, null);
+  });
 
   test('renders compact native rows and keeps j/k focus separate from opening and reading', async () => {
     await mountSuperhuman();

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { htmlLang } from '../utils/browserLanguage.js';
 import { useStore } from '../store/index.js';
@@ -94,35 +94,59 @@ function isDraft(message, state) {
     || state.folders[message.account_id]?.some(folder => folder.path === message.folder && folder.special_use === '\\Drafts'));
 }
 
-export function SuperhumanRecent({ onCollapse, toggleHint }) {
-  const { t, i18n } = useTranslation();
-  const { selectedMessageId, messages, searchResults, threadMessages, accounts, user } = useStore();
+const RecentSessionContext = createContext(null);
+
+function useRecentMessages(active = true) {
+  const { selectedMessageId, messages, searchResults, threadMessages, user, layout, isLocked } = useStore();
   const [recent, setRecent] = useState([]);
-  const [opening, setOpening] = useState(null);
   const recorded = useRef(null);
-  const request = useRef(0);
-  const timer = useRef(null);
-  const timerMessageId = useRef(null);
   const userId = user?.id;
 
   useEffect(() => {
-    // No persistence: message subjects disappear on lock, logout and workspace exit.
+    // Session subjects disappear on lock, logout and workspace exit.
     setRecent([]);
-    setOpening(null);
     recorded.current = null;
-    return () => { request.current += 1; cancelScheduledMarkRead(timer.current); };
-  }, [userId]);
+  }, [userId, layout, isLocked]);
 
   useEffect(() => {
-    if (recorded.current === selectedMessageId) return;
-    if (timerMessageId.current !== selectedMessageId) cancelScheduledMarkRead(timer.current);
+    if (!active || layout !== 'superhuman' || isLocked || recorded.current === selectedMessageId) return;
     if (!selectedMessageId) { recorded.current = null; return; }
     const { selectedMessage } = resolveConversationSelection({ selectedMessageId, pool: [...messages, ...searchResults], threadMessages });
     if (!selectedMessage || isDraft(selectedMessage, useStore.getState())) return;
     recorded.current = selectedMessageId;
     const { id, account_id, from_name, from_email, subject } = selectedMessage;
     setRecent(previous => [{ id, account_id, from_name, from_email, subject, openedAt: Date.now() }, ...previous.filter(m => m.id !== id)].slice(0, MAX_RECENT));
-  }, [selectedMessageId, messages, searchResults, threadMessages, userId]);
+  }, [active, selectedMessageId, messages, searchResults, threadMessages, userId, layout, isLocked]);
+
+  return recent;
+}
+
+export function SuperhumanRecentSession({ children }) {
+  const recent = useRecentMessages();
+  return <RecentSessionContext.Provider value={recent}>{children}</RecentSessionContext.Provider>;
+}
+
+export function SuperhumanRecent({ onCollapse, toggleHint, embedded = false }) {
+  const { t, i18n } = useTranslation();
+  const { selectedMessageId, accounts, user } = useStore();
+  const sharedRecent = useContext(RecentSessionContext);
+  const localRecent = useRecentMessages(sharedRecent === null);
+  const recent = sharedRecent ?? localRecent;
+  const [collapsed, setCollapsed] = useState(false);
+  const [opening, setOpening] = useState(null);
+  const request = useRef(0);
+  const timer = useRef(null);
+  const timerMessageId = useRef(null);
+  const userId = user?.id;
+
+  useEffect(() => {
+    setOpening(null);
+    return () => { request.current += 1; cancelScheduledMarkRead(timer.current); };
+  }, [userId]);
+
+  useEffect(() => {
+    if (timerMessageId.current !== selectedMessageId) cancelScheduledMarkRead(timer.current);
+  }, [selectedMessageId]);
 
   const open = async (entry) => {
     const token = ++request.current;
@@ -131,7 +155,10 @@ export function SuperhumanRecent({ onCollapse, toggleHint }) {
       const now = useStore.getState();
       return request.current === token && now.user?.id === before.user?.id
         && now.messagesRefreshToken === before.messagesRefreshToken && now.selectedMessageId === before.selectedMessageId
-        && now.searchQuery === before.searchQuery && now.showContacts === before.showContacts;
+        && now.searchQuery === before.searchQuery && now.showContacts === before.showContacts
+        && now.composing === before.composing && now.composeSession === before.composeSession
+        && now.showAdmin === before.showAdmin && now.adminTab === before.adminTab
+        && now.isLocked === before.isLocked && now.activeGtdTab === before.activeGtdTab;
     };
     setOpening(entry.id);
     try {
@@ -161,16 +188,21 @@ export function SuperhumanRecent({ onCollapse, toggleHint }) {
   };
 
   const visible = recent.filter(m => accounts.some(a => a.id === m.account_id && a.enabled !== false));
-  return <aside className="superhuman-recent" aria-label={t('superhuman.recentlyViewed', 'Recently viewed')}>
-    <header className="superhuman-recent-header">
+  return <aside className={`superhuman-recent${embedded ? ' superhuman-recent--embedded' : ''}`} aria-label={t('superhuman.recentlyViewed', 'Recently viewed')}>
+    {embedded ? <button type="button" className="superhuman-recent-toggle" aria-label={t('superhuman.recentlyViewed', 'Recently viewed')} aria-expanded={!collapsed} onClick={() => setCollapsed(value => !value)}>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><polyline points={collapsed ? '9 18 15 12 9 6' : '6 9 12 15 18 9'} /></svg>
+      {t('superhuman.recentlyViewed', 'Recently viewed')}
+    </button> : <header className="superhuman-recent-header">
       <h2>{t('superhuman.recentlyViewed', 'Recently viewed')}</h2>
       <button type="button" className="superhuman-rail-button" onClick={onCollapse} aria-label={t('rightSidebar.hide', 'Hide sidebar')} title={toggleHint || t('rightSidebar.hide', 'Hide sidebar')}><Icon name="close" /></button>
-    </header>
+    </header>}
+    {!collapsed && <>
     <p className="superhuman-session-label">{t('superhuman.thisSession', 'This session')}</p>
     {visible.length ? <div className="superhuman-recent-list">{visible.map(message => <button type="button" className="superhuman-recent-message" key={message.id} disabled={opening === message.id} onClick={() => open(message)}>
       <span className="superhuman-recent-sender">{message.from_name || message.from_email || t('common.unknown', 'Unknown')}<time dateTime={new Date(message.openedAt).toISOString()}>{new Date(message.openedAt).toLocaleTimeString(htmlLang(i18n.language), { hour: 'numeric', minute: '2-digit' })}</time></span>
       <span className="superhuman-recent-subject">{message.subject || t('common.noSubject', '(No subject)')}</span>
     </button>)}</div> : <p className="superhuman-recent-empty">{t('superhuman.recentEmpty', 'Messages you open will appear here. Your history stays in this session.')}</p>}
+    </>}
   </aside>;
 }
 

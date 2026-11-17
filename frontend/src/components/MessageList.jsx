@@ -30,9 +30,11 @@ import ListSortMenu from './ListSortMenu.jsx';
 import { useListFirst } from '../hooks/useListFirst.js';
 import { useHeaderControlsFit } from '../hooks/useHeaderControlsFit.js';
 import GtdTabList from './GtdTabList.jsx';
+import { useGtdTriage } from '../hooks/useGtdTriage.js';
+import { rememberGtdRailSelection } from '../utils/gtdHotkeys.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import {
-  gtdActiveForContext, buildGtdDisplaySections, GTD_COLORS, GTD_CHIP_BG, sectionBadge, isSelectedRow,
+  gtdActiveForContext, buildGtdDisplaySections, resolveRowDisplay, GTD_COLORS, GTD_CHIP_BG, sectionBadge, isSelectedRow,
 } from '../utils/gtd.js';
 import { formatDate, formatDateTime, formatSnoozeUntil } from '../utils/formatDate.js';
 import { SNOOZED_FOLDER, unsnooze, changeSnooze, refreshCounts } from '../utils/snoozeActions.js';
@@ -299,7 +301,6 @@ function MailboxList() {
   const layoutPickerRef = useRef(null);
 
   useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
-  useEffect(() => { setActiveCategory('primary'); setActiveGtdTab(null); }, [selectedAccountId, selectedFolder, setActiveGtdTab]);
   useEffect(() => {
     const markOpening = () => {
       recentMessageOpenUntilRef.current = Date.now() + 1500;
@@ -322,13 +323,23 @@ function MailboxList() {
   }, []);
   useEffect(() => {
     updateCatScrollEdges();
-  }, [activeCategory, selectedAccountId, selectedFolder, categorizationEnabled, updateCatScrollEdges]);
+    const el = catScrollRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(updateCatScrollEdges);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [activeCategory, activeGtdTab, selectedAccountId, selectedFolder, categorizationEnabled, gtdPluginActive, isSuperhuman, searchQuery, updateCatScrollEdges]);
 
   // GTD surfaces (pills + tab list) apply when GTD is enabled for the context.
   const gtdActive = gtdActiveForContext(accounts, selectedAccountId, gtdPluginActive);
   // While a GTD tab is selected the list body shows that section instead of the
   // folder listing. Same visibility envelope as the tab strip (INBOX, no search).
   const showGtdTab = gtdActive && !!activeGtdTab && selectedFolder === 'INBOX' && !searchQuery.trim();
+  const gtdTriage = useGtdTriage(showGtdTab);
+  useEffect(() => {
+    setActiveCategory(isSuperhuman && gtdActive ? null : 'primary');
+    setActiveGtdTab(null);
+  }, [selectedAccountId, selectedFolder, isSuperhuman, gtdActive, setActiveGtdTab]);
   const sortable = isSortableList({ accountId: selectedAccountId, folder: selectedFolder, searchQuery, gtdTab: showGtdTab });
   // Unread badge per GTD tab, from the shared sections store (Waiting merged).
   const gtdTabUnread = (() => {
@@ -492,7 +503,7 @@ function MailboxList() {
         applyListOrder(params, listOrder);
         if (unreadOnly) params.unreadOnly = 'true';
         if (threadedView) params.threaded = 'true';
-        if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
+        if (selectedFolder === 'INBOX' && activeCategory && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
         await refreshRequestRef.current.run(
           () => api.getMessages(params),
           (data) => {
@@ -551,7 +562,7 @@ function MailboxList() {
       applyListOrder(params, listOrder);
       if (unreadOnly) params.unreadOnly = 'true';
       if (useStore.getState().threadedView) params.threaded = 'true';
-      if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
+      if (selectedFolder === 'INBOX' && activeCategory && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
       const data = await api.getMessages(params);
       if (listGenRef.current !== gen) return;
       appendMessages(applyReadGuard(data.messages));
@@ -582,7 +593,7 @@ function MailboxList() {
         applyListOrder(params, listOrder);
         if (unreadOnly) params.unreadOnly = 'true';
         if (state.threadedView) params.threaded = 'true';
-        if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
+        if (selectedFolder === 'INBOX' && activeCategory && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
         await refreshRequestRef.current.run(
           () => api.getMessages(params),
           (data) => {
@@ -767,7 +778,7 @@ function MailboxList() {
       applyListOrder(params, listOrder);
       if (unreadOnly) params.unreadOnly = 'true';
       if (threadedView) params.threaded = 'true';
-      if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
+      if (selectedFolder === 'INBOX' && activeCategory && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
       await refreshRequestRef.current.run(
         () => api.getMessages(params),
         (data) => {
@@ -1482,8 +1493,13 @@ function MailboxList() {
     if (isSuperhuman && selectedMessageId) clearSelection();
   }, [isSuperhuman, selectedMessageId, clearSelection]);
 
+  useEffect(() => {
+    if (isSuperhuman) clearSelection();
+  }, [isSuperhuman, showGtdTab, activeGtdTab, clearSelection]);
+
   // Derived from store — must be declared before callbacks that use it in dependency arrays
-  const displayMessages = searchQuery.trim() ? searchResults : messages;
+  const gtdThreads = useMemo(() => buildGtdDisplaySections(gtdSections).find(section => section.key === activeGtdTab)?.threads || [], [gtdSections, activeGtdTab]);
+  const displayMessages = isSuperhuman && showGtdTab ? gtdThreads : searchQuery.trim() ? searchResults : messages;
 
   // Folder search results — shown at the top when searching with a plain query
   // (no special operator prefixes like from:, to:, subject:, has:, is:)
@@ -1509,8 +1525,10 @@ function MailboxList() {
   scRef.current.displayMessages = displayMessages;
   scRef.current.isSuperhuman = isSuperhuman;
   scRef.current.unreadOnly = unreadOnly;
+  scRef.current.gtdTriage = isSuperhuman && showGtdTab ? gtdTriage : null;
+  scRef.current.gtdDoneStates = message => activeGtdTab === 'waiting' ? resolveRowDisplay(message, activeGtdTab).kinds : [activeGtdTab];
   useEffect(() => {
-    if (!isSuperhuman || selectedMessageId || loadingMessages) return;
+    if (!isSuperhuman || selectedMessageId || (!showGtdTab && loadingMessages)) return;
     const index = displayMessages.findIndex(message => message.id === listFocusedMessageId);
     if (index >= 0) listFocusIndexRef.current = index;
     else {
@@ -1518,7 +1536,7 @@ function MailboxList() {
       const nextId = displayMessages[nextIndex]?.id ?? null;
       if (nextId !== listFocusedMessageId) useStore.setState({ listFocusedMessageId: nextId });
     }
-  }, [isSuperhuman, selectedMessageId, loadingMessages, displayMessages, listFocusedMessageId]);
+  }, [isSuperhuman, selectedMessageId, loadingMessages, showGtdTab, displayMessages, listFocusedMessageId]);
   // Same reason for the drag source: dragstart is synchronous and handleRowDragStart is
   // registered once ([] deps), so it reads the thread predicate and the fetch context from
   // here rather than closing over values that would be stale the moment the folder changes.
@@ -2047,8 +2065,12 @@ function MailboxList() {
   useEffect(() => { archiveVisibleMessageRef.current = archiveVisibleMessage; }, [archiveVisibleMessage]);
   useEffect(() => { scheduleDeleteRef.current = scheduleDelete;   }, [scheduleDelete]);
 
-  scRef.current.toggleRead = (message) => (isThreadListRow(message) ? handleThreadMarkRead : handleMarkRead)({ stopPropagation() {} }, message);
-  scRef.current.toggleStar = message => handleStar({ stopPropagation() {} }, message);
+  scRef.current.toggleRead = message => scRef.current.gtdTriage
+    ? scRef.current.gtdTriage.rowActions.setRead(message, !message.is_read)
+    : (isThreadListRow(message) ? handleThreadMarkRead : handleMarkRead)({ stopPropagation() {} }, message);
+  scRef.current.toggleStar = message => scRef.current.gtdTriage
+    ? scRef.current.gtdTriage.rowActions.toggleStar(message)
+    : handleStar({ stopPropagation() {} }, message);
 
   // Subscribe to keyboard shortcut actions that belong to the message list.
   // Registered once ([] deps); all live state is read through scRef/bulkDeleteRef/bulkArchiveRef.
@@ -2119,8 +2141,21 @@ function MailboxList() {
       return true;
     };
 
+    const openGtdNeighbor = direction => {
+      if (!scRef.current.gtdTriage) return false;
+      const state = getState();
+      const rows = scRef.current.displayMessages;
+      if (!rows.length) return true;
+      const opened = selectedMessage(state);
+      const index = rows.findIndex(row => isSelectedRow(row, state.selectedMessageId, opened?.message_id, opened?.account_id));
+      const next = rows[(index + direction + rows.length) % rows.length];
+      useStore.setState({ listFocusedMessageId: next.id });
+      rowOpenerRef.current?.(next);
+      return true;
+    };
+
     const onNext = () => {
-      if (focusRow(1)) return;
+      if (focusRow(1) || openGtdNeighbor(1)) return;
       const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       if (!pool.length) return;
@@ -2131,7 +2166,7 @@ function MailboxList() {
     };
 
     const onPrev = () => {
-      if (focusRow(-1)) return;
+      if (focusRow(-1) || openGtdNeighbor(-1)) return;
       const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       if (!pool.length) return;
@@ -2199,6 +2234,7 @@ function MailboxList() {
     };
 
     const onSelect = () => {
+      if (scRef.current.gtdTriage) return;
       const state = getState();
       const selectedMessageId = state.selectedMessageId ?? focusedListMessage(state)?.id;
       if (!selectedMessageId) return;
@@ -2213,12 +2249,14 @@ function MailboxList() {
     const onArchive = () => {
       const { messages, searchResults, searchQuery, selectedMessageId, threadMessages, selectedAccountId, addNotification } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
-      const ids = scRef.current.isSuperhuman && selectedMessageId ? [] : [...scRef.current.selectedIds];
+      const ids = scRef.current.gtdTriage || (scRef.current.isSuperhuman && selectedMessageId) ? [] : [...scRef.current.selectedIds];
       if (ids.length > 0) {
         const msgs = pool.filter(m => ids.includes(m.id));
         bulkArchiveRef.current(ids, msgs);
       } else if (focusedListMessage(getState())) {
-        contextActionRef.current('archive', focusedListMessage(getState()));
+        const focused = focusedListMessage(getState());
+        if (scRef.current.gtdTriage) scRef.current.gtdTriage.rowActions.done(focused, scRef.current.gtdDoneStates(focused));
+        else contextActionRef.current('archive', focused);
       } else if (selectedMessageId) {
         const msg = findVisibleArchiveMessage(pool, selectedMessageId, threadMessages);
         if (!msg) return;
@@ -2245,12 +2283,14 @@ function MailboxList() {
     const onDelete = () => {
       const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
-      const ids = scRef.current.isSuperhuman && selectedMessageId ? [] : [...scRef.current.selectedIds];
+      const ids = scRef.current.gtdTriage || (scRef.current.isSuperhuman && selectedMessageId) ? [] : [...scRef.current.selectedIds];
       if (ids.length > 0) {
         const msgs = pool.filter(m => ids.includes(m.id));
         bulkDeleteRef.current(ids, msgs);
       } else if (focusedListMessage(getState())) {
-        scheduleDeleteRef.current(focusedListMessage(getState()));
+        const focused = focusedListMessage(getState());
+        if (scRef.current.gtdTriage) scRef.current.gtdTriage.rowActions.deleteRow(focused, scRef.current.gtdDoneStates(focused));
+        else scheduleDeleteRef.current(focused);
       } else if (selectedMessageId) {
         const msg = pool.find(m => m.id === selectedMessageId);
         if (!msg) return;
@@ -2346,7 +2386,10 @@ function MailboxList() {
       const message = selectedMessage(state);
       if (!message || (!state.selectedMessageId && !focusedListMessage(state))) return;
       const rect = listRef.current?.getBoundingClientRect();
-      setContextMenu({ x: rect?.left + 44 || 160, y: 100, message, [kind]: true });
+      if (scRef.current.gtdTriage) {
+        scRef.current.gtdTriage.setContextMenu({ x: rect?.left + 44 || 160, y: 100, message,
+          doneStates: scRef.current.gtdDoneStates(message), [kind]: true });
+      } else setContextMenu({ x: rect?.left + 44 || 160, y: 100, message, [kind]: true });
     };
     const onSnooze = () => openRowPicker('defaultSnoozeView');
     const onMoveMessage = () => openRowPicker('defaultMoveView');
@@ -2854,7 +2897,11 @@ function MailboxList() {
   // there the advance only moves the highlight, as it always has.
   const rowOpenerRef = useRef(null);
   rowOpenerRef.current = (row) => {
-    if (isDraftsFolder) { selectListedMessage(useStore, row.id); return; }
+    if (isSuperhuman && showGtdTab) {
+      rememberGtdRailSelection(row, activeGtdTab);
+      return gtdTriage.openRow(row);
+    }
+    if (isDraftsFolder && !isSuperhuman) { selectListedMessage(useStore, row.id); return; }
     handleSelect(row);
   };
   useEffect(() => registerRowOpener(row => rowOpenerRef.current?.(row)), []);
@@ -3178,13 +3225,23 @@ function MailboxList() {
           key, label: t(`messageList.categories.${key}`), unread: categoryCounts[key] || 0,
           total: Object.keys(categoryTotals).length ? categoryTotals[key] || 0 : null,
         })) : []}
+        gtdTabs={gtdActive && selectedFolder === 'INBOX' ? [
+          { key: null, label: t('gtd.inbox'), unread: headerUnread },
+          { key: 'todo', label: t('gtd.state.todo'), unread: gtdTabUnread.todo },
+          { key: 'waiting', label: t('gtd.waiting'), unread: gtdTabUnread.waiting },
+          { key: 'reference', label: t('gtd.state.reference'), unread: gtdTabUnread.reference },
+          { key: 'someday', label: t('gtd.state.someday'), unread: gtdTabUnread.someday },
+        ] : []}
+        activeGtdTab={activeGtdTab}
+        onGtdTab={key => { setActiveGtdTab(key); if (key === null) setActiveCategory(null); }}
+        tabScrollRef={catScrollRef} tabScrollEdges={catScrollEdges} onTabScroll={updateCatScrollEdges}
         activeCategory={activeGtdTab ? null : activeCategory}
         onCategory={category => { setSearchQuery(''); setActiveGtdTab(null); setActiveCategory(category); }}
         searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchInputRef={searchInputRef}
         syncing={syncing} onSync={handleSync} syncTitle={selectedAccountId ? t('messageList.syncAccount') : t('messageList.syncAll')}
         unreadOnly={unreadOnly} onToggleUnread={() => setUnreadOnly(value => !value)}
         onToggleStarred={() => shortcutBus.emit('filterStarred')}
-        selectionMode={selectionMode} onToggleSelection={() => selectionMode ? clearSelection() : setSelectionModeActive(true)}
+        selectionMode={selectionMode} onToggleSelection={showGtdTab ? undefined : () => selectionMode ? clearSelection() : setSelectionModeActive(true)}
         layout={layout} onLayout={setLayout} pageSize={pageSize} onPageSize={setPageSize}
         sortable={sortable} accountId={selectedAccountId} folder={selectedFolder}
       />}
@@ -3660,7 +3717,7 @@ function MailboxList() {
       )}
 
       {/* Category + GTD tabs — shown in INBOX when categorization and/or GTD is active */}
-      {((categorizationActive && !isSuperhuman) || gtdActive) && selectedFolder === 'INBOX' && !searchQuery.trim() && (
+      {(!isSuperhuman && (categorizationActive || gtdActive)) && selectedFolder === 'INBOX' && !searchQuery.trim() && (
         <div style={{ position: 'relative', flexShrink: 0, borderBottom: '1px solid var(--border-subtle)' }}>
           {!isMobile && catScrollEdges.left && (
             <button
@@ -3833,7 +3890,7 @@ function MailboxList() {
           tabIndex={0}
           style={{ height: '100%', overflowY: 'auto', overflowX: 'hidden', outline: 'none', overscrollBehavior: 'contain' }}
         >
-          {showGtdTab ? <GtdTabList /> : (<>
+          {showGtdTab ? <GtdTabList superhuman={isSuperhuman} triage={gtdTriage} /> : (<>
           {/* Pull-to-refresh indicator */}
           {isMobile && (
             <div style={{

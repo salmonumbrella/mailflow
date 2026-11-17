@@ -1,3 +1,5 @@
+import { buildGtdDisplaySections, gtdActiveForContext } from './gtd.js';
+
 // Resolve the selected row across the ordinary list, search, deep-link stash,
 // and GTD rail. GTD copies may not exist in the current mailbox's messages.
 export function selectedMessage(state) {
@@ -39,6 +41,10 @@ export function focusedListMessage(state) {
   if (state?.layout !== 'superhuman' || state.selectedMessageId || topOpenMessageWindow(state)) return null;
   if (typeof window === 'undefined' || window.innerWidth < 768) return null;
   if (state.showContacts || state.showAdmin || state.composing) return null;
-  const pool = state.searchQuery?.trim() ? state.searchResults : state.messages;
+  const gtdVisible = state.activeGtdTab && state.selectedFolder === 'INBOX' && !state.searchQuery?.trim()
+    && gtdActiveForContext(state.accounts, state.selectedAccountId, state.enabledPlugins?.includes('gtd'));
+  const pool = gtdVisible
+    ? buildGtdDisplaySections(state.gtdSections).find(section => section.key === state.activeGtdTab)?.threads
+    : state.searchQuery?.trim() ? state.searchResults : state.messages;
   return pool?.find(message => message.id === state.listFocusedMessageId) ?? null;
 }

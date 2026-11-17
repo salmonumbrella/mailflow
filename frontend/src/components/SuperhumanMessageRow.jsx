@@ -11,7 +11,7 @@ export default function SuperhumanMessageRow({
   isChecked = false, selectionMode, onToggleSelect, onRangeSelect, onModifierSelect,
   onSelect, onHighlight, onOpenWindow, onThreadClick, onThreadToggle, isExpanded, threadMsgs, isLoadingThread,
   showMessagePreviews, onMarkRead, onStar, onDelete, onArchive, onSnooze, onMove, onDragStart,
-  onContextMenu, onExplainSpam, hoverQuickActions, hoverActionSet, nested = false,
+  onContextMenu, onExplainSpam, hoverQuickActions, hoverActionSet, nested = false, renderHoverActions, rowMeta,
 }) {
   const { t } = useTranslation();
   const threaded = !!onThreadClick;
@@ -83,6 +83,7 @@ export default function SuperhumanMessageRow({
         <span className="sh-mail-summary">
           <span className="sh-mail-subject">{subject}</span>
           <span className="sh-mail-meta" onClick={event => event.stopPropagation()}>
+            {rowMeta}
             <PluginSlot name="message-row-meta" ctx={{ message }} />
             <ReplyDraftIndicator message={message} listRow />
             <SpamBadge message={message} onClick={onExplainSpam} />
@@ -111,9 +112,9 @@ export default function SuperhumanMessageRow({
           </span>
         </span>
         {hoverQuickActions && !selectionMode && <span className="sh-mail-actions" onClick={event => event.stopPropagation()}>
-          <RowHoverActions message={message} isRead={!unread} background="var(--sh-row-active, var(--bg-tertiary))"
+          {renderHoverActions ? renderHoverActions() : <RowHoverActions message={message} isRead={!unread} background="var(--sh-row-active, var(--bg-tertiary))"
             onMarkRead={onMarkRead} onStar={onStar} onArchive={onArchive} onSnooze={onSnooze}
-            onDelete={onDelete} onMove={onMove} actions={hoverActionSet} rowActionCtx={{ message }} />
+            onDelete={onDelete} onMove={onMove} actions={hoverActionSet} rowActionCtx={{ message }} />}
         </span>}
       </div>
       {threaded && isExpanded && <div className="sh-mail-thread-children" role="list">

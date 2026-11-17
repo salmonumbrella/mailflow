@@ -1,3 +1,4 @@
+import { focusedListMessage } from './messageHotkeys.js';
 import { buildGtdDisplaySections, resolveRowDisplay } from './gtd.js';
 
 let lastRailSelection = null;
@@ -26,7 +27,7 @@ export function getGtdRailSelection() {
 }
 
 export function resolveGtdHotkeyTarget(state, railSelection = lastRailSelection) {
-  const id = state?.selectedMessageId;
+  const id = state?.selectedMessageId ?? focusedListMessage(state)?.id;
   if (id == null || !state.enabledPlugins?.includes('gtd')) return null;
   const sections = buildGtdDisplaySections(state.gtdSections);
   const selectedCopy = Object.values(state.threadMessages || {}).flat().find(message => message.id === id);

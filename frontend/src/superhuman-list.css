@@ -7,6 +7,13 @@
 .sh-list-heading { display: flex; align-items: center; gap: 18px; min-height: 32px; }
 .sh-list-title { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 16px; font-weight: 500; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sh-list-title > span { font-size: 12px; font-weight: 400; color: var(--text-tertiary); }
+.sh-list-tabs-wrap { position: relative; min-width: 0; flex: 1; }
+.sh-tab-scroll { position: absolute; top: 0; bottom: 0; width: 24px; z-index: 1; display: flex; align-items: center; border: 0; padding: 0; color: var(--text-tertiary); cursor: pointer; }
+.sh-tab-scroll--left { left: 0; justify-content: flex-start; background: linear-gradient(to right, var(--bg-secondary) 55%, transparent); }
+.sh-tab-scroll--right { right: 0; justify-content: flex-end; background: linear-gradient(to left, var(--bg-secondary) 55%, transparent); }
+.sh-list-tab .sh-gtd-unread { align-self: center; padding: 1px 5px; border-radius: 8px; background: var(--accent-dim); color: var(--accent); font-size: 10px; }
+.sh-gtd-aging { padding: 0 4px; color: var(--text-tertiary); font-size: 10px; }
+.sh-gtd-aging[data-stale="true"] { color: var(--red); }
 .sh-list-tabs { display: flex; gap: 23px; min-width: 0; overflow-x: auto; scrollbar-width: none; align-items: center; }
 .sh-list-tab { display: inline-flex; align-items: baseline; gap: 5px; flex-shrink: 0; border: 0; background: none; color: var(--text-tertiary); padding: 7px 0; font: inherit; font-size: 16px; cursor: pointer; white-space: nowrap; }
 .sh-list-tab[aria-pressed="true"] { color: var(--text-primary); }
@@ -42,7 +49,7 @@
 .sh-mail-row[data-checked="true"] > .sh-mail-row-content::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; border-radius: 4px 0 0 4px; background: var(--accent); }
 .sh-mail-row-content:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
 .sh-mail-indicator { display: flex; align-items: center; justify-content: center; position: relative; width: 30px; height: 30px; }
-.sh-mail-unread { width: 6px; height: 6px; border-radius: 50%; background: var(--unread-dot, #7ed3ef); }
+.sh-mail-unread { width: 6px; height: 6px; border-radius: 50%; background: var(--unread-dot, var(--accent)); }
 .sh-mail-checkbox { position: absolute; width: 14px; height: 14px; margin: 0; accent-color: var(--accent); opacity: 0; cursor: pointer; }
 .sh-mail-row-content:hover .sh-mail-checkbox,
 .sh-mail-row-content:focus-within .sh-mail-checkbox,

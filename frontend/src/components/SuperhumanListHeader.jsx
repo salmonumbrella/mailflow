@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useLayoutEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LAYOUTS } from '../layouts.js';
 import ListSortMenu from './ListSortMenu.jsx';
@@ -8,6 +8,7 @@ export default function SuperhumanListHeader({
   label, count, countTitle, categories, activeCategory, onCategory, searchQuery, setSearchQuery,
   searchInputRef, syncing, onSync, syncTitle, unreadOnly, onToggleUnread, onToggleStarred, selectionMode, onToggleSelection,
   layout, onLayout, pageSize, onPageSize, sortable, accountId, folder,
+  gtdTabs = [], activeGtdTab, onGtdTab, tabScrollRef, tabScrollEdges, onTabScroll,
 }) {
   const { t } = useTranslation();
   const optionsRef = useRef(null);
@@ -18,16 +19,42 @@ export default function SuperhumanListHeader({
     document.addEventListener('pointerdown', close);
     return () => document.removeEventListener('pointerdown', close);
   }, []);
+  useLayoutEffect(() => {
+    const strip = tabScrollRef?.current;
+    if (!strip || !onTabScroll) return;
+    onTabScroll();
+    const observer = new ResizeObserver(onTabScroll);
+    observer.observe(strip);
+    return () => observer.disconnect();
+  }, [tabScrollRef, onTabScroll, gtdTabs.length, categories.length, searchQuery]);
   return <header className="sh-list-header">
     <div className="sh-list-heading">
-      {categories.length > 0 && !searchQuery.trim() ? <div className="sh-list-tabs" role="group" aria-label={t('messageList.categoriesLabel', 'Inbox categories')}>
-        {categories.map(category => <button type="button" key={category.key} className="sh-list-tab"
-          aria-pressed={activeCategory === category.key} onClick={() => onCategory(category.key)}
-          title={t('messageList.categoryCountTitle', { total: category.total || 0, unread: category.unread })}>
-          {category.label}
-          {category.total != null && <span>{category.total}</span>}
-          {category.unread > 0 && <span className="sh-category-unread" aria-label={`${category.unread} ${t('messageList.unread')}`}>{category.unread}</span>}
-        </button>)}
+      {(gtdTabs.length > 0 || categories.length > 0) && !searchQuery.trim() ? <div className="sh-list-tabs-wrap">
+        {tabScrollEdges?.left && <button type="button" className="sh-tab-scroll sh-tab-scroll--left"
+          aria-label={t('messageList.scrollTabsLeft', 'Scroll tabs left')}
+          onClick={() => tabScrollRef.current?.scrollBy({ left: -120, behavior: 'smooth' })}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
+        </button>}
+        <div className="sh-list-tabs" ref={tabScrollRef} onScroll={onTabScroll} role="group"
+          aria-label={gtdTabs.length ? t('gtd.title') : t('messageList.categoriesLabel', 'Inbox categories')}>
+          {gtdTabs.map(tab => <button type="button" key={`gtd-${tab.key}`} className="sh-list-tab"
+            aria-pressed={activeGtdTab === tab.key && (tab.key !== null || !categories.length || activeCategory == null)} onClick={() => onGtdTab(tab.key)}>
+            {tab.label}
+            {tab.unread > 0 && <span className="sh-gtd-unread" aria-label={`${tab.unread} ${t('messageList.unread')}`}>{tab.unread > 99 ? '99+' : tab.unread}</span>}
+          </button>)}
+          {categories.map(category => <button type="button" key={category.key} className="sh-list-tab"
+            aria-pressed={activeCategory === category.key} onClick={() => onCategory(category.key)}
+            title={t('messageList.categoryCountTitle', { total: category.total || 0, unread: category.unread })}>
+            {category.label}
+            {category.total != null && <span>{category.total}</span>}
+            {category.unread > 0 && <span className="sh-category-unread" aria-label={`${category.unread} ${t('messageList.unread')}`}>{category.unread}</span>}
+          </button>)}
+        </div>
+        {tabScrollEdges?.right && <button type="button" className="sh-tab-scroll sh-tab-scroll--right"
+          aria-label={t('messageList.scrollTabsRight', 'Scroll tabs right')}
+          onClick={() => tabScrollRef.current?.scrollBy({ left: 120, behavior: 'smooth' })}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
+        </button>}
       </div> : <h2 className="sh-list-title">{label}<span title={countTitle}>{count}</span></h2>}
       <div className="sh-list-controls">
         <button className="sh-icon-button" type="button" title={syncTitle} aria-label={syncTitle} disabled={syncing} onClick={onSync}>
@@ -50,7 +77,7 @@ export default function SuperhumanListHeader({
           <div className="sh-list-options-panel">
             <button type="button" aria-pressed={unreadOnly} onClick={onToggleUnread}>{unreadOnly ? t('messageList.showAll') : t('messageList.unreadOnly')}</button>
             {onToggleStarred && <button type="button" aria-pressed={hasStarredSearch(searchQuery)} onClick={onToggleStarred}>{t('shortcuts.actions.filterStarred.label')}</button>}
-            <button type="button" aria-pressed={selectionMode} onClick={() => { onToggleSelection(); optionsRef.current.open = false; }}>{selectionMode ? t('common.cancel') : t('messageList.selectMessages')}</button>
+            {onToggleSelection && <button type="button" aria-pressed={selectionMode} onClick={() => { onToggleSelection(); optionsRef.current.open = false; }}>{selectionMode ? t('common.cancel') : t('messageList.selectMessages')}</button>}
             {sortable && <ListSortMenu accountId={accountId} folder={folder} />}
             <label>{t('messageList.messagesPerPage')}<select value={pageSize} onChange={event => onPageSize(Number(event.target.value))}>
               {[25, 50, 100, 200].map(size => <option key={size} value={size}>{size}</option>)}

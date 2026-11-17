@@ -9,6 +9,7 @@ import {
 import { openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
 import { resolveContextMenuMessage } from '../utils/contextMenuPolicy.js';
 import { classifyWithUndo } from '../utils/gtdClassification.js';
+import { refreshCounts } from '../utils/snoozeActions.js';
 import { doneGtdRow } from '../utils/gtdDone.js';
 import { cancelScheduledMarkRead, scheduleMarkReadTimer } from '../utils/markRead.js';
 import { reserveReadIntent, releaseReadIntent, readIntentIdsSince } from '../utils/readOrder.js';
@@ -70,7 +71,7 @@ export function withoutActedSince(ids, since, known = []) {
 // lighter: call the api and let the read/star fan-out + the gtd refetch reconcile,
 // with only the cheap optimistic touches (is_read flip, section-row removal) applied
 // here.
-export function useGtdTriage() {
+export function useGtdTriage(active = true) {
   const { t } = useTranslation();
   const setThreadMessages = useStore(s => s.setThreadMessages);
   const setSelectedMessage = useStore(s => s.setSelectedMessage);
@@ -89,14 +90,15 @@ export function useGtdTriage() {
   const mountedRef = useRef(true);
 
   useEffect(() => {
-    mountedRef.current = true;
+    mountedRef.current = active;
+    if (!active) setContextMenu(null);
     return () => {
       mountedRef.current = false;
       // Cancel only a pending read THIS instance scheduled (owner check): tearing down
       // one surface must not kill a read the other, still-mounted surface owns.
       if (autoMarkRead.owner === mountedRef) cancelAutoMarkRead();
     };
-  }, []);
+  }, [active]);
 
   // The GTD "done" action: strip this row's label(s) (`states`), mark read, archive.
   // Optimistically drop and guard the row so stale refetches cannot resurrect it. On
@@ -248,6 +250,23 @@ export function useGtdTriage() {
       case 'markRead': setRead(thread, true); break;
       case 'markUnread': setRead(thread, false); break;
       case 'toggleStar': toggleStar(thread); break;
+      case 'snooze': {
+        if (!data) break;
+        cancelAutoMarkReadFor(thread);
+        const snapshot = removeGtdThread(thread.message_id || thread.id, menu.doneStates);
+        try {
+          await api.snoozeMessage(thread.id, data);
+          addNotification({ title: t('message.snoozed.title'), body: thread.subject || t('common.noSubject') });
+          refreshCounts();
+        } catch (error) {
+          console.error('GTD snooze failed:', error.message);
+          restoreGtdThread(snapshot);
+          addNotification({ title: t('message.snoozed.failTitle'), body: t('message.snoozed.failBody') });
+        } finally {
+          scheduleGtdSectionsFetch();
+        }
+        break;
+      }
       case 'moveTo': moveRow(thread, menu.doneStates, data); break;
       case 'gtdClassify': classifyRow(thread, data); break;
       case 'gtdRemove': removeStateRow(thread, data); break;

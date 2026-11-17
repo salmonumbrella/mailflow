@@ -2,7 +2,6 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
 import { buildGtdDisplaySections, isSelectedRow } from '../utils/gtd.js';
-import { useGtdTriage } from '../hooks/useGtdTriage.js';
 import GtdTriageRow from './GtdTriageRow.jsx';
 import ContextMenu from './ContextMenu.jsx';
 
@@ -12,16 +11,18 @@ import ContextMenu from './ContextMenu.jsx';
 // driving selectedFolder into a label folder. Its rows carry the same triage
 // affordances as the inbox and sidebar rows — hover quick actions and a right-click
 // menu — via the shared useGtdTriage hook, so this surface is full triage, not browse-only.
-export default function GtdTabList() {
+export default function GtdTabList({ superhuman = false, triage }) {
   const { t } = useTranslation();
   const activeGtdTab = useStore(s => s.activeGtdTab);
   const gtdSections = useStore(s => s.gtdSections);
   const selectedMessageId = useStore(s => s.selectedMessageId);
+  const listFocusedMessageId = useStore(s => s.listFocusedMessageId);
+  const showMessagePreviews = useStore(s => s.showMessagePreviews);
   const selectedMid = useStore(selectSelectedMessageMid);
   const selectedAcct = useStore(selectSelectedMessageAccountId);
   const hoverQuickActions = useStore(s => s.hoverQuickActions);
 
-  const { contextMenu, setContextMenu, handleGtdAction, openRow, rowActions } = useGtdTriage();
+  const { contextMenu, setContextMenu, handleGtdAction, openRow, rowActions } = triage;
 
   const section = buildGtdDisplaySections(gtdSections).find(s => s.key === activeGtdTab);
   const threads = section?.threads || [];
@@ -43,8 +44,10 @@ export default function GtdTabList() {
           key={thread.id ?? thread.message_id}
           thread={thread}
           sectionKey={activeGtdTab}
-          variant="list"
-          selected={isSelectedRow(thread, selectedMessageId, selectedMid, selectedAcct)}
+          variant={superhuman ? "superhuman" : "list"}
+          selected={superhuman && !selectedMessageId ? thread.id === listFocusedMessageId : isSelectedRow(thread, selectedMessageId, selectedMid, selectedAcct)}
+          onHighlight={superhuman ? id => useStore.setState({ listFocusedMessageId: id }) : undefined}
+          showMessagePreviews={showMessagePreviews}
           onOpen={() => openRow(thread)}
           rowActions={rowActions}
           hoverQuickActions={hoverQuickActions}
@@ -61,7 +64,9 @@ export default function GtdTabList() {
           y={contextMenu.y}
           message={contextMenu.message}
           defaultMoveView={contextMenu.defaultMoveView}
+          defaultSnoozeView={contextMenu.defaultSnoozeView}
           variant="gtdSidebar"
+          keyboardNavigation={superhuman}
           onClose={() => setContextMenu(null)}
           onAction={(action, data) => handleGtdAction(action, contextMenu, data)}
         />,

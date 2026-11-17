@@ -4,9 +4,11 @@ Superhuman is an additional frontend layout for MailFlow, inspired by `R44VC0RP/
 
 ## Enable it
 
-Choose **Settings → Appearance → Layout → Superhuman**, or select it from the message list's layout control. The optional **Superhuman** color theme is a separate choice; changing the layout does not replace your selected theme. Existing layouts and the mobile mail interface remain available.
+Choose **Settings → Appearance → Layout → Superhuman**, or select it from the message list's layout control. The selected MailFlow palette and typography remain authoritative; changing the layout does not replace your selected theme. Existing layouts and the mobile mail interface remain available.
 
-The desktop layout includes a compact navigation rail, account/folder drawer, dense message rows, native inbox-category tabs, full-width reading, a contextual command palette and keyboard hints. Recently viewed mail is session-only and is cleared when the workspace is left, locked or signed out.
+The desktop layout includes a compact navigation rail, account/folder drawer, dense message rows, native inbox-category tabs, full-width reading, a contextual command palette and keyboard hints. With GTD enabled, its tabs lead the scrollable header before category splits, and its lists keep the dense rows and native triage actions. Recently viewed appears as a collapsible section inside the GTD sidebar. Recently viewed mail is session-only and is cleared when the workspace is left, locked or signed out.
+
+Replies, reply all, forwards and new messages reuse MailFlow’s `ComposeModal`, including scheduling, attachments and minimize/restore. The native reader keeps its header card, remote-image permissions and per-message dark-body toggle.
 
 ## Existing native actions
 
@@ -31,7 +33,9 @@ cd frontend
 npm ci
 npm run build
 cd ..
-node scripts/superhuman-layout-fixture.mjs --port 4173
+node scripts/superhuman-layout-fixture.mjs --port 4173 --layout superhuman
+# Exercise GTD, the remote-image banner and a light palette:
+node scripts/superhuman-layout-fixture.mjs --port 4174 --layout superhuman --gtd --theme light
 ```
 
 The fixture binds loopback, starts with fictional `.example` accounts and rejects delivery, scheduling, AI and unsupported integration requests. It is test infrastructure, not a replacement backend. Native provider delivery, live account authorization and deployment require separate qualification.

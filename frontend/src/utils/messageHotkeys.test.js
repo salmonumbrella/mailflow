@@ -72,3 +72,33 @@ describe('Superhuman focused list target', () => {
     }
   });
 });
+
+
+describe('Superhuman GTD focused list target', () => {
+  it('targets only the active visible GTD section and keeps inbox/search/layout gates', () => {
+    const previousWindow = globalThis.window;
+    globalThis.window = { innerWidth: 1200 };
+    try {
+      const inbox = { id: 'inbox', account_id: 'acct' };
+      const todo = { id: 'todo', account_id: 'acct' };
+      const waiting = { id: 'waiting', account_id: 'acct' };
+      const state = { layout: 'superhuman', selectedFolder: 'INBOX', selectedAccountId: 'acct',
+        enabledPlugins: ['gtd'], accounts: [{ id: 'acct', gtd_enabled: true }],
+        activeGtdTab: 'todo', listFocusedMessageId: todo.id, messages: [inbox],
+        gtdSections: { todo: { threads: [todo] }, watch: { threads: [waiting] } } };
+      assert.equal(hotkeys.focusedListMessage(state), todo);
+      assert.equal(selectedMessage(state), todo);
+      assert.equal(hotkeys.focusedListMessage({ ...state, activeGtdTab: 'waiting', listFocusedMessageId: waiting.id })?.id, waiting.id);
+      assert.equal(hotkeys.focusedListMessage({ ...state, listFocusedMessageId: inbox.id }), null, 'hidden inbox cannot own actions');
+      assert.equal(hotkeys.focusedListMessage({ ...state, gtdSections: {} }), null);
+      for (const override of [{ activeGtdTab: null }, { enabledPlugins: [] }, { accounts: [{ id: 'acct', gtd_enabled: false }] },
+        { selectedFolder: 'Archive' }, { searchQuery: 'q', searchResults: [inbox] }]) {
+        assert.equal(hotkeys.focusedListMessage({ ...state, ...override, listFocusedMessageId: inbox.id }), inbox);
+      }
+      assert.equal(hotkeys.focusedListMessage({ ...state, layout: 'comfortable' }), null);
+    } finally {
+      if (previousWindow === undefined) delete globalThis.window;
+      else globalThis.window = previousWindow;
+    }
+  });
+});

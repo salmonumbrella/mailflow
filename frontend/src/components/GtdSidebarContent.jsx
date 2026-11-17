@@ -12,6 +12,7 @@ import GtdTriageRow from './GtdTriageRow.jsx';
 import GtdZeroPet from './GtdZeroPet.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import RightSidebar from './RightSidebar.jsx';
+import { SuperhumanRecent } from './SuperhumanShell.jsx';
 
 // Section key -> the state color/chip-bg used for its header, count chip, and the
 // row's left border. Waiting rows override per gtdKind (watch/delegated).
@@ -19,6 +20,7 @@ const SECTION_STATE = { todo: 'todo', waiting: 'watch', reference: 'reference', 
 
 export default function GtdSidebarContent({ onCollapse, toggleHint }) {
   const { t } = useTranslation();
+  const layout = useStore(s => s.layout);
   const gtdSections = useStore(s => s.gtdSections);
   const gtdCollapsedSections = useStore(s => s.gtdCollapsedSections);
   const toggleGtdSection = useStore(s => s.toggleGtdSection);
@@ -79,6 +81,8 @@ export default function GtdSidebarContent({ onCollapse, toggleHint }) {
           />
         ))
       )}
+
+      {layout === 'superhuman' && <SuperhumanRecent embedded />}
 
       {/* Portal to body: the sidebar's own wrapper carries a translateX transform (the
           collapse slide), which would otherwise capture the menu's position:fixed. */}

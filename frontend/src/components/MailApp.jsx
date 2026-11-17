@@ -21,7 +21,7 @@ import { applyMarkRead } from '../utils/markRead.js';
 import { buildKeyMap, resolveShortcutAction, shortcutActionText, getEffectiveShortcuts, getGroupedActions, parseModKey, modLabel, SPECIAL_KEYS, SPECIAL_KEY_LABELS } from '../utils/defaultShortcuts.js';
 import Sidebar from './Sidebar.jsx';
 import { accountForShortcut, runAccountShortcut } from '../utils/accountShortcuts.js';
-import { SuperhumanRail, SuperhumanRecent, SuperhumanFooter, SuperhumanFolderDrawer } from './SuperhumanShell.jsx';
+import { SuperhumanRail, SuperhumanRecent, SuperhumanRecentSession, SuperhumanFooter, SuperhumanFolderDrawer } from './SuperhumanShell.jsx';
 import MessageList from './MessageList.jsx';
 import ReadingPane from './ReadingPane.jsx';
 import NotificationToasts from './NotificationToasts.jsx';
@@ -883,6 +883,7 @@ export default function MailApp() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
+    <SuperhumanRecentSession>
     <div className={superhuman ? 'superhuman-shell' : undefined} data-mailflow-layout={layout} style={{
       width: '100vw', height: 'var(--app-height, 100svh)',
       overflow: 'hidden', background: 'var(--bg-primary)',
@@ -1096,6 +1097,7 @@ export default function MailApp() {
       )}
     </div>
     </div>
+    </SuperhumanRecentSession>
   );
 }
 

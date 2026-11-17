@@ -8,8 +8,8 @@
 .superhuman-rail-button[aria-current="page"] { color: var(--text-primary); background: var(--bg-elevated); box-shadow: inset 2px 0 var(--accent); }
 .superhuman-brand { border-radius: 50%; color: var(--accent); background: var(--accent-glow); }
 .superhuman-shell button:focus-visible, .superhuman-folder-drawer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.superhuman-folder-backdrop { position: absolute; inset: 0 0 0 48px; z-index: 39; background: var(--overlay-scrim, rgba(0,0,0,.25)); border: 0; padding: 0; }
-.superhuman-folder-drawer { position: absolute; top: 0; bottom: 0; left: 48px; z-index: 40; display: flex; box-shadow: 12px 0 35px rgba(0,0,0,.2); }
+.superhuman-folder-backdrop { position: absolute; inset: 0 0 0 48px; z-index: 39; background: var(--overlay-scrim); border: 0; padding: 0; }
+.superhuman-folder-drawer { position: absolute; top: 0; bottom: 0; left: 48px; z-index: 40; display: flex; box-shadow: var(--shadow-drawer); }
 .superhuman-content { min-height: 0; }
 .superhuman-recent { display: flex; flex-direction: column; height: 100%; padding: 25px 22px 16px; background: var(--bg-secondary); border-left: 1px solid var(--border-subtle); overflow-y: auto; }
 .superhuman-recent-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -36,8 +36,10 @@
    remains inside its existing sandboxed renderer and keeps the user's mail colors. */
 .superhuman-reader .mailflow-reader-scroll { scrollbar-gutter: stable; }
 .superhuman-reader .mailflow-reader-scroll > div { max-width: 840px; margin-inline: auto; width: 100%; box-sizing: border-box; }
-.superhuman-reader .msg-card { background: transparent !important; border-radius: 0 !important; box-shadow: none !important; border-inline: 0 !important; }
-.superhuman-reader .msg-card > div:first-child { font-weight: 400 !important; }
 .superhuman-shell .compose-window { background: var(--bg-primary) !important; border-radius: 8px !important; }
 .superhuman-shell .compose-window input:not([type="checkbox"]) { background: transparent !important; }
 .superhuman-folder-drawer [data-mailbox-row]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.superhuman-recent--embedded { height: auto; overflow: visible; flex-shrink: 0; padding: 10px 14px 16px; border-left: 0; border-bottom: 1px solid var(--border-subtle); }
+.superhuman-recent-toggle { display: flex; align-items: center; gap: 7px; width: 100%; border: 0; padding: 0; background: transparent; color: var(--text-secondary); cursor: pointer; font: inherit; font-size: 11px; font-weight: 700; text-align: left; text-transform: uppercase; letter-spacing: .09em; }
+.superhuman-recent--embedded .superhuman-session-label { margin-top: 14px; }

@@ -256,3 +256,65 @@ test('drawer activates only its arrow-focused account container, preserving nest
   assert.deepEqual([selected, closed], [2, 2]);
   assert.equal(row.hasAttribute('role'), false, 'the account container does not nest button roles');
 });
+
+
+test('Superhuman GTD sidebar embeds collapsible recent history without replacing triage sections', async () => {
+  const GtdSidebarContent = (await import('./GtdSidebarContent.jsx')).default;
+  await update({ gtdSections: { todo: { threads: [], total: 0 }, waiting: { threads: [], total: 0 }, reference: { threads: [], total: 0 }, someday: { threads: [], total: 0 } } });
+  await render(GtdSidebarContent, { onCollapse() {} });
+  const toggle = document.querySelector('button[aria-label="Recently viewed"]');
+  assert.ok(toggle, 'recent history is available inside GTD');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  await update({ selectedMessageId: MESSAGE.id });
+  assert.match(document.querySelector('.superhuman-recent').textContent, /Opened message/);
+  assert.match(document.querySelector('.superhuman-recent').parentElement.textContent, /gtd.title/, 'inside native GTD sidebar');
+  await click(toggle);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(document.querySelector('.superhuman-recent-message'), null);
+  await update({ selectedMessageId: null });
+  await update({ messages: [MESSAGE, { ...MESSAGE, id: 'm2', subject: 'Opened while collapsed' }], selectedMessageId: 'm2' });
+  await click(toggle);
+  assert.match(document.querySelector('.superhuman-recent').textContent, /Opened while collapsed/);
+  await update({ layout: 'comfortable' });
+  assert.equal(byLabel('Recently viewed'), null, 'other layouts keep the existing sidebar');
+});
+
+
+test('a pending recent lookup yields to compose, settings, lock and GTD navigation', async () => {
+  for (const changed of [{ composing: true, composeSession: 1 }, { composing: false, composeSession: 1 },
+    { showAdmin: true }, { showAdmin: false, adminTab: 'appearance' }, { isLocked: true }, { activeGtdTab: 'todo' }]) {
+    await update({ ...useStore.getInitialState(), user: { id: 'user-a' }, accounts: [ACCOUNT], layout: 'superhuman',
+      selectedAccountId: 'a', selectedFolder: 'INBOX', messages: [MESSAGE], markReadBehavior: 'manual' });
+    await render(SuperhumanRecent);
+    await update({ selectedMessageId: MESSAGE.id });
+    await update({ selectedMessageId: null, messages: [] });
+    let resolve;
+    api.resolveMessage = () => new Promise(done => { resolve = done; });
+    await click(document.querySelector('.superhuman-recent-message'));
+    await update(changed);
+    await React.act(async () => resolve({ ...MESSAGE, folder: 'Archive' }));
+    assert.equal(useStore.getState().selectedMessageId, null, JSON.stringify(changed));
+    assert.equal(useStore.getState().selectedFolder, 'INBOX');
+  }
+});
+
+
+test('the Superhuman history session survives swapping GTD and standalone sidebars and clears on lock', async () => {
+  const { SuperhumanRecentSession } = await import('./SuperhumanShell.jsx');
+  const GtdSidebarContent = (await import('./GtdSidebarContent.jsx')).default;
+  assert.equal(typeof SuperhumanRecentSession, 'function');
+  await render(SuperhumanRecentSession, { children: React.createElement(SuperhumanRecent) });
+  await update({ selectedMessageId: MESSAGE.id });
+  await update({ selectedMessageId: null });
+  await render(SuperhumanRecentSession, { children: React.createElement(GtdSidebarContent, { onCollapse() {} }) });
+  assert.match(document.querySelector('.superhuman-recent').textContent, /Opened message/);
+  await render(SuperhumanRecentSession, { children: React.createElement(SuperhumanRecent) });
+  assert.match(document.querySelector('.superhuman-recent').textContent, /Opened message/);
+  await update({ isLocked: true });
+  assert.equal(document.querySelector('.superhuman-recent-message'), null, 'locking clears session subjects');
+  await update({ isLocked: false, selectedMessageId: MESSAGE.id });
+  assert.ok(document.querySelector('.superhuman-recent-message'));
+  await update({ layout: 'comfortable', selectedMessageId: null });
+  await update({ layout: 'superhuman' });
+  assert.equal(document.querySelector('.superhuman-recent-message'), null, 'leaving layout clears history');
+});
