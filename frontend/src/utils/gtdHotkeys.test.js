@@ -94,3 +94,28 @@ it('suppresses Done while classification may remove the selected rail copy', asy
   await pending;
   assert.deepEqual(calls, []);
 });
+
+
+it('uses section-aware focused desktop GTD rows for classification and Done', async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { innerWidth: 1200 };
+  try {
+    const focused = { ...base, layout: 'superhuman', selectedFolder: 'INBOX', selectedAccountId: 'gtd',
+      selectedMessageId: null, listFocusedMessageId: rail.id, activeGtdTab: 'waiting' };
+    const target = resolveGtdHotkeyTarget(focused);
+    assert.equal(target?.message.id, rail.id);
+    assert.deepEqual(target?.states, ['watch', 'delegated']);
+    const calls = [];
+    await runGtdHotkey('gtdTodo', focused, { classify: (id, state) => calls.push([id, state]) });
+    await runGtdHotkey('gtdDone', focused, { doneRail: (message, states) => calls.push([message.id, states]) });
+    assert.deepEqual(calls, [[rail.id, 'todo'], [rail.id, ['watch', 'delegated']]]);
+    const main = resolveGtdHotkeyTarget({ ...focused, activeGtdTab: null, listFocusedMessageId: inbox.id });
+    assert.equal(main?.surface, 'main');
+    assert.equal(main?.message, inbox);
+    assert.equal(resolveGtdHotkeyTarget({ ...focused, layout: 'comfortable' }), null);
+    assert.equal(resolveGtdHotkeyTarget({ ...focused, enabledPlugins: [] }), null);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});

@@ -51,7 +51,7 @@ function Announcer({ notifications }) {
 }
 
 export default function NotificationToasts() {
-  const { notifications, removeNotification } = useStore();
+  const { notifications, removeNotification, layout } = useStore();
   const isMobile = useMobile();
 
   const undoable = notifications.filter(n => n.onUndo);
@@ -85,6 +85,10 @@ export default function NotificationToasts() {
           zIndex: 3000, pointerEvents: 'none',
           alignItems: 'flex-end',
         }}>
+          {/* The full-width reader hides the list, so Superhuman keeps one global undo host. */}
+          {layout === 'superhuman' && undoable.map(n => (
+            <ActionBar key={n.id} notification={n} onDismiss={() => removeNotification(n.id)} isMobile={false} />
+          ))}
           {regular.map(n => (
             <Toast key={n.id} notification={n} onDismiss={() => removeNotification(n.id)} isMobile={false} />
           ))}

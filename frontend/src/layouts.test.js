@@ -30,9 +30,21 @@ describe('normalizeLayout', () => {
 
 // #596: List first is a full-width list with no reading pane beside it.
 describe('List first', () => {
-  it('is a preset of its own, the only one marked list first', () => {
+  it('shares list-first navigation with the opt-in Superhuman workspace', () => {
     assert.equal(normalizeLayout('list'), 'list');
-    assert.deepEqual(Object.keys(LAYOUTS).filter(k => LAYOUTS[k].listFirst), ['list']);
+    assert.deepEqual(Object.keys(LAYOUTS).filter(k => LAYOUTS[k].listFirst), ['list', 'superhuman']);
     assert.equal(LAYOUTS.list.listWidth, null, 'no fixed list width: the list takes the content area');
+  });
+});
+
+
+describe('Superhuman workspace', () => {
+  it('is an opt-in compact list-first layout without a fixed list width', () => {
+    assert.notEqual(DEFAULT_LAYOUT, 'superhuman');
+    assert.equal(normalizeLayout('superhuman'), 'superhuman');
+    assert.equal(LAYOUTS.superhuman.listFirst, true);
+    assert.equal(LAYOUTS.superhuman.listWidth, null);
+    assert.equal(LAYOUTS.superhuman.direction, 'row');
+    assert.ok(LAYOUTS.superhuman.rowPy < LAYOUTS.list.rowPy);
   });
 });

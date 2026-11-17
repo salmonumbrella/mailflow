@@ -1519,3 +1519,58 @@ describe('List first back bar', () => {
     assert.equal(backButton(), undefined);
   });
 });
+
+test('Superhuman reader retains blocked-image actions and dark-body toggle with GTD off and on', async () => {
+  const { bodyCache } = await import('../utils/bodyCache.js');
+  await import('../plugins/gtd/index.jsx');
+  const { patchGtdMetadata, clearGtdMetadata } = await import('../plugins/gtd/metadataStore.js');
+  const previous = api.getMessageBody;
+  const original = useStore.getState();
+  const container = document.createElement('div');
+  container.className = 'superhuman-shell superhuman-reader';
+  document.body.appendChild(container);
+  const reader = createRoot(container);
+  try {
+    for (const gtd of [false, true]) {
+      for (const theme of ['light', 'dark']) {
+        const message = { ...MSG_A, id: `remote-${gtd}-${theme}`, subject: 'Fictional remote image' };
+        const calls = [];
+        api.getMessageBody = async (id, remote) => {
+          calls.push({ id, remote });
+          return { html: remote ? '<p>Loaded fictional image</p><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">' : '<p>Image blocked</p>',
+            hasBlockedRemoteImages: !remote, remoteImagesBlocked: !remote, remoteImagesProxied: !!remote };
+        };
+        bodyCache.clear();
+        await React.act(async () => {
+          useStore.setState({ layout: 'superhuman', theme, darkEmailBodies: false, enabledPlugins: gtd ? ['gtd'] : [],
+            accounts: [{ id: 'acct', enabled: true, gtd_enabled: gtd }], messages: [message],
+            threadMessages: {}, searchQuery: '', selectedMessageId: message.id });
+          if (gtd) patchGtdMetadata(message, 'todo');
+          reader.render(React.createElement(MessagePane));
+        });
+        assert.ok(container.textContent.includes('message.remoteImagesBlocked'));
+        const button = key => [...container.querySelectorAll('button')].find(node => node.textContent === key || node.title === key);
+        assert.ok(button('message.allowSender'), 'allow sender action remains visible');
+        assert.ok(button('message.allowDomain'), 'allow domain action remains visible');
+        assert.equal(!!container.querySelector('[aria-label="gtd.state.todo"]'), gtd, 'native GTD header slot');
+        if (theme === 'dark') {
+          const toggle = button('message.showDark');
+          assert.ok(toggle, 'per-message dark body toggle remains available');
+          await React.act(async () => toggle.click());
+          assert.ok(button('message.showOriginal'), 'toggle switches to the dark body');
+          await React.act(async () => button('message.showOriginal').click());
+          assert.ok(button('message.showDark'), 'toggle restores original body');
+        }
+        await React.act(async () => button('message.loadImages').click());
+        assert.ok(calls.some(call => call.id === message.id && call.remote === true), 'Load images requests permitted body');
+        assert.ok(!container.textContent.includes('message.remoteImagesBlocked'), 'banner clears after load');
+        assert.match(container.querySelector('iframe').getAttribute('srcdoc'), /Loaded fictional image/);
+      }
+    }
+  } finally {
+    api.getMessageBody = previous;
+    bodyCache.clear();
+    await React.act(async () => { reader.unmount(); clearGtdMetadata(); useStore.setState(original); });
+    container.remove();
+  }
+});

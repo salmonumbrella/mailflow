@@ -1,4 +1,5 @@
-import { resolveRowDisplay } from '../utils/gtd.js';
+import SuperhumanMessageRow from './SuperhumanMessageRow.jsx';
+import { resolveRowDisplay, agingLabel } from '../utils/gtd.js';
 import GtdEntryRow from './GtdEntryRow.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
 import { rememberGtdRailSelection } from '../utils/gtdHotkeys.js';
@@ -11,11 +12,11 @@ import { registerHoveredGtdRow } from '../utils/gtdHoveredRow.js';
 // inbox message list (GtdTabList, variant="list"). `variant` is passed straight through
 // to GtdEntryRow to pick its size table; every action here stays section-scoped via
 // doneStates so "done"/"move"/"delete" only touch the section the row belongs to.
-export default function GtdTriageRow({ thread, sectionKey, variant, selected, onOpen, rowActions, hoverQuickActions = true, t }) {
+export default function GtdTriageRow({ thread, sectionKey, variant, selected, onOpen, rowActions, hoverQuickActions = true, t, onHighlight, showMessagePreviews = true }) {
   const isWaiting = sectionKey === 'waiting';
   // The label states this row's "done" strips: a Waiting row clears its own kinds
   // (leaving GTD labels in other sections alone); other sections clear their own state.
-  const { kinds } = resolveRowDisplay(thread, sectionKey);
+  const { kinds, unread, sender, days, stale } = resolveRowDisplay(thread, sectionKey);
   const doneStates = isWaiting ? kinds : [sectionKey];
 
   // Open the shared context menu carrying this row's section-scoped doneStates, so its
@@ -23,13 +24,30 @@ export default function GtdTriageRow({ thread, sectionKey, variant, selected, on
   const openMenuAt = (x, y, defaultMoveView = false) =>
     rowActions.openMenu({ x, y, message: thread, doneStates, defaultMoveView });
 
-  // The shared entry row plus this surface's triage affordances: a right-click menu and the
-  // hover action cluster (same buttons the inbox rows get). Both stay SECTION-SCOPED via
-  // doneStates, and GTD rows only render for GTD accounts, so the "done" checkmark always
-  // shows. `hoverQuickActions` gates ONLY the cluster (mirroring MessageList, where the
-  // preference hides the hover buttons but never the context menu): when it's off we omit
-  // renderHoverActions entirely, so GtdEntryRow won't even track hover — the right-click
-  // menu stays live regardless.
+  const open = () => { rememberGtdRailSelection(thread, sectionKey); onOpen(); };
+  const contextMenu = e => { e.preventDefault(); openMenuAt(e.clientX, e.clientY); };
+  const renderHoverActions = () => (
+    <RowHoverActions
+      message={thread}
+      isRead={!unread}
+      background="var(--bg-tertiary)"
+      onMarkRead={(e, m) => { e.stopPropagation(); rowActions.setRead(m, !m.is_read); }}
+      onStar={(e, m) => { e.stopPropagation(); rowActions.toggleStar(m); }}
+      onDelete={(e, m) => { e.stopPropagation(); rowActions.deleteRow(m, doneStates); }}
+      onMove={e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); openMenuAt(r.left, r.bottom + 4, true); }}
+      rowActionCtx={{ message: thread, done: e => { e.stopPropagation(); rowActions.done(thread, doneStates); } }}
+    />
+  );
+
+  if (variant === 'superhuman') return <SuperhumanMessageRow
+    message={{ ...thread, from_name: sender, is_read: !unread, snippet: thread.gist || thread.snippet }}
+    selected={selected} onSelect={open} onHighlight={onHighlight} onContextMenu={contextMenu}
+    onStar={(e) => { e.stopPropagation(); rowActions.toggleStar(thread); }}
+    showMessagePreviews={showMessagePreviews} hoverQuickActions={hoverQuickActions}
+    renderHoverActions={renderHoverActions}
+    rowMeta={isWaiting && days != null ? <span className="sh-gtd-aging" data-stale={stale}>{agingLabel(days)}</span> : null}
+  />;
+
   return (
     <GtdEntryRow
       thread={thread}
@@ -37,8 +55,8 @@ export default function GtdTriageRow({ thread, sectionKey, variant, selected, on
       variant={variant}
       selected={selected}
       t={t}
-      onClick={() => { rememberGtdRailSelection(thread, sectionKey); onOpen(); }}
-      onContextMenu={e => { e.preventDefault(); openMenuAt(e.clientX, e.clientY); }}
+      onClick={open}
+      onContextMenu={contextMenu}
       onHoverTargetEnter={variant === 'sidebar' ? () => registerHoveredGtdRow({
         message: thread, sectionKey,
         classify: (message, state) => rowActions.classifyRow(message, state),
@@ -46,18 +64,7 @@ export default function GtdTriageRow({ thread, sectionKey, variant, selected, on
         // remove the label(s) represented by this sidebar row.
         archive: (message, states) => rowActions.done(message, states),
       }) : undefined}
-      renderHoverActions={hoverQuickActions ? () => (
-        <RowHoverActions
-          message={thread}
-          isRead={!!thread.is_read}
-          background="var(--bg-tertiary)"
-          onMarkRead={(e, m) => { e.stopPropagation(); rowActions.setRead(m, !m.is_read); }}
-          onStar={(e, m) => { e.stopPropagation(); rowActions.toggleStar(m); }}
-          onDelete={(e, m) => { e.stopPropagation(); rowActions.deleteRow(m, doneStates); }}
-          onMove={e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); openMenuAt(r.left, r.bottom + 4, true); }}
-          rowActionCtx={{ message: thread, done: (e) => { e.stopPropagation(); rowActions.done(thread, doneStates); } }}
-        />
-      ) : undefined}
+      renderHoverActions={hoverQuickActions ? renderHoverActions : undefined}
     />
   );
 }

@@ -1,7 +1,9 @@
+import { buildGtdDisplaySections, gtdActiveForContext } from './gtd.js';
+
 // Resolve the selected row across the ordinary list, search, deep-link stash,
 // and GTD rail. GTD copies may not exist in the current mailbox's messages.
 export function selectedMessage(state) {
-  const id = state?.selectedMessageId ?? topOpenMessageWindow(state)?.messageId;
+  const id = state?.selectedMessageId ?? topOpenMessageWindow(state)?.messageId ?? focusedListMessage(state)?.id;
   if (id == null) return null;
   const pool = state.searchQuery?.trim() ? state.searchResults : state.messages;
   return pool?.find(message => message.id === id)
@@ -31,4 +33,18 @@ export function markMessageUnread(message, { cancel, update, incrementUnread, de
     adjustCategoryCount?.(message.category, -1);
   });
   return true;
+}
+
+// List focus is not a reader selection: moving through the inbox must not fetch a body or mark
+// mail read. Ignore it outside this desktop layout and whenever a reader/window owns actions.
+export function focusedListMessage(state) {
+  if (state?.layout !== 'superhuman' || state.selectedMessageId || topOpenMessageWindow(state)) return null;
+  if (typeof window === 'undefined' || window.innerWidth < 768) return null;
+  if (state.showContacts || state.showAdmin || state.composing) return null;
+  const gtdVisible = state.activeGtdTab && state.selectedFolder === 'INBOX' && !state.searchQuery?.trim()
+    && gtdActiveForContext(state.accounts, state.selectedAccountId, state.enabledPlugins?.includes('gtd'));
+  const pool = gtdVisible
+    ? buildGtdDisplaySections(state.gtdSections).find(section => section.key === state.activeGtdTab)?.threads
+    : state.searchQuery?.trim() ? state.searchResults : state.messages;
+  return pool?.find(message => message.id === state.listFocusedMessageId) ?? null;
 }

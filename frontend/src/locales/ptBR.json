@@ -425,7 +425,8 @@
       "title": "Adiado até {{when}}",
       "failTitle": "Não foi possível alterar o horário",
       "failBody": "O horário anterior foi mantido. Tente novamente."
-    }
+    },
+    "attachments": "Anexos"
   },
   "messageList": {
     "replyDraftChanged": "O rascunho de resposta mudou. Tente abri-lo novamente.",
@@ -571,6 +572,10 @@
       "list": {
         "label": "Lista primeiro",
         "description": "Lista em largura total; a mensagem abre sozinha"
+      },
+      "superhuman": {
+        "label": "Superhuman",
+        "description": "Lista compacta, navegação estreita e leitura em largura total"
       }
     },
     "snoozedUntil": "Adiado até {{when}}",
@@ -593,7 +598,11 @@
     "categoryCountTitle": "Mensagens: {{total}} · Não lidas: {{unread}}",
     "emptyCategory": "Nada em {{category}}",
     "emptyCategoryOthers": "As outras categorias ainda têm e-mails.",
-    "emptyCategoryNone": "A caixa de entrada está vazia."
+    "emptyCategoryNone": "A caixa de entrada está vazia.",
+    "loadFailed": "Não foi possível carregar as mensagens.",
+    "categoriesLabel": "Categorias da caixa de entrada",
+    "listOptions": "Opções da lista",
+    "openThreadMessageHint": "Pressione Enter para abrir esta mensagem antes de usar os atalhos de mensagem."
   },
   "lockScreen": {
     "subtitle": "Digite seu PIN para desbloquear",
@@ -813,7 +822,9 @@
       "nextWeek": "Próxima semana",
       "custom": "Personalizado...",
       "change": "Alterar horário",
-      "unsnooze": "Cancelar adiamento"
+      "unsnooze": "Cancelar adiamento",
+      "date": "Data para adiar",
+      "time": "Horário para adiar"
     },
     "categorize": "Categorizar como…",
     "categoryAlwaysSender": "Sempre para este remetente",
@@ -863,8 +874,15 @@
       "settings": "Abrir Configurações",
       "themes": "Abrir Temas",
       "switchTheme": "Mudar para o tema {{theme}}",
-      "accountInbox": "{{name}} — Caixa de entrada"
-    }
+      "accountInbox": "{{name}} — Caixa de entrada",
+      "switchLayout": "Usar o layout {{layout}}"
+    },
+    "error": "Não foi possível executar o comando",
+    "superhumanPlaceholder": "O que você gostaria de fazer?",
+    "title": "Paleta de comandos",
+    "superhumanTitle": "Comandos Superhuman",
+    "searchLabel": "Buscar comandos",
+    "results": "Comandos"
   },
   "shortcuts": {
     "title": "Atalhos de teclado",
@@ -999,7 +1017,43 @@
       "toggleRightSidebar": {
         "label": "Alternar barra lateral direita",
         "description": "Ocultar ou mostrar a barra lateral direita"
+      },
+      "returnToInbox": {
+        "label": "Voltar à caixa de entrada",
+        "description": "Mover a conversa selecionada para a caixa de entrada da conta dela"
+      },
+      "openFolderDrawer": {
+        "label": "Abrir pastas",
+        "description": "Abrir as pastas; escolher com Cima/Baixo e abrir com Direita"
+      },
+      "openHighlightedMessage": {
+        "label": "Abrir conversa destacada",
+        "description": "Abrir a conversa destacada na lista"
+      },
+      "filterUnread": {
+        "label": "Filtrar não lidas",
+        "description": "Alternar mensagens não lidas na pasta atual, fora da pesquisa"
+      },
+      "filterStarred": {
+        "label": "Filtrar com estrela",
+        "description": "Alternar a pesquisa de mensagens com estrela"
+      },
+      "openOrReplyAll": {
+        "label": "Abrir ou responder a todos",
+        "description": "Abrir a conversa destacada ou responder a todos no leitor"
+      },
+      "snooze": {
+        "label": "Adiar",
+        "description": "Adiar"
+      },
+      "moveMessage": {
+        "label": "Mover para pasta",
+        "description": "Mover para pasta"
       }
+    },
+    "account": {
+      "label": "Conta {{number}}",
+      "description": "Abrir a caixa de entrada da conta {{number}}"
     }
   },
   "notifications": {
@@ -2414,5 +2468,20 @@
     "formNote": "Caixas do Gmail e do Google Workspace podem entrar com o Google em vez de usar uma senha de app.",
     "appPasswordNote": "O Gmail precisa de uma senha de app, não da sua senha normal. Ative a verificação em duas etapas da sua Conta do Google, crie uma senha de app e digite-a no campo de senha.",
     "createAppPassword": "Criar uma senha de app"
+  },
+  "superhuman": {
+    "navigation": "Navegação de e-mail",
+    "commands": "Comandos",
+    "folders": "Pastas e contas",
+    "search": "Buscar e-mails",
+    "accounts": "Gerenciar contas",
+    "shortcuts": "Atalhos de teclado",
+    "settings": "Configurações",
+    "closeFolders": "Fechar pastas",
+    "recentUnavailable": "Esta mensagem não está mais disponível. Abra a pasta dela para encontrá-la.",
+    "recentlyViewed": "Visualizados recentemente",
+    "thisSession": "Esta sessão",
+    "recentEmpty": "As mensagens que você abrir aparecerão aqui. Seu histórico fica nesta sessão.",
+    "keyboardHints": "Dicas de teclado"
   }
 }
